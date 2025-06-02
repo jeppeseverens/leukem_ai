@@ -391,7 +391,8 @@ def run_inner_cv(
     inner_cv = StratifiedKFold(n_splits=k_in, shuffle=True, random_state=42)
 
     param_combos = param_grid
-
+    n_genes_list = sorted({params["n_genes"] for params in param_combos})
+    print(n_genes_list)
     # Empty list to append results to
     all_results = []
 
@@ -419,7 +420,7 @@ def run_inner_cv(
 
             # Once per inner fold, data is preprocessed
             processed_X, y_train_inner, y_val_inner = pre_process_data(
-                param_grid["n_genes"],
+                n_genes_list,
                 X_train_outer,
                 y_train_outer,
                 train_inner_idx,
