@@ -17,7 +17,7 @@ from pathlib import Path
 
 def main():
     # Parsing
-    parser = argparse.ArgumentParser(description="Run XGBOOST or SVM cross-validation with adjustable n_jobs.")
+    parser = argparse.ArgumentParser(description="Run cross-validation with adjustable n_jobs.")
 
     # Define argument configurations
     arg_configs = {
@@ -39,6 +39,11 @@ def main():
             'type': int,
             'default': 5,
             'help': 'Number of outer folds (default: 5)'
+        },
+        'n_max_param': {
+            'type': int,
+            'default': 2,
+            'help': 'Maximum number of parameter combinations to sample (default: 2)'
         }
     }
 
@@ -150,7 +155,7 @@ def main():
     full_param_list = list(ParameterGrid(param_grid))
 
     # Downsample if needed
-    n_downsample = 4
+    n_downsample = args.n_max_param
     if len(full_param_list) > n_downsample:
         param_list = random.sample(full_param_list, k=n_downsample)
     else:
