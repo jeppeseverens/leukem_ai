@@ -6,6 +6,7 @@ import train_test, transformers, classifiers
 
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import ParameterGrid, ParameterSampler
 import datetime
 import pandas as pd
 import argparse
@@ -62,7 +63,7 @@ def main():
 
     # Load and prepare data
     print("Loading and preparing data")
-    X, y, study_labels = train_test.load_data("/Users/jsevere2/Library/CloudStorage/OneDrive-UMCUtrecht/AML/data/processed/prediction")
+    X, y, study_labels = train_test.load_data("/home/ubuntu/data")
     X, y, study_labels = train_test.filter_data(X, y, study_labels, min_n = 20)
     y, label_mapping = train_test.encode_labels(y)
 
@@ -94,13 +95,6 @@ def main():
             'C': [0.1, 1, 10, 100, 1000],  
             'gamma': ['auto', 'scale', 0.0001, 0.001, 0.01, 0.1],  
             'class_weight': ["balanced", None],
-            'probability': [True]
-        }
-        param_grid = {
-            'n_genes': [1000],
-            'C': [0.1],  
-            'gamma': ['auto', 'scale'],  
-            'class_weight': ["balanced"],
             'probability': [True]
         }
     elif args.model_type == "NN":
@@ -145,6 +139,15 @@ def main():
     else:
         raise ValueError(f"Model type {args.model_type} not supported")
 
+    # If needed downsample param_list
+    full_param_list = list(ParameterGrid(param_grid))
+
+    # Downsample if needed
+    n_downsample = 4
+    if len(full_param_list) > n_downsample:
+        param_list = list(ParameterSampler(full_param_list, n_iter=n_downsample, random_state=42))
+    else:
+        param_list = full_param_list
 
     # Define the pipeline
     pipe = Pipeline([
@@ -168,7 +171,7 @@ def main():
         print(f"Running {multi_type} strategy...")
         # Run inner cross-validation with current multiclass strategy
         df = train_test.run_inner_cv(
-            X, y, study_labels, model, param_grid, n_jobs, pipe, 
+            X, y, study_labels, model, param_list, n_jobs, pipe, 
             multi_type=multi_type, k_out=k_out, k_in=k_in
             )
         

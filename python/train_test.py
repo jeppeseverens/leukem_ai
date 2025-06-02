@@ -390,7 +390,7 @@ def run_inner_cv(
     outer_cv = StratifiedKFold(n_splits=k_out, shuffle=True, random_state=42)
     inner_cv = StratifiedKFold(n_splits=k_in, shuffle=True, random_state=42)
 
-    param_combos = list(ParameterGrid(param_grid))
+    param_combos = param_grid
 
     # Empty list to append results to
     all_results = []
@@ -514,7 +514,7 @@ def run_inner_cv_loso(
         "TCGA-LAML",
         "LEUCEGENE",
     ]
-    param_combos = list(ParameterGrid(param_grid))
+    param_combos = param_grid
 
     all_results = []
     n_genes_list = param_grid["n_genes"]
