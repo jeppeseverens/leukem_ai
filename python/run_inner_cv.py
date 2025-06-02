@@ -84,20 +84,16 @@ def main():
         model = classifiers.WeightedXGBClassifier
         param_grid = {
             'n_genes': [2000, 3000, 5000],
-            'class_weight': [True, False],
-            'max_depth': [2, 3, 4, 5],
-            'learning_rate': [0.01, 0.1, 0.3],
-            'n_estimators': [100, 200, 300],
+            'class_weight': [True],
+            'max_depth': [2, 3, 5],
+            'learning_rate': [0.05, 0.1],
+            'n_estimators': [100, 200],
             'min_child_weight': [1, 3, 5],
-            'gamma': [0, 0.1, 0.2],
-            'subsample': [0.8, 0.9, 1.0],
-            'colsample_bytree': [0.8, 0.9, 1.0],
-            'reg_alpha': [0, 0.1, 1.0],
-            'reg_lambda': [0, 1.0, 10.0]
-        }
-        param_grid = {
-            'n_genes': [1000],
-            'class_weight': [True, False]
+            'gamma': [0, 0.1],
+            'subsample': [0.8],
+            'colsample_bytree': [0.8],
+            'reg_alpha': [0, 0.1],
+            'reg_lambda': [1.0]
         }
     elif args.model_type == "SVM":
         from sklearn.svm import SVC
