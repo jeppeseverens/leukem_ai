@@ -63,7 +63,7 @@ def main():
     print(f"Using model {args.model_type} with {k_in} inner folds, {k_out} outer folds, and {n_jobs} cores")
     
     # Get the current date and time in string format
-    time = datetime.datetime.now().strftime("%Y%m%d")
+    time = datetime.datetime.now().strftime("%Y%m%d_%H%M")
 
     # Create the output directory if it doesn't exist
     output_dir = f"out/{args.model_type}/{time}"
