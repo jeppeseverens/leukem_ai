@@ -1,5 +1,9 @@
 from xgboost import XGBClassifier
 from sklearn.utils import class_weight
+
+import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  
+
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Dense, Dropout, Input, BatchNormalization
 from tensorflow.keras import regularizers
