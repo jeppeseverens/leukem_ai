@@ -11,6 +11,8 @@ import datetime
 import pandas as pd
 import argparse
 
+from pathlib import Path
+
 def main():
     # Parsing
     parser = argparse.ArgumentParser(description="Run XGBOOST or SVM cross-validation with adjustable n_jobs.")
@@ -63,7 +65,10 @@ def main():
 
     # Load and prepare data
     print("Loading and preparing data")
-    X, y, study_labels = train_test.load_data("../data")
+
+    base_path = Path(__file__).resolve().parent
+    data_path = base_path.parent / "data"
+    X, y, study_labels = train_test.load_data(data_path)
     X, y, study_labels = train_test.filter_data(X, y, study_labels, min_n = 20)
     y, label_mapping = train_test.encode_labels(y)
 
