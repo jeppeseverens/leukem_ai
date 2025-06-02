@@ -10,6 +10,7 @@ from sklearn.model_selection import ParameterGrid, ParameterSampler
 import datetime
 import pandas as pd
 import argparse
+import random
 
 from pathlib import Path
 
@@ -150,7 +151,7 @@ def main():
     # Downsample if needed
     n_downsample = 4
     if len(full_param_list) > n_downsample:
-        param_list = list(ParameterSampler(full_param_list, n_iter=n_downsample, random_state=42))
+        param_list = random.sample(full_param_list, k=n_downsample)
     else:
         param_list = full_param_list
 
