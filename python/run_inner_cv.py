@@ -63,7 +63,7 @@ def main():
 
     # Load and prepare data
     print("Loading and preparing data")
-    X, y, study_labels = train_test.load_data("/home/ubuntu/data")
+    X, y, study_labels = train_test.load_data("../data")
     X, y, study_labels = train_test.filter_data(X, y, study_labels, min_n = 20)
     y, label_mapping = train_test.encode_labels(y)
 
