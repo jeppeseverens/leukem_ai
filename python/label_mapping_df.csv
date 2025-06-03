@@ -1,0 +1,16 @@
+Label,Encoded
+AML with MDS-related cytogenetic abnormalities,0
+AML with MDS-related gene mutations,1
+AML with in-frame bZIP CEBPA,2
+AML with inv(16)/t(16;16)/CBFB::MYH11,3
+AML with mutated NPM1,4
+AML with mutated TP53,5
+AML with t(6;9)/DEK::NUP214,6
+AML with t(8;21)/RUNX1::RUNX1T1,7
+AML with t(9;11)/MLLT3::KMT2A,8
+"APL, t(15;17)/PML::RARA",9
+KMT2A::ELL,10
+KMT2A::MLLT1,11
+KMT2A::MLLT10,12
+KMT2A::MLLT4 (::AFDN),13
+NUP98::NSD1,14
