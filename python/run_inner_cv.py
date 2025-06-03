@@ -116,40 +116,30 @@ def main():
                         [800,400],
                         [400,200],
                         [200,100],
-                        [400],
-                        [200]
                         ],
             'use_batch_norm': [True, False],
-            'dropout_rate': [0.2,0.5], 
+            'dropout_rate': [0, 0.2,0.5], 
             'batch_size': [32],
-            'patience': [100],
+            'patience': [30],
             'l2_reg': [0.001, 0],
-            'validation_split': [0.2],
             'class_weight': [True, False],
-            'min_delta': [0],
-            'learning_rate': [0.0001]
-        }
-        param_grid = {
-            'n_genes': [2000],
-            'n_neurons':[
-                        [400,200,50]
-                        ],
-            'use_batch_norm': [True],
-            'dropout_rate': [0.2,0.5], 
-            'batch_size': [32],
-            'patience': [20],
-            'l2_reg': [0.001],
-            'validation_split': [0.2],
-            'class_weight': [True],
             'min_delta': [0.001],
-            'learning_rate': [0.0001]
+            'learning_rate': [0.0001],
+            'loss_function': ["standard", "focal"]
         }
     else:
         raise ValueError(f"Model type {args.model_type} not supported")
 
     # If needed downsample param_list
     full_param_list = list(ParameterGrid(param_grid))
-
+    
+    # Batch norm and dropout do not play nicely together, waste of compute
+    if args.model_type == "NN":
+        full_param_list = [
+            params for params in full_param_list
+            if not (params['use_batch_norm'] and params['dropout_rate'] > 0)
+        ]
+    
     # Downsample if needed
     n_downsample = args.n_max_param
     if len(full_param_list) > n_downsample:
@@ -157,8 +147,6 @@ def main():
     else:
         param_list = full_param_list
 
-    print(type(param_list[0]))
-    print((param_list[0]))
     # Define the pipeline
     pipe = Pipeline([
         ('DEseq2', transformers.DESeq2RatioNormalizer()),
@@ -182,7 +170,8 @@ def main():
         # Run inner cross-validation with current multiclass strategy
         df = train_test.run_inner_cv(
             X, y, study_labels, model, param_list, n_jobs, pipe, 
-            multi_type=multi_type, k_out=k_out, k_in=k_in
+            multi_type=multi_type, k_out=k_out, k_in=k_in,
+            model_type = args.model_type
             )
         
         # Convert encoded labels back to original class names

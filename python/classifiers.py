@@ -7,7 +7,7 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Dense, Dropout, Input, BatchNormalization
 from tensorflow.keras import regularizers
-from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+from tensorflow.keras.callbacks import EarlyStopping
 from tensorflow.keras.optimizers import Adam
 import tensorflow as tf
 from tensorflow.keras import backend as K
@@ -57,15 +57,16 @@ class NeuralNet:
         self.default_params = {
             'n_neurons': [12, 8, 6],
             'optimizer': 'adam',
-            'learning_rate': 0.001,
+            'learning_rate': 0,
             'dropout_rate': 0,
             'l2_reg': 0,
             'batch_size': 32,
-            'validation_split': 0.2,
             'patience': 5,
             'monitor': 'val_loss',
             'min_delta': 1e-4,
-            'use_batch_norm': True  
+            'use_batch_norm': False,
+            'loss_function': "standard"
+            
         }
         # Update defaults with provided params
         self.params = {**self.default_params, **params}
@@ -101,11 +102,10 @@ class NeuralNet:
             optimizer = self.params['optimizer']
 
         # Add class weights if enabled
-        if self.class_weight:
-            sample_weights = class_weight.compute_class_weight(class_weight='balanced', classes=np.unique(y), y=y)
-            loss = SparseCategoricalFocalLoss(gamma=2, class_weight = sample_weights)
-        else:
+        if self.params['loss_function'] == "focal":
             loss = SparseCategoricalFocalLoss(gamma=2)
+        elif self.params['loss_function'] == "standard":
+            loss = tf.keras.losses.SparseCategoricalCrossentropy()
             
         model.compile(
             loss=loss,
@@ -128,7 +128,7 @@ class NeuralNet:
                 patience=self.params['patience'],
                 min_delta=self.params['min_delta'],
                 restore_best_weights=True,
-                start_from_epoch = 0
+                start_from_epoch = 10
             )
         ]
         # Handle validation data
@@ -146,7 +146,7 @@ class NeuralNet:
         kwargs['callbacks'] = callbacks + kwargs.get('callbacks', [])
         kwargs['batch_size'] = kwargs.get('batch_size', self.params['batch_size'])
             
-        self.model.fit(X, y, epochs = epochs, **kwargs, verbose = 0)
+        self.model.fit(X, y, epochs = epochs, **kwargs, verbose = 1)
         return self
     
     def predict(self, X):

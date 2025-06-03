@@ -207,17 +207,27 @@ def evaluate_inner_fold(
     model,
     params,
     multi_type="standard",
+    model_type="any"
 ):
 
     def standard_eval():
         le = LabelEncoder()
         y_train_inner_enc = le.fit_transform(y_train_inner)
-        clf.fit(X_train_inner, y_train_inner_enc)
-
+        
+        if model_type == "NN":
+            y_val_inner_enc = le.transform(y_val_inner)
+            clf.fit(X_train_inner, y_train_inner_enc, validation_data =(X_val_inner, y_val_inner_enc))
+        else:
+            clf.fit(X_train_inner, y_train_inner_enc)
         preds_prob = clf.predict_proba(X_val_inner)
         preds = np.argmax(preds_prob, axis=1)
         preds = le.inverse_transform(preds)
         
+        if model_type == "NN":
+            history = clf.model.history.history
+            best_epoch = np.argmin(history['val_loss']) + 1  # Add 1 to match epoch count
+            params["best_epoch"] = best_epoch
+            
         return {
             "outer_fold": outer_fold,
             "inner_fold": inner_fold,
@@ -385,6 +395,7 @@ def run_inner_cv(
     multi_type="standard",
     k_out=5,
     k_in=5,
+    model_type = "any"
 ):
     # Define cv folds
     outer_cv = StratifiedKFold(n_splits=k_out, shuffle=True, random_state=42)
@@ -443,6 +454,7 @@ def run_inner_cv(
                         model,
                         params,
                         multi_type=multi_type,  # standard, OvR, OvO
+                        model_type = model_type
                     )
                 )
 
@@ -505,7 +517,8 @@ def pre_process_data_loso(
 
 
 def run_inner_cv_loso(
-    X, y, study_labels, model, param_grid, n_jobs, multi_type="standard"
+    X, y, study_labels, model, param_grid, n_jobs, multi_type="standard",
+    model_type = "any"
 ):
     # Define the studies to use as folds
     studies_as_folds = [
