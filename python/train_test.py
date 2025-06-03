@@ -489,7 +489,7 @@ def pre_process_data_loso(
     y_train_inner,
     y_val_inner,  # y values aren't strictly needed here but kept for consistency
     study_labels_inner,  # Labels corresponding to X_train_inner
-    pipe,
+    pipe
 ):
     """
     Preprocesses inner training and validation sets for different n_genes.
@@ -517,21 +517,31 @@ def pre_process_data_loso(
 
 
 def run_inner_cv_loso(
-    X, y, study_labels, model, param_grid, n_jobs, multi_type="standard",
+    X,
+    y,
+    study_labels,
+    model,
+    param_grid,
+    n_jobs,
+    pipe,
+    multi_type= "standard",
     model_type = "any"
 ):
+    
     # Define the studies to use as folds
     studies_as_folds = [
         "BEATAML1.0-COHORT",
         "AAML0531",
         "AAML1031",
+        "AAML03P1",
         "TCGA-LAML",
         "LEUCEGENE",
+        "100LUMC",
     ]
     param_combos = param_grid
 
     all_results = []
-    n_genes_list = param_grid["n_genes"]
+    n_genes_list = sorted({params["n_genes"] for params in param_combos})
     for test_study_name in studies_as_folds:
         print(
             f"\n--- Outer Loop: Holding out Study '{test_study_name}' for Testing ---"
@@ -578,7 +588,7 @@ def run_inner_cv_loso(
                     y_train_inner,
                     y_val_inner,
                     study_labels_inner,  # Pass inner training labels for pipeline fitting
-                    pipe,
+                    pipe
                 )
             )
 
@@ -597,6 +607,7 @@ def run_inner_cv_loso(
                         model,  # Classifier class
                         params,  # Current hyperparameter combination
                         multi_type=multi_type,  # Choose evaluation type: "standard", "OvR", "OvO"
+                        model_type = model_type
                     )
                 )
             # --- Execute tasks for the current inner fold in parallel ---

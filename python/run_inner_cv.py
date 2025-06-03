@@ -44,6 +44,11 @@ def main():
             'type': int,
             'default': 2,
             'help': 'Maximum number of parameter combinations to sample (default: 2)'
+        },
+        'fold_type': {
+            'type': str,
+            'default': 'CV',
+            'help': 'Type of cross-validation fold to use (default: cv)'
         }
     }
 
@@ -165,22 +170,35 @@ def main():
         multi_types = ["standard"]
     else:
         multi_types = ["standard", "OvO", "OvR"]
-    for multi_type in multi_types:
-        print(f"Running {multi_type} strategy...")
-        # Run inner cross-validation with current multiclass strategy
-        df = train_test.run_inner_cv(
-            X, y, study_labels, model, param_list, n_jobs, pipe, 
-            multi_type=multi_type, k_out=k_out, k_in=k_in,
-            model_type = args.model_type
-            )
-        
-        # Convert encoded labels back to original class names
-        df = train_test.restore_labels(df, label_mapping)
-        
-        # Save results to CSV file with model type, strategy and timestamp
-        df.to_csv(f"{output_dir}/{args.model_type}_inner_cv_{multi_type}_{time}.csv")   
-        print(f"Finished {multi_type} strategy.")
-    
+    if args.fold_type == "CV":
+        for multi_type in multi_types:
+            df = train_test.run_inner_cv(
+                X, y, study_labels, model, param_list, n_jobs, pipe, 
+                multi_type=multi_type, k_out=k_out, k_in=k_in,
+                model_type = args.model_type
+                )
+            
+            # Convert encoded labels back to original class names
+            df = train_test.restore_labels(df, label_mapping)
+            
+            # Save results to CSV file with model type, strategy and timestamp
+            df.to_csv(f"{output_dir}/{args.model_type}_inner_cv_{multi_type}_{time}.csv")   
+    elif args.fold_type == "loso":
+        for multi_type in multi_types:
+            df = train_test.run_inner_cv_loso(
+                X, y, study_labels, model, param_list, n_jobs, pipe, 
+                multi_type=multi_type,
+                model_type = args.model_type
+                )
+            
+            # Convert encoded labels back to original class names
+            df = train_test.restore_labels(df, label_mapping)
+            
+            # Save results to CSV file with model type, strategy and timestamp
+            df.to_csv(f"{output_dir}/{args.model_type}_inner_cv_loco_{multi_type}_{time}.csv")   
+    else:
+        raise ValueError(f"Fold type {args.fold_type} not supported.")
+
     print("Cross-validation process finished.")
 
 if __name__ == "__main__":
