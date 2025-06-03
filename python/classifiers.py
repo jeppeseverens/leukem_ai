@@ -146,7 +146,7 @@ class NeuralNet:
         kwargs['callbacks'] = callbacks + kwargs.get('callbacks', [])
         kwargs['batch_size'] = kwargs.get('batch_size', self.params['batch_size'])
             
-        self.model.fit(X, y, epochs = epochs, **kwargs, verbose = 1)
+        self.model.fit(X, y, epochs = epochs, **kwargs, verbose = 0)
         return self
     
     def predict(self, X):
