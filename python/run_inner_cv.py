@@ -195,7 +195,7 @@ def main():
             df = train_test.restore_labels(df, label_mapping)
             
             # Save results to CSV file with model type, strategy and timestamp
-            df.to_csv(f"{output_dir}/{args.model_type}_inner_cv_loco_{multi_type}_{time}.csv")   
+            df.to_csv(f"{output_dir}/{args.model_type}_inner_cv_loso_{multi_type}_{time}.csv")   
     else:
         raise ValueError(f"Fold type {args.fold_type} not supported.")
 
