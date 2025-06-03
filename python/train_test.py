@@ -222,6 +222,7 @@ def evaluate_inner_fold(
         preds_prob = clf.predict_proba(X_val_inner)
         preds = np.argmax(preds_prob, axis=1)
         preds = le.inverse_transform(preds)
+        y_val_inner_enc = le.inverse_transform(y_val_inner)
         
         if model_type == "NN":
             history = clf.model.history.history
@@ -236,6 +237,7 @@ def evaluate_inner_fold(
             "f1_macro": f1_score(y_val_inner, preds, average="macro"),
             "mcc": matthews_corrcoef(y_val_inner, preds),
             "kappa": cohen_kappa_score(y_val_inner, preds),
+            "y_val": y_val_inner_enc,
             "preds": preds,
             "preds_prob": preds_prob
         }
@@ -269,6 +271,7 @@ def evaluate_inner_fold(
                     "f1_binary": conditional_f1(y_val_bin, preds),
                     "mcc": matthews_corrcoef(y_val_bin, preds),
                     "kappa": cohen_kappa_score(y_val_bin, preds),
+                    "y_val": y_val_bin,
                     "preds": preds,
                     "preds_prob": preds_prob
                 }
@@ -316,6 +319,7 @@ def evaluate_inner_fold(
                     "f1_binary": conditional_f1(y_val_ij, preds),
                     "mcc": matthews_corrcoef(y_val_ij, preds),
                     "kappa": cohen_kappa_score(y_val_ij, preds),
+                    "y_val": y_val_ij,
                     "preds": preds,
                     "preds_prob": preds_prob
                 }
