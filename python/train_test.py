@@ -204,6 +204,7 @@ def evaluate_inner_fold(
     processed_X,
     y_train_inner,
     y_val_inner,
+    original_val_inner_idx,
     model,
     params,
     multi_type="standard",
@@ -239,7 +240,8 @@ def evaluate_inner_fold(
             "kappa": cohen_kappa_score(y_val_inner, preds),
             "y_val": y_val_inner_enc,
             "preds": preds,
-            "preds_prob": preds_prob
+            "preds_prob": preds_prob,
+            "sample_indices": original_val_inner_idx
         }
 
     def ovr_eval():
@@ -273,7 +275,8 @@ def evaluate_inner_fold(
                     "kappa": cohen_kappa_score(y_val_bin, preds),
                     "y_val": y_val_bin,
                     "preds": preds,
-                    "preds_prob": preds_prob
+                    "preds_prob": preds_prob,
+                    "sample_indices": original_val_inner_idx
                 }
             )
         return results
@@ -305,9 +308,12 @@ def evaluate_inner_fold(
 
             clf.fit(X_train_ij, y_train_ij)
             preds_prob = clf.predict_proba(X_val_ij)
-            preds_prob = preds_prob[:, 1]
+            pos_class_index = list(clf.classes_).index(1)
+            preds_prob = preds_prob[:, pos_class_index]
             preds = (preds_prob >= 0.5).astype(int)
 
+            ij_val_inner_idx = original_val_inner_idx[val_mask]
+            
             results.append(
                 {
                     "outer_fold": outer_fold,
@@ -321,7 +327,8 @@ def evaluate_inner_fold(
                     "kappa": cohen_kappa_score(y_val_ij, preds),
                     "y_val": y_val_ij,
                     "preds": preds,
-                    "preds_prob": preds_prob
+                    "preds_prob": preds_prob,
+                    "sample_indices": ij_val_inner_idx
                 }
             )
         return results
@@ -446,6 +453,8 @@ def run_inner_cv(
 
             inner_tasks = []
 
+            original_val_inner_idx = train_idx[val_inner_idx]
+            
             # Then, for every hyperparameter combo performance is evaluated
             for params in param_combos:
                 inner_tasks.append(
@@ -455,6 +464,7 @@ def run_inner_cv(
                         processed_X,
                         y_train_inner,
                         y_val_inner,
+                        original_val_inner_idx,
                         model,
                         params,
                         multi_type=multi_type,  # standard, OvR, OvO
