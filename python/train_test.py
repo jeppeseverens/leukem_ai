@@ -197,7 +197,6 @@ def conditional_f1(y_true, preds):
 # Main function to evaluate one set of hyperparameters for inner cross validation #
 ###################################################################################
 
-
 def evaluate_inner_fold(
     outer_fold,
     inner_fold,
@@ -224,7 +223,7 @@ def evaluate_inner_fold(
         preds = np.argmax(preds_prob, axis=1)
         preds = le.inverse_transform(preds)
         y_val_inner_enc = le.inverse_transform(y_val_inner)
-        
+                
         if model_type == "NN":
             history = clf.model.history.history
             best_epoch = np.argmin(history['val_loss']) + 1  # Add 1 to match epoch count
@@ -353,6 +352,175 @@ def evaluate_inner_fold(
 
     return eval_dispatch[multi_type]()
 
+def evaluate_outer_fold(
+    outer_fold,
+    processed_X,
+    y_train,
+    y_test,
+    test_idx,
+    model,
+    best_params_fold,
+    multi_type="standard",
+    model_type="any"
+):
+
+    def standard_eval():
+        # Select preprocessed data
+        params = best_params_fold["params"]
+        n_genes = params.pop("n_genes")
+        X_train, X_test = processed_X[n_genes]
+        
+        # Set classifier
+        clf = model(**params)
+        params["n_genes"] = n_genes
+    
+        le = LabelEncoder()
+        y_train_enc = le.fit_transform(y_train)
+        
+        if model_type == "NN":
+            y_test_enc = le.transform(y_test)
+            clf.fit(X_train, y_train_enc, validation_data =(X_test, y_test_enc))
+            y_test_enc = le.inverse_transform(y_test_enc)
+        else:
+            clf.fit(X_train, y_train_enc)
+            
+        preds_prob = clf.predict_proba(X_test)
+        preds = np.argmax(preds_prob, axis=1)
+        preds = le.inverse_transform(preds)
+
+                
+        if model_type == "NN":
+            history = clf.model.history.history
+            best_epoch = np.argmin(history['val_loss']) + 1  # Add 1 to match epoch count
+            params["best_epoch"] = best_epoch
+            
+        return {
+            "outer_fold": outer_fold,
+            "params": params,
+            "accuracy": accuracy_score(y_test_enc, preds),
+            "f1_macro": f1_score(y_test_enc, preds, average="macro"),
+            "mcc": matthews_corrcoef(y_test_enc, preds),
+            "kappa": cohen_kappa_score(y_test_enc, preds),
+            "y_val": y_test_enc,
+            "preds": preds,
+            "preds_prob": preds_prob,
+            "sample_indices": test_idx
+        }
+
+    def ovr_eval():
+        results = []
+        classes = np.unique(y_train)
+        for cl in classes:
+            # Select preprocessed data
+            params = best_params_fold["params"] # -> Select params that fit with cl
+            n_genes = params.pop("n_genes")
+            
+            # Set classifier
+            clf = model(**params)
+            params["n_genes"] = n_genes
+        
+            # Get correct data        
+            X_train, X_test = processed_X[n_genes]
+            
+            y_train_bin = [1 if yy == cl else 0 for yy in y_train]
+            y_test_bin = [1 if yy == cl else 0 for yy in y_test]
+
+            y_train_bin = np.array(y_train_bin, dtype=np.int32)
+
+            if len(np.unique(y_train_bin)) == 1:
+                continue
+
+            y_test_bin = np.array(y_test_bin, dtype=np.int32)
+
+            clf.fit(X_train, y_train_bin)
+            preds_prob = clf.predict_proba(X_test)
+            
+            pos_class_index = list(clf.model.classes_).index(1)
+            preds_prob = preds_prob[:, pos_class_index]
+            preds = (preds_prob >= 0.5).astype(int)
+
+            results.append(
+                {
+                    "outer_fold": outer_fold,
+                    "class": cl,
+                    "params": params,
+                    "accuracy": accuracy_score(y_test_bin, preds),
+                    "f1_binary": conditional_f1(y_test_bin, preds),
+                    "mcc": matthews_corrcoef(y_test_bin, preds),
+                    "kappa": cohen_kappa_score(y_test_bin, preds),
+                    "y_val": y_test_bin,
+                    "preds": preds,
+                    "preds_prob": preds_prob,
+                    "sample_indices": test_idx
+                }
+            )
+        return results
+
+    def ovo_eval():
+        results = []
+        classes = np.unique(y_train)
+        for i, j in itertools.combinations(classes, 2):
+            
+            # Select preprocessed data
+            params = best_params_fold["params"] # -> Select params that fit with classes i and j
+            n_genes = params.pop("n_genes")
+            
+            # Set classifier
+            clf = model(**params)
+            params["n_genes"] = n_genes
+        
+            # Get correct data        
+            X_train, X_test = processed_X[n_genes]
+            
+            train_mask = [(yy == i or yy == j) for yy in y_train]
+
+            if sum(train_mask) == 0:
+                continue
+
+            X_train_ij = X_train[train_mask]
+            y_train_ij = np.array(
+                [yy for yy in y_train if yy == i or yy == j], dtype=np.int32
+            )
+            y_train_ij = (y_train_ij == i).astype(np.int32)
+
+            if len(np.unique(y_train_ij)) == 1:
+                continue
+
+            clf.fit(X_train_ij, y_train_ij)
+            preds_prob = clf.predict_proba(X_test)
+            pos_class_index = list(clf.model.classes_).index(1)
+            preds_prob = preds_prob[:, pos_class_index]
+            preds = (preds_prob >= 0.5).astype(int)
+            
+            results.append(
+                {
+                    "outer_fold": outer_fold,
+                    "class_0": i,
+                    "class_1": j,
+                    "params": params,
+                    "accuracy": 0,
+                    "f1_binary": 0,
+                    "mcc": 0,
+                    "kappa": 0,
+                    "y_val": y_test,
+                    "preds": preds,
+                    "preds_prob": preds_prob,
+                    "sample_indices": test_idx
+                }
+            )
+        return results
+
+    # Dispatch table for clean logic
+    eval_dispatch = {
+        "standard": standard_eval, 
+        "OvR": ovr_eval, 
+        "OvO": ovo_eval
+        }
+
+    if multi_type not in eval_dispatch:
+        raise ValueError(f"Unsupported evaluation type: {multi_type}")
+
+    return eval_dispatch[multi_type]()
 
 ###################################################################################
 # Main functions for standard inner cross validation                              #
@@ -490,6 +658,73 @@ def run_inner_cv(
     df_parallel_results = pd.DataFrame(all_results)
     return df_parallel_results
 
+def run_outer_cv(
+    X,
+    y,
+    study_labels,
+    model,
+    pipe,
+    best_params,
+    multi_type="standard",
+    model_type = "any"
+):
+    # Define cv folds
+    outer_cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    inner_cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+
+    n_genes_list = # Pull these from best_params
+    
+    # Empty list to append results to
+    all_results = []
+
+    # Combine y and study labels so can be stratified on study and y
+    combined = [str(a) + " " + str(b) for a, b in zip(y, study_labels)]
+    
+    # Make outer fold splits
+    for outer_fold, (train_idx, test_idx) in enumerate(outer_cv.split(X, combined)):
+        print("outer_fold")
+        print(outer_fold)
+
+        # Once per outer fold, data is preprocessed
+        processed_X, y_train, y_test = pre_process_data(
+            n_genes_list,
+            X,
+            y,
+            train_idx,
+            test_idx,
+            study_labels,
+            pipe
+        )
+        
+        best_params_fold = best_params -> filter outer_fold == outer_fold
+        
+        outer_results = evaluate_outer_fold(
+                    outer_fold,
+                    processed_X,
+                    y_train,
+                    y_test,
+                    test_idx,
+                    model,
+                    best_params_fold,
+                    multi_type=multi_type,  # standard, OvR, OvO
+                    model_type = model_type
+                
+            )
+
+        # Flatten inner_results list if needed and append to all_results
+        if isinstance(outer_results[0], dict):
+            # Flat list of dictionaries
+            all_results.extend(outer_results)
+        elif isinstance(outer_results[0], list):
+            # List of lists of dictionaries
+            for res in outer_results:
+                all_results.extend(res)
+        else:
+            raise ValueError("Unexpected structure in inner_results")
+
+    # Convert to DataFrame
+    df_parallel_results = pd.DataFrame(all_results)
+    return df_parallel_results
 
 ###################################################################################
 # Main function for leave one study out (loso) inner cross validation             #
