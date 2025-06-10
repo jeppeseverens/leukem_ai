@@ -1,6 +1,6 @@
 import sys
 import os
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  
+#os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import train_test, transformers, classifiers
@@ -81,7 +81,7 @@ def main():
     base_path = Path(__file__).resolve().parent
     data_path = base_path.parent / "data"
     X, y, study_labels = train_test.load_data(data_path)
-    X, y, study_labels = train_test.filter_data(X, y, study_labels, min_n = 20)
+    X, y, study_labels = train_test.filter_data(X, y, study_labels, min_n = 10)
     y, label_mapping = train_test.encode_labels(y)
 
     # Define the model and parameter grid   
@@ -110,28 +110,28 @@ def main():
             'class_weight': ["balanced", None],
             'probability': [True]
         }
-    elif args.model_type == "NN":
-        model = classifiers.NeuralNet
-        param_grid = {
-            'n_genes': [2000, 3000, 5000],
-            'n_neurons':[
-                        [800,400,100],
-                        [400,200,50],
-                        [200,100,25],
-                        [800,400],
-                        [400,200],
-                        [200,100]
-                        ],
-            'use_batch_norm': [True, False],
-            'dropout_rate': [0, 0.2,0.5], 
-            'batch_size': [32],
-            'patience': [30],
-            'l2_reg': [0.001, 0],
-            'class_weight': [True, False],
-            'min_delta': [0.001],
-            'learning_rate': [0.0001],
-            'loss_function': ["standard", "focal"]
-        }
+    #elif args.model_type == "NN":
+    #    model = classifiers.NeuralNet
+    #    param_grid = {
+    #        'n_genes': [2000, 3000, 5000],
+    #        'n_neurons':[
+    #                    [800,400,100],
+    #                    [400,200,50],
+    #                    [200,100,25],
+    #                    [800,400],
+    #                    [400,200],
+    #                    [200,100]
+    #                    ],
+    #        'use_batch_norm': [True, False],
+    #        'dropout_rate': [0, 0.2,0.5], 
+    #        'batch_size': [32],
+    #        'patience': [30],
+    #        'l2_reg': [0.001, 0],
+    #        'class_weight': [True, False],
+    #        'min_delta': [0.001],
+    #        'learning_rate': [0.0001],
+    #        'loss_function': ["standard", "focal"]
+    #    }
     else:
         raise ValueError(f"Model type {args.model_type} not supported")
 

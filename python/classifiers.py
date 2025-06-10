@@ -2,24 +2,23 @@ from xgboost import XGBClassifier
 from sklearn.utils import class_weight
 
 import os
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  
+#os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  
 
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dense, Dropout, Input, BatchNormalization
-from tensorflow.keras import regularizers
-from tensorflow.keras.callbacks import EarlyStopping
-from tensorflow.keras.optimizers import Adam
-import tensorflow as tf
-from tensorflow.keras import backend as K
+#from tensorflow.keras.models import Sequential
+#from tensorflow.keras.layers import Dense, Dropout, Input, BatchNormalization
+#from tensorflow.keras import regularizers
+#from tensorflow.keras.callbacks import EarlyStopping
+#from tensorflow.keras.optimizers import Adam
+#import tensorflow as tf
+#from tensorflow.keras import backend as K
 
 import numpy as np
-from focal_loss import SparseCategoricalFocalLoss
+#from focal_loss import SparseCategoricalFocalLoss
 class WeightedXGBClassifier:
     def __init__(self, class_weight=False, **xgb_params):
         self.class_weight = class_weight
         self.xgb_params = xgb_params
         self.model = XGBClassifier(**xgb_params)
-
     def fit(self, X, y):
         if self.class_weight:
             sample_weights = class_weight.compute_sample_weight(class_weight='balanced', y=y)
@@ -27,6 +26,7 @@ class WeightedXGBClassifier:
             sample_weights = None
 
         self.model.fit(X, y, sample_weight=sample_weights)
+        self.classes_ = self.model.classes_
         return self
 
     def predict(self, X):
@@ -50,7 +50,7 @@ class WeightedXGBClassifier:
         self.model.set_params(**params)
         return self
     
-
+'''
 class NeuralNet:
     def __init__(self, class_weight=False, **params):
         # Default hyperparameters
@@ -158,3 +158,4 @@ class NeuralNet:
         if self.model is None:
             raise ValueError("Model has not been fitted yet. Call fit first.")
         return self.model.predict(X, verbose = 0)
+''' 

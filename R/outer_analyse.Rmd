@@ -1,0 +1,31 @@
+```{r}
+# Load the analysis script
+source("outer_cv_analysis.R")
+```
+
+
+
+```{r}
+xgb_results <- run_outer_cv_analysis("XGBOOST", "CV")
+```
+```{r}
+# Run analysis for SVM  
+svm_results <- run_outer_cv_analysis("SVM", "CV")
+```
+
+```{r}
+true_values <- as.character(svm_results$ovr$true_values)
+preds <- as.character(svm_results$ovr$predictions)
+
+true_values[grepl("KMT2A", true_values) & !grepl("MLLT3", true_values)] <- "Other KMT2A"
+preds[grepl("KMT2A", preds) & !grepl("MLLT3", preds)] <- "Other KMT2A"
+
+levels_labels <- unique(true_values, preds)
+
+true_values <- factor(true_values)
+preds <- factor(preds)
+
+res <- caret::confusionMatrix(true_values, preds)
+res$overall
+```
+
