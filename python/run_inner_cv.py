@@ -168,7 +168,7 @@ def main():
     if args.model_type == "NN":
         multi_types = ["standard"]
     else:
-        multi_types = ["standard", "OvR"]
+        multi_types = ["OvR"]
     if args.fold_type == "CV":
         for multi_type in multi_types:
             df = train_test.run_inner_cv(
