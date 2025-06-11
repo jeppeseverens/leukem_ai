@@ -7,10 +7,18 @@ source("outer_cv_analysis.R")
 
 ```{r}
 xgb_results <- run_outer_cv_analysis("XGBOOST", "CV")
+
+xgb_results$ovr$confusion_matrix$overall
 ```
 ```{r}
 # Run analysis for SVM  
 svm_results <- run_outer_cv_analysis("SVM", "CV")
+
+svm_results$ovr$confusion_matrix$overall
+
+```
+```{r}
+svm_results$ovr$confusion_matrix$table
 ```
 
 ```{r}
