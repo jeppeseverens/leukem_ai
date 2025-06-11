@@ -1,6 +1,5 @@
 import sys
 import os
-#os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import train_test, transformers, classifiers
@@ -64,9 +63,9 @@ def main():
     # Get the number of inner and outer folds
     k_out = args.k_out
     k_in = args.k_in
-    
+
     print(f"Using model {args.model_type} with {k_in} inner folds, {k_out} outer folds, and {n_jobs} cores")
-    
+
     # Get the current date and time in string format
     time = datetime.datetime.now().strftime("%Y%m%d_%H%M")
 
@@ -84,7 +83,7 @@ def main():
     X, y, study_labels = train_test.filter_data(X, y, study_labels, min_n = 10)
     y, label_mapping = train_test.encode_labels(y)
 
-    # Define the model and parameter grid   
+    # Define the model and parameter grid
     if args.model_type == "XGBOOST":
         model = classifiers.WeightedXGBClassifier
         param_grid = {
@@ -104,47 +103,47 @@ def main():
         from sklearn.svm import SVC
         model = SVC
         param_grid = {
-            'n_genes': [1000, 2000, 3000],
+            'n_genes': [1000, 2000, 3000, 5000],
             'C': [0.1, 1, 10, 100, 1000],  
-            'gamma': ['auto', 'scale', 0.0001, 0.001, 0.01, 0.1],  
+            'gamma': ['auto', 'scale', 0.00001, 0.0001, 0.001],  
             'class_weight': ["balanced", None],
             'probability': [True]
         }
-    #elif args.model_type == "NN":
-    #    model = classifiers.NeuralNet
-    #    param_grid = {
-    #        'n_genes': [2000, 3000, 5000],
-    #        'n_neurons':[
-    #                    [800,400,100],
-    #                    [400,200,50],
-    #                    [200,100,25],
-    #                    [800,400],
-    #                    [400,200],
-    #                    [200,100]
-    #                    ],
-    #        'use_batch_norm': [True, False],
-    #        'dropout_rate': [0, 0.2,0.5], 
-    #        'batch_size': [32],
-    #        'patience': [30],
-    #        'l2_reg': [0.001, 0],
-    #        'class_weight': [True, False],
-    #        'min_delta': [0.001],
-    #        'learning_rate': [0.0001],
-    #        'loss_function': ["standard", "focal"]
-    #    }
+    elif args.model_type == "NN":
+        model = classifiers.NeuralNet
+        param_grid = {
+            "n_genes": [2000, 3000, 5000],
+            "n_neurons": [
+                [800, 400, 100],
+                [400, 200, 50],
+                [200, 100, 25],
+                [800, 400],
+                [400, 200],
+                [200, 100],
+            ],
+            "use_batch_norm": [True, False],
+            "dropout_rate": [0, 0.2, 0.5],
+            "batch_size": [32],
+            "patience": [30],
+            "l2_reg": [0.001, 0],
+            "class_weight": [True, False],
+            "min_delta": [0.001],
+            "learning_rate": [0.0001],
+            "loss_function": ["standard", "focal"],
+        }
     else:
         raise ValueError(f"Model type {args.model_type} not supported")
 
     # If needed downsample param_list
     full_param_list = list(ParameterGrid(param_grid))
-    
+
     # Batch norm and dropout do not play nicely together, waste of compute
     if args.model_type == "NN":
         full_param_list = [
             params for params in full_param_list
             if not (params['use_batch_norm'] and params['dropout_rate'] > 0)
         ]
-    
+
     # Downsample if needed
     n_downsample = args.n_max_param
     if len(full_param_list) > n_downsample:
@@ -177,10 +176,10 @@ def main():
                 multi_type=multi_type, k_out=k_out, k_in=k_in,
                 model_type = args.model_type
                 )
-            
+
             # Convert encoded labels back to original class names
             df = train_test.restore_labels(df, label_mapping)
-            
+
             # Save results to CSV file with model type, strategy and timestamp
             df.to_csv(f"{output_dir}/{args.model_type}_inner_cv_{multi_type}_{time}.csv")   
     elif args.fold_type == "loso":
@@ -190,10 +189,10 @@ def main():
                 multi_type=multi_type,
                 model_type = args.model_type
                 )
-            
+
             # Convert encoded labels back to original class names
             df = train_test.restore_labels(df, label_mapping)
-            
+
             # Save results to CSV file with model type, strategy and timestamp
             df.to_csv(f"{output_dir}/{args.model_type}_inner_cv_loso_{multi_type}_{time}.csv")   
     else:

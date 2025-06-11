@@ -3,8 +3,8 @@
 # Install these packages using pip:
 # pip install -r requirements.txt
 
-# keras
-# tensorflow
+keras
+tensorflow
 pandas
 polars
 pyarrow
