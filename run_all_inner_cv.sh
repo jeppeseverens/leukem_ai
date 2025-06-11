@@ -48,10 +48,10 @@ run_inner_cv() {
     
     python python/run_inner_cv.py \
         --model_type "$model_type" \
-        --n_jobs 1 \
-        --k_out 2 \
-        --k_in 2 \
-        --n_max_param 1 \
+        --n_jobs 32 \
+        --k_out 5 \
+        --k_in 5 \
+        --n_max_param 128 \
         --fold_type "$fold_type"
     
     echo "Completed: $model_type - $fold_type"
