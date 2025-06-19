@@ -112,7 +112,7 @@ def main():
     elif args.model_type == "NN":
         model = classifiers.NeuralNet
         param_grid = {
-            "n_genes": [2000, 3000, 5000],
+            "n_genes": [2000, 3000, 5000, 10000],
             "n_neurons": [
                 [800, 400, 100],
                 [400, 200, 50],
@@ -129,7 +129,7 @@ def main():
             "class_weight": [True, False],
             "min_delta": [0.001],
             "learning_rate": [0.0001],
-            "loss_function": ["standard", "focal"],
+            "loss_function": ["focal"],
         }
     else:
         raise ValueError(f"Model type {args.model_type} not supported")
