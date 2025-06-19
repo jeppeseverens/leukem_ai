@@ -1,7 +1,7 @@
 import sys
 import os
-#os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-#os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'  # Disable optimizations that require AVX
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'  # Disable optimizations that require AVX
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import train_test, transformers, classifiers
@@ -57,7 +57,7 @@ def main():
     time = datetime.datetime.now().strftime("%Y%m%d_%H%M")
 
     # Create the output directory if it doesn't exist
-    output_dir = f"out/outer_cv/{args.model_type}"
+    output_dir = f"out/outer_cv/{args.model_type}_n10"
     os.makedirs(output_dir, exist_ok=True)
     print(f"Output dir is {output_dir}")
 
@@ -67,7 +67,7 @@ def main():
     base_path = Path(__file__).resolve().parent
     data_path = base_path.parent / "data"
     X, y, study_labels = train_test.load_data(data_path)
-    X, y, study_labels = train_test.filter_data(X, y, study_labels, min_n = 20)
+    X, y, study_labels = train_test.filter_data(X, y, study_labels, min_n = 10)
     y, label_mapping = train_test.encode_labels(y)
 
     # Define the model based on model type
@@ -76,8 +76,8 @@ def main():
     elif args.model_type == "SVM":
         from sklearn.svm import SVC
         model = SVC
-    #elif args.model_type == "NN":
-    #   model = classifiers.NeuralNet
+    elif args.model_type == "NN":
+        model = classifiers.NeuralNet
     else:
         raise ValueError(f"Model type {args.model_type} not supported")
 

@@ -220,8 +220,14 @@ def evaluate_inner_fold(
         unseen_classes = set(y_val_inner) - set(label_encoder.classes_)
         if unseen_classes:
             print(f"Warning: Validation data contains unseen classes: {unseen_classes}")
-            print("Skipping this fold as the model cannot predict unseen classes")
-            return None
+            # Filter out samples with unseen classes
+            mask = np.isin(y_val_inner, list(label_encoder.classes_))
+            y_val_inner = y_val_inner[mask]
+            X_val_inner = X_val_inner[mask]
+            original_val_inner_idx = original_val_inner_idx[mask]
+            if len(y_val_inner) == 0:
+                print("All validation samples have unseen classes. Skipping this fold.")
+                return None
         
         # Transform validation labels (now safe since we checked for unseen classes)
         y_val_encoded = label_encoder.transform(y_val_inner)
@@ -244,10 +250,11 @@ def evaluate_inner_fold(
         preds_prob = preds_prob.flatten()
         preds_prob = np.round(preds_prob, 4)
         preds_prob = preds_prob.tolist()
-        
+        classes = label_encoder.classes_
         return {
             "outer_fold": outer_fold,
             "inner_fold": inner_fold,
+            "classes": classes,
             "params": params,
             "accuracy": accuracy_score(y_val_inner, preds),
             "f1_macro": f1_score(y_val_inner, preds, average="macro"),
@@ -410,9 +417,15 @@ def evaluate_outer_fold(
         # Check if test data contains unseen classes
         unseen_classes = set(y_test) - set(label_encoder.classes_)
         if unseen_classes:
-            print(f"Warning: Test data contains unseen classes: {unseen_classes}")
-            print("Skipping this fold as the model cannot predict unseen classes")
-            return None
+            print(f"Warning: Validation data contains unseen classes: {unseen_classes}")
+            # Filter out samples with unseen classes
+            mask = np.isin(y_test, list(label_encoder.classes_))
+            y_test = y_test[mask]
+            X_test = X_test[mask]
+            test_idx = test_idx[mask]
+            if len(y_test) == 0:
+                print("All validation samples have unseen classes. Skipping this fold.")
+                return None
         
         # Fit and transform training labels
         y_train_encoded = label_encoder.transform(y_train)
@@ -433,7 +446,7 @@ def evaluate_outer_fold(
         
         # Remap predictions back to original labels
         preds = label_encoder.inverse_transform(preds_encoded)
-
+        classes = label_encoder.classes_
         if model_type == "NN":
             history = clf.model.history.history
             best_epoch = np.argmin(history['val_loss']) + 1  # Add 1 to match epoch count
@@ -446,6 +459,7 @@ def evaluate_outer_fold(
 
         return {
             "outer_fold": outer_fold,
+            "classes": classes,
             "params": params,
             "accuracy": accuracy_score(y_test, preds),
             "f1_macro": f1_score(y_test, preds, average="macro"),
@@ -885,15 +899,15 @@ def run_inner_cv_loso(
 ):
     
     # Define the studies to use as folds
-    #studies_as_folds = [
+    # studies_as_folds = [
     #    "BEATAML1.0-COHORT",
     #    "AAML0531",
-       # "AAML1031",
+    #    "AAML1031",
     #    "AAML03P1",
-       # "TCGA-LAML",
-       # "LEUCEGENE",
+    #    "TCGA-LAML",
+    #    "LEUCEGENE",
     #    "100LUMC",
-    #]
+    # ]
     param_combos = param_grid
 
     all_results = []
@@ -1040,19 +1054,19 @@ def run_outer_cv_loso(
     n_genes_list = sorted(list(set(n_genes_list)))
 
     # Define the studies to use as folds
-    studies_as_folds = [
-        "BEATAML1.0-COHORT",
-        "AAML0531",
-        "AAML1031",
-        "AAML03P1",
-        "TCGA-LAML",
-        "LEUCEGENE",
-        "100LUMC",
-    ]
+    # studies_as_folds = [
+    #     "BEATAML1.0-COHORT",
+    #     "AAML0531",
+    #     "AAML1031",
+    #     "AAML03P1",
+    #     "TCGA-LAML",
+    #     "LEUCEGENE",
+    #     "100LUMC",
+    # ]
 
     # Empty list to append results to
     all_results = []
-
+    studies_as_folds = np.unique(study_labels)
     # Iterate through each study as the test fold
     for test_study_name in studies_as_folds:
         print(f"\n--- Outer Loop: Holding out Study '{test_study_name}' for Testing ---")

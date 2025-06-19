@@ -64,16 +64,16 @@ run_inner_cv() {
 }
 
 # Run all experiments
-echo "Running SVM experiments..."
-run_inner_cv "SVM" "CV"
-run_inner_cv "SVM" "loso"
+# echo "Running SVM experiments..."
+# run_inner_cv "SVM" "CV"
+# run_inner_cv "SVM" "loso"
 
-echo "Running XGBOOST experiments..."
-run_inner_cv "XGBOOST" "CV"
-run_inner_cv "XGBOOST" "loso"
+# echo "Running XGBOOST experiments..."
+# run_inner_cv "XGBOOST" "CV"
+# run_inner_cv "XGBOOST" "loso"
 
 # echo "Running NN experiments..."
-run_inner_cv "NN" "CV"
+# run_inner_cv "NN" "CV"
 run_inner_cv "NN" "loso"
 
 echo "All inner CV experiments completed!"
