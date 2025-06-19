@@ -73,7 +73,7 @@ run_inner_cv() {
 # run_inner_cv "XGBOOST" "loso"
 
 # echo "Running NN experiments..."
-# run_inner_cv "NN" "CV"
+run_inner_cv "NN" "CV"
 run_inner_cv "NN" "loso"
 
 echo "All inner CV experiments completed!"
