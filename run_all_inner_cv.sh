@@ -8,32 +8,34 @@ function shutdown_on_error {
 
 trap shutdown_on_error ERR
 
-cd /home/ubuntu
+cd /Users/jsevere2/Documents/AML_PhD/leukem_ai
+source .venv/bin/activate
+# cd /home/ubuntu
 
-# Update system packages
-sudo apt update 
+# # Update system packages
+# sudo apt update 
 
-# Install required tools
-sudo apt install python3 python3-venv python3-pip -y
-sudo apt install -y unzip curl -y
-sudo apt install git -y 
+# # Install required tools
+# sudo apt install python3 python3-venv python3-pip -y
+# sudo apt install -y unzip curl -y
+# sudo apt install git -y 
 
-# Install AWS CLI v2
-curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-unzip awscliv2.zip
-sudo ./aws/install
+# # Install AWS CLI v2
+# curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+# unzip awscliv2.zip
+# sudo ./aws/install
 
-# Clone repository and download data
-git clone https://github.com/jeppeseverens/leukem_ai.git
-cd leukem_ai
+# # Clone repository and download data
+# git clone https://github.com/jeppeseverens/leukem_ai.git
+# cd leukem_ai
 
-aws s3 cp --recursive s3://jfseverens/leukem_ai/data/ ./data
+# aws s3 cp --recursive s3://jfseverens/leukem_ai/data/ ./data
 
-# Install Python packages
-python3 -m venv venv
-source venv/bin/activate
-pip install --upgrade pip
-pip install -r requirements.txt
+# # Install Python packages
+# python3 -m venv venv
+# source venv/bin/activate
+# pip install --upgrade pip
+# pip install -r requirements.txt
 
 echo "Starting all inner CV experiments..."
 echo "=================================="
@@ -48,19 +50,19 @@ run_inner_cv() {
     
     python python/run_inner_cv.py \
         --model_type "$model_type" \
-        --n_jobs 32 \
-        --k_out 5 \
-        --k_in 5 \
-        --n_max_param 128 \
+        --n_jobs 2 \
+        --k_out 2 \
+        --k_in 2 \
+        --n_max_param 2 \
         --fold_type "$fold_type"
     
     echo "Completed: $model_type - $fold_type"
     
     # Sync results to S3 after each experiment
-    echo "Syncing results to S3..."
-    aws s3 sync /home/ubuntu/leukem_ai/out/ s3://jfseverens/inner_cv_results/
-    echo "S3 sync completed for $model_type - $fold_type"
-    echo ""
+    # echo "Syncing results to S3..."
+    # aws s3 sync /home/ubuntu/leukem_ai/out/ s3://jfseverens/inner_cv_results/
+    # echo "S3 sync completed for $model_type - $fold_type"
+    # echo ""
 }
 
 # Run all experiments
@@ -76,13 +78,13 @@ run_inner_cv() {
 run_inner_cv "NN" "CV"
 run_inner_cv "NN" "loso"
 
-echo "All inner CV experiments completed!"
-echo "=================================="
+# echo "All inner CV experiments completed!"
+# echo "=================================="
 
-deactivate
+# deactivate
 
-# Final sync to S3 (in case any files were missed)
-echo "Performing final S3 sync..."
-aws s3 sync /home/ubuntu/leukem_ai/out/ s3://jfseverens/inner_cv_results/
+# # Final sync to S3 (in case any files were missed)
+# echo "Performing final S3 sync..."
+# aws s3 sync /home/ubuntu/leukem_ai/out/ s3://jfseverens/inner_cv_results/
 
-sudo shutdown now -h
+# sudo shutdown now -h

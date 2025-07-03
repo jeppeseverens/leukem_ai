@@ -33,24 +33,24 @@ run_outer_cv() {
 # SVM experiments
 echo "Running SVM outer CV experiments..."
 # run_outer_cv "SVM" "standard" "CV" "inner_cv_best_params/SVM/SVM_best_param_standard.csv"
-run_outer_cv "SVM" "OvR" "CV" "inner_cv_best_params_10/SVM/SVM_best_param_OvR.csv"
+# run_outer_cv "SVM" "OvR" "CV" "inner_cv_best_params_n10/SVM/SVM_best_param_OvR.csv"
 # run_outer_cv "SVM" "OvO" "CV" "inner_cv_best_params/SVM/SVM_best_param_OvO.csv"
 # run_outer_cv "SVM" "standard" "loso" "inner_cv_best_params/SVM/SVM_best_param_standard_loso.csv"
-run_outer_cv "SVM" "OvR" "loso" "inner_cv_best_params_10/SVM/SVM_best_param_OvR_loso.csv"
+run_outer_cv "SVM" "OvR" "loso" "inner_cv_best_params_n10/SVM/SVM_best_param_OvR_loso.csv"
 # run_outer_cv "SVM" "OvO" "loso" "inner_cv_best_params/SVM/SVM_best_param_OvO_loso.csv"
 
 # XGBOOST experiments
 echo "Running XGBOOST outer CV experiments..."
 # run_outer_cv "XGBOOST" "standard" "CV" "inner_cv_best_params/XGBOOST/XGBOOST_best_param_standard.csv"
-run_outer_cv "XGBOOST" "OvR" "CV" "inner_cv_best_params_10/XGBOOST/XGBOOST_best_param_OvR.csv"
+# run_outer_cv "XGBOOST" "OvR" "CV" "inner_cv_best_params_n10/XGBOOST/XGBOOST_best_param_OvR.csv"
 # run_outer_cv "XGBOOST" "OvO" "CV" "inner_cv_best_params/XGBOOST/XGBOOST_best_param_OvO.csv"
 # run_outer_cv "XGBOOST" "standard" "loso" "inner_cv_best_params/XGBOOST/XGBOOST_best_param_standard_loso.csv"
-run_outer_cv "XGBOOST" "OvR" "loso" "inner_cv_best_params_10/XGBOOST/XGBOOST_best_param_OvR_loso.csv"
+run_outer_cv "XGBOOST" "OvR" "loso" "inner_cv_best_params_n10/XGBOOST/XGBOOST_best_param_OvR_loso.csv"
 # run_outer_cv "XGBOOST" "OvO" "loso" "inner_cv_best_params/XGBOOST/XGBOOST_best_param_OvO_loso.csv"
 
-eche "Running NN outer CV experiments..."
-run_outer_cv "NN" "standard" "CV" "inner_cv_best_params_10/XGBOOST/XGBOOST_best_param_standard.csv"
-run_outer_cv "NN" "standard" "loso" "inner_cv_best_params_10/XGBOOST/XGBOOST_best_param_standard.csv"
+echo "Running NN outer CV experiments..."
+# run_outer_cv "NN" "standard" "CV" "inner_cv_best_params_n10/NN/NN_best_param_standard.csv"
+# run_outer_cv "NN" "standard" "loso" "inner_cv_best_params_n10/NN/NN_best_param_standard_loso.csv"
 
 echo "All outer CV experiments completed!"
 echo "=================================="

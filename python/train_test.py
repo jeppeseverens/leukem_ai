@@ -215,28 +215,32 @@ def evaluate_inner_fold(
         
         # Transform training labels
         y_train_encoded = label_encoder.transform(y_train_inner)
-        
+
         # Check if validation data contains unseen classes
         unseen_classes = set(y_val_inner) - set(label_encoder.classes_)
         if unseen_classes:
             print(f"Warning: Validation data contains unseen classes: {unseen_classes}")
             # Filter out samples with unseen classes
             mask = np.isin(y_val_inner, list(label_encoder.classes_))
-            y_val_inner = y_val_inner[mask]
-            X_val_inner = X_val_inner[mask]
-            original_val_inner_idx = original_val_inner_idx[mask]
+            y_val_inner_filtered = y_val_inner[mask]
+            X_val_inner_filtered = X_val_inner[mask]
+            original_val_inner_idx_filtered = original_val_inner_idx[mask]
             if len(y_val_inner) == 0:
                 print("All validation samples have unseen classes. Skipping this fold.")
                 return None
-        
+        else:
+            y_val_inner_filtered = y_val_inner
+            X_val_inner_filtered = X_val_inner
+            original_val_inner_idx_filtered = original_val_inner_idx
+            
         # Transform validation labels (now safe since we checked for unseen classes)
-        y_val_encoded = label_encoder.transform(y_val_inner)
+        y_val_encoded = label_encoder.transform(y_val_inner_filtered)
         
         if model_type == "NN":
-            clf.fit(X_train_inner, y_train_encoded, validation_data =(X_val_inner, y_val_encoded))
+            clf.fit(X_train_inner, y_train_encoded, validation_data =(X_val_inner_filtered, y_val_encoded))
         else:
             clf.fit(X_train_inner, y_train_encoded)
-        preds_prob = clf.predict_proba(X_val_inner)
+        preds_prob = clf.predict_proba(X_val_inner_filtered)
         preds = np.argmax(preds_prob, axis=1)
         
         # Convert predictions back to original labels
@@ -256,14 +260,14 @@ def evaluate_inner_fold(
             "inner_fold": inner_fold,
             "classes": classes,
             "params": params,
-            "accuracy": accuracy_score(y_val_inner, preds),
-            "f1_macro": f1_score(y_val_inner, preds, average="macro"),
-            "mcc": matthews_corrcoef(y_val_inner, preds),
-            "kappa": cohen_kappa_score(y_val_inner, preds),
+            "accuracy": accuracy_score(y_val_inner_filtered, preds),
+            "f1_macro": f1_score(y_val_inner_filtered, preds, average="macro"),
+            "mcc": matthews_corrcoef(y_val_inner_filtered, preds),
+            "kappa": cohen_kappa_score(y_val_inner_filtered, preds),
             "y_val": y_val_inner,
             "preds": preds,
             "preds_prob": json.dumps(preds_prob),
-            "sample_indices": original_val_inner_idx
+            "sample_indices": original_val_inner_idx_filtered
         }
 
     def ovr_eval():
@@ -315,9 +319,9 @@ def evaluate_inner_fold(
     def ovo_eval():
         results = []
         
-        classes_train = np.unique(y_train_inner)
-        
-        for i, j in itertools.combinations(classes_train, 2):
+        classes = np.unique(y_train_inner)
+        for i, j in itertools.combinations(classes, 2):
+
             # Create masks for both classes
             train_mask = np.isin(y_train_inner, [i, j])
             val_mask = np.isin(y_val_inner, [i, j])
@@ -326,7 +330,7 @@ def evaluate_inner_fold(
             if not np.any(train_mask) or not np.any(val_mask):
                 print(f"Skipping classes {i} and {j} - no samples in train or val")
                 continue
-            
+
             # Get filtered data
             X_train_ij = X_train_inner[train_mask]
             y_train_ij = y_train_inner[train_mask]
@@ -349,8 +353,6 @@ def evaluate_inner_fold(
 
             preds_prob = np.round(preds_prob, 4)
             preds_prob = preds_prob.tolist()
-            
-            # ij_val_inner_idx = original_val_inner_idx[val_mask]
             
             results.append(
                 {
@@ -484,8 +486,14 @@ def evaluate_outer_fold(
                 print(f"Skipping class {cl} for OvR - not present in train or validation")
                 continue
             
+            # Check if best parameters exist for this class
+            class_params = best_params_fold[best_params_fold["class"] == cl]
+            if len(class_params) == 0:
+                print(f"Skipping class {cl} for OvR - no best parameters found")
+                continue
+            
             # Select preprocessed data
-            params = best_params_fold[best_params_fold["class"] == cl].iloc[0]["params"]
+            params = class_params.iloc[0]["params"]
             params = ast.literal_eval(params)
             n_genes = params.pop("n_genes")
 
@@ -535,10 +543,16 @@ def evaluate_outer_fold(
         classes = np.unique(y_train)
         for i, j in itertools.combinations(classes, 2):
 
-            # Select preprocessed data
-            params = best_params_fold[
+            # Check if best parameters exist for this class pair
+            class_pair_params = best_params_fold[
                 (best_params_fold["class_0"] == i) & (best_params_fold["class_1"] == j)
-            ].iloc[0]["params"]
+            ]
+            if len(class_pair_params) == 0:
+                print(f"Skipping classes {i} and {j} - no best parameters found")
+                continue
+
+            # Select preprocessed data
+            params = class_pair_params.iloc[0]["params"]
             params = ast.literal_eval(params)
             n_genes = params.pop("n_genes")
 
