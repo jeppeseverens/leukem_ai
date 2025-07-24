@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import os
 import json
+import gc
 
 from sklearn.metrics import (
     accuracy_score,
@@ -84,7 +85,7 @@ def load_data(directory):
     # --- Convert to NumPy arrays ---
     # .values returns the underlying numpy array representation
     studies = studies_series.values
-    X = X_df.transpose().values
+    X = X_df.transpose().values.astype(np.float32)
     y = y_series.values
 
     print(f"  Studies: {len(studies)}")
@@ -391,7 +392,12 @@ def evaluate_inner_fold(
     clf = model(**params)
     params["n_genes"] = n_genes
 
-    return eval_dispatch[multi_type]()
+    del model
+    gc.collect()
+    
+    output = eval_dispatch[multi_type]()
+    
+    return output
 
 def evaluate_outer_fold(
     outer_fold,
@@ -663,8 +669,8 @@ def pre_process_data(
             X_train,
             feature_selection__study_per_patient=study_labels_train,
             feature_selection__n_genes=n_genes_i,
-        )
-        X_val_proc = pipe_clone.transform(X_val)
+        ).astype(np.float32)
+        X_val_proc = pipe_clone.transform(X_val).astype(np.float32)
 
         processed_X[n_genes_i] = [X_train_proc, X_val_proc]
     return processed_X, y_train, y_val
@@ -769,6 +775,92 @@ def run_inner_cv(
     # Convert to DataFrame
     df_parallel_results = pd.DataFrame(all_results)
     return df_parallel_results
+
+def run_inner_cv_single_param(
+    X,
+    y,
+    study_labels,
+    model,
+    single_param,
+    pipe,
+    multi_type="standard",
+    k_out=5,
+    k_in=5,
+    model_type="any"
+):
+    """
+    Modified version of run_inner_cv that processes only one hyperparameter combination.
+    Used for SLURM array jobs where each job handles one parameter set.
+    """
+    # Define cv folds
+    outer_cv = StratifiedKFold(n_splits=k_out, shuffle=True, random_state=42)
+    inner_cv = StratifiedKFold(n_splits=k_in, shuffle=True, random_state=42)
+
+    # Single parameter instead of list
+    n_genes_list = [single_param["n_genes"]]
+    all_results = []
+
+    # Combine y and study labels so can be stratified on study and y
+    combined = [str(a) + " " + str(b) for a, b in zip(y, study_labels)]
+
+    # Make outer fold splits
+    for outer_fold, (train_idx, test_idx) in enumerate(outer_cv.split(X, combined)):
+        print(f"outer_fold {outer_fold}")
+        X_train_outer = X[train_idx]
+        y_train_outer = y[train_idx]
+        study_labels_outer = study_labels[train_idx]
+
+        combined_outer = [
+            str(a) + " " + str(b) for a, b in zip(y_train_outer, study_labels_outer)
+        ]
+
+        # Make inner fold splits
+        for inner_fold, (train_inner_idx, val_inner_idx) in enumerate(
+            inner_cv.split(X_train_outer, combined_outer)
+        ):
+            print(f"inner_fold {inner_fold}")
+
+            # Once per inner fold, data is preprocessed
+            processed_X, y_train_inner, y_val_inner = pre_process_data(
+                n_genes_list,
+                X_train_outer,
+                y_train_outer,
+                train_inner_idx,
+                val_inner_idx,
+                study_labels_outer,
+                pipe,
+            )
+
+            # Get the original indices of validation samples in the full dataset
+            original_val_inner_idx = train_idx[val_inner_idx]
+            
+            # Process single hyperparameter combination (no parallel processing needed)
+            result = evaluate_inner_fold(
+                outer_fold,
+                inner_fold,
+                processed_X,
+                y_train_inner,
+                y_val_inner,
+                original_val_inner_idx,
+                model,
+                single_param.copy(),  # Make copy to avoid modifying original
+                multi_type=multi_type,
+                model_type=model_type
+            )
+
+            # Handle result
+            if result is not None:
+                if isinstance(result, dict):
+                    all_results.append(result)
+                elif isinstance(result, list):
+                    all_results.extend(result)
+            else:
+                print(f"Warning: No valid results for outer fold {outer_fold}, inner fold {inner_fold}")
+
+    # Convert to DataFrame
+    df_results = pd.DataFrame(all_results)
+    return df_results
+
 
 def run_outer_cv(
     X,
@@ -1027,6 +1119,101 @@ def run_inner_cv_loso(
 
     df_parallel_results_study_as_fold = pd.DataFrame(all_results)
     return df_parallel_results_study_as_fold
+
+def run_inner_cv_loso_single_param(
+    X,
+    y,
+    study_labels,
+    model,
+    single_param,
+    pipe,
+    multi_type="standard",
+    model_type="any"
+):
+    """
+    Modified version of run_inner_cv_loso that processes only one hyperparameter combination.
+    Used for SLURM array jobs where each job handles one parameter set.
+    """
+    # Single parameter instead of list
+    n_genes_list = [single_param["n_genes"]]
+    all_results = []
+    
+    studies_as_folds = np.unique(study_labels)
+    
+    for test_study_name in studies_as_folds:
+        print(f"\n--- Outer Loop: Holding out Study '{test_study_name}' for Testing ---")
+
+        # Create masks for outer split
+        test_mask = study_labels == test_study_name
+        train_mask = ~test_mask
+
+        # Outer training set (N-1 studies)
+        X_train_outer = X[train_mask]
+        y_train_outer = y[train_mask]
+        study_labels_outer = study_labels[train_mask]
+
+        # Get the unique studies present in the outer training set
+        train_studies = np.unique(study_labels_outer)
+        print(f"Outer training set contains studies: {train_studies.tolist()}")
+
+        # Inner Loop: Iterate through each study in the outer training set to be used as VALIDATION set
+        for validation_study_name in train_studies:
+            print(f"  Inner Loop: Validating on Study '{validation_study_name}'")
+            
+            # Create masks for inner split (relative to outer training data)
+            val_inner_mask = study_labels_outer == validation_study_name
+            train_inner_mask = ~val_inner_mask
+
+            # Inner training set (N-2 studies)
+            X_train_inner = X_train_outer[train_inner_mask]
+            y_train_inner = y_train_outer[train_inner_mask]
+            study_labels_inner = study_labels_outer[train_inner_mask]
+
+            # Inner validation set (1 study)
+            X_val_inner = X_train_outer[val_inner_mask]
+            y_val_inner = y_train_outer[val_inner_mask]
+
+            # Get the original indices of validation samples in the full dataset
+            train_indices = np.where(train_mask)[0]
+            original_val_inner_idx = train_indices[val_inner_mask]
+            
+            # Pre-process Data ONCE for this inner fold
+            processed_X_inner = pre_process_data_loso(
+                n_genes_list,
+                X_train_inner,
+                X_val_inner,
+                study_labels_inner,
+                pipe
+            )
+
+            # Process single hyperparameter combination (no parallel processing needed)
+            result = evaluate_inner_fold(
+                test_study_name,  # Identifier for the outer fold (held-out test study)
+                validation_study_name,  # Identifier for the inner fold (validation study)
+                processed_X_inner,  # Pre-calculated processed data
+                y_train_inner,  # Inner training labels
+                y_val_inner,  # Inner validation labels
+                original_val_inner_idx,  # Inner indices based on whole data
+                model,  # Classifier class
+                single_param.copy(),  # Current hyperparameter combination (copy to avoid modification)
+                multi_type=multi_type,
+                model_type=model_type
+            )
+
+            # Handle result
+            if result is not None:
+                if isinstance(result, list):
+                    all_results.extend(result)
+                elif isinstance(result, dict):
+                    all_results.append(result)
+            else:
+                print(f"  No valid results for outer fold '{test_study_name}', inner fold '{validation_study_name}'")
+
+        print(f"  Finished evaluations for outer fold '{test_study_name}'.")
+
+    # Convert to DataFrame
+    df_results = pd.DataFrame(all_results)
+    return df_results
 
 def run_outer_cv_loso(
     X,

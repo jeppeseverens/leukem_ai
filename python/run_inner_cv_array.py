@@ -8,17 +8,19 @@ import train_test, transformers, classifiers
 
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import ParameterGrid, ParameterSampler
+from sklearn.model_selection import ParameterGrid
 import datetime
 import pandas as pd
 import argparse
 import random
+import pickle
+import json
 
 from pathlib import Path
 
 def main():
     # Parsing
-    parser = argparse.ArgumentParser(description="Run cross-validation with adjustable n_jobs.")
+    parser = argparse.ArgumentParser(description="Run cross-validation for a single hyperparameter combination (array job).")
 
     # Define argument configurations
     arg_configs = {
@@ -26,30 +28,34 @@ def main():
             'type': str,
             'help': 'Model type to use'
         },
-        'n_jobs': {
+        'param_index': {
             'type': int,
-            'default': 12,
-            'help': 'Number of jobs to run in parallel for cross-validation (default: 12)'
+            'help': 'Index of the hyperparameter combination to process (0-based)'
         },
         'k_out': {
             'type': int,
             'default': 5,
-            'help': 'Number of inner folds (default: 5)'
+            'help': 'Number of outer folds (default: 5)'
         },
         'k_in': {
             'type': int,
             'default': 5,
-            'help': 'Number of outer folds (default: 5)'
+            'help': 'Number of inner folds (default: 5)'
         },
         'n_max_param': {
             'type': int,
-            'default': 2,
-            'help': 'Maximum number of parameter combinations to sample (default: 2)'
+            'default': 96,
+            'help': 'Maximum number of parameter combinations to sample (default: 96)'
         },
         'fold_type': {
             'type': str,
             'default': 'CV',
-            'help': 'Type of cross-validation fold to use (default: cv)'
+            'help': 'Type of cross-validation fold to use (default: CV)'
+        },
+        'random_seed': {
+            'type': int,
+            'default': 42,
+            'help': 'Random seed for reproducibility (default: 42)'
         }
     }
 
@@ -60,19 +66,21 @@ def main():
             **config
         )
 
-    args = parser.parse_args() # Parse the command-line arguments
-    n_jobs = args.n_jobs # Get the value of n_jobs from the parsed arguments
+    args = parser.parse_args()
+    
     # Get the number of inner and outer folds
     k_out = args.k_out
     k_in = args.k_in
+    param_index = args.param_index
 
-    print(f"Using model {args.model_type} with {k_in} inner folds, {k_out} outer folds, and {n_jobs} cores")
+    print(f"Processing hyperparameter combination {param_index} for model {args.model_type}")
+    print(f"Using {k_in} inner folds, {k_out} outer folds")
 
     # Get the current date and time in string format
     time = datetime.datetime.now().strftime("%Y%m%d_%H%M")
 
     # Create the output directory if it doesn't exist
-    output_dir = f"out/{args.model_type}/{time}"
+    output_dir = f"out/{args.model_type}_array/{time}"
     os.makedirs(output_dir, exist_ok=True)
     print(f"Output dir is {output_dir}")
 
@@ -85,7 +93,7 @@ def main():
     X, y, study_labels = train_test.filter_data(X, y, study_labels, min_n = 10)
     y, label_mapping = train_test.encode_labels(y)
 
-    # Define the model and parameter grid
+    # Define the model and parameter grid (same as original)
     if args.model_type == "XGBOOST":
         model = classifiers.WeightedXGBClassifier
         param_grid = {
@@ -114,7 +122,7 @@ def main():
     elif args.model_type == "NN":
         model = classifiers.NeuralNet
         param_grid = {
-            "n_genes": [3000, 5000],
+            "n_genes": [3000, 5000, 10000],
             "n_neurons": [
                 [800, 400, 100],
                 [400, 200, 50],
@@ -136,7 +144,7 @@ def main():
     else:
         raise ValueError(f"Model type {args.model_type} not supported")
 
-    # If needed downsample param_list
+    # Generate full parameter list (same logic as original)
     full_param_list = list(ParameterGrid(param_grid))
 
     # Batch norm and dropout do not play nicely together, waste of compute
@@ -146,12 +154,21 @@ def main():
             if not (params['use_batch_norm'] and params['dropout_rate'] > 0)
         ]
 
-    # Downsample if needed
+    # Downsample if needed (using same random seed for reproducibility)
+    random.seed(args.random_seed)
     n_downsample = args.n_max_param
     if len(full_param_list) > n_downsample:
         param_list = random.sample(full_param_list, k=n_downsample)
     else:
         param_list = full_param_list
+
+    # Validate param_index
+    if param_index >= len(param_list):
+        raise ValueError(f"param_index {param_index} is out of range. Only {len(param_list)} parameter combinations available.")
+
+    # Get the specific parameter combination for this array job
+    single_param = param_list[param_index]
+    print(f"Processing parameter combination: {single_param}")
 
     # Define the pipeline
     pipe = Pipeline([
@@ -161,46 +178,52 @@ def main():
     ])
     print("Pipeline set up")
 
-    # Start the inner cross-validation process
-    print("Starting inner cross-validation process.")
-    # Iterate through different multiclass classification strategies
-    # standard: Uses the classifier's default multiclass handling
-    # OvO: One-vs-One strategy - trains binary classifier between each pair of classes
-    # OvR: One-vs-Rest strategy - trains binary classifier for each class against all others
+    # Determine multiclass strategy
     if args.model_type == "NN":
         multi_types = ["standard"]
     else:
         multi_types = ["OvR"]
+
+    # Start the inner cross-validation process for this single parameter combination
+    print("Starting inner cross-validation process for single parameter combination.")
+    
     if args.fold_type == "CV":
         for multi_type in multi_types:
-            df = train_test.run_inner_cv(
-                X, y, study_labels, model, param_list, n_jobs, pipe, 
+            # Modified function call to process single parameter
+            df = train_test.run_inner_cv_single_param(
+                X, y, study_labels, model, single_param, pipe, 
                 multi_type=multi_type, k_out=k_out, k_in=k_in,
-                model_type = args.model_type
-                )
+                model_type=args.model_type
+            )
 
             # Convert encoded labels back to original class names
             df = train_test.restore_labels(df, label_mapping)
 
-            # Save results to CSV file with model type, strategy and timestamp
-            df.to_csv(f"{output_dir}/{args.model_type}_inner_cv_{multi_type}_{time}.csv")   
+            # Save results with parameter index in filename
+            output_filename = f"{args.model_type}_inner_cv_{multi_type}_param_{param_index:03d}_{time}.csv"
+            df.to_csv(f"{output_dir}/{output_filename}")
+            print(f"Saved results to {output_filename}")
+            
     elif args.fold_type == "loso":
         for multi_type in multi_types:
-            df = train_test.run_inner_cv_loso(
-                X, y, study_labels, model, param_list, n_jobs, pipe, 
+            # Modified function call to process single parameter
+            df = train_test.run_inner_cv_loso_single_param(
+                X, y, study_labels, model, single_param, pipe, 
                 multi_type=multi_type,
-                model_type = args.model_type
-                )
+                model_type=args.model_type
+            )
 
             # Convert encoded labels back to original class names
             df = train_test.restore_labels(df, label_mapping)
 
-            # Save results to CSV file with model type, strategy and timestamp
-            df.to_csv(f"{output_dir}/{args.model_type}_inner_cv_loso_{multi_type}_{time}.csv")   
+            # Save results with parameter index in filename
+            output_filename = f"{args.model_type}_inner_cv_loso_{multi_type}_param_{param_index:03d}_{time}.csv"
+            df.to_csv(f"{output_dir}/{output_filename}")
+            print(f"Saved results to {output_filename}")
     else:
         raise ValueError(f"Fold type {args.fold_type} not supported.")
 
-    print("Cross-validation process finished.")
+    print("Cross-validation process finished for parameter combination.")
 
 if __name__ == "__main__":
-    main()
+    main() 
