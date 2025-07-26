@@ -8,7 +8,7 @@
 #SBATCH --output=job_output/job_array.%A_%a.out
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --mail-user=j.f.severens@lumc.nl
-#SBATCH --mem=4G                  
+#SBATCH --mem=8G                  
 
 cd /exports/me-lcco-aml-hpc/Jeppe2/leukem_ai
 
