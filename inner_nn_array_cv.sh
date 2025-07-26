@@ -1,11 +1,11 @@
 #!/bin/bash
-#SBATCH -J run_inner_nn_array
-#SBATCH --array=0-1              # 96 hyperparameter combinations (0-indexed)
+#SBATCH -J run_inner_nn_array_cv
+#SBATCH --array=0-95              # 96 hyperparameter combinations (0-indexed)
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1         # 1 core per hyperparameter combination
-#SBATCH --time=24:00:00           # Shorter time per job
-#SBATCH --error=job_output/job_array.%A_%a.err
-#SBATCH --output=job_output/job_array.%A_%a.out
+#SBATCH --time=03:00:00           # Shorter time per job
+#SBATCH --error=job_output/job_array_cv.%A_%a.err
+#SBATCH --output=job_output/job_array_cv.%A_%a.out
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --mail-user=j.f.severens@lumc.nl
 #SBATCH --mem=8G                  
@@ -19,7 +19,7 @@ source venv/bin/activate
 
 export TF_CPP_MIN_LOG_LEVEL=2
 
-echo "Starting inner CV experiment on SLURM_ARRAY_TASK_ID=$SLURM_ARRAY_TASK_ID"
+echo "Starting inner CV experiment (CV fold type) on SLURM_ARRAY_TASK_ID=$SLURM_ARRAY_TASK_ID"
 echo "Processing hyperparameter combination $SLURM_ARRAY_TASK_ID out of 96"
 echo "=================================="
 
@@ -27,22 +27,12 @@ echo "=================================="
 MODEL_TYPE="NN"
 
 # Run CV fold type
-# python python/run_inner_cv_array.py \
-#     --model_type "$MODEL_TYPE" \
-#     --param_index $SLURM_ARRAY_TASK_ID \
-#     --k_out 5 \
-#     --k_in 5 \
-#     --n_max_param 96 \
-#     --fold_type "CV"
-
-# Run LOSO fold type
 python python/run_inner_cv_array.py \
     --model_type "$MODEL_TYPE" \
     --param_index $SLURM_ARRAY_TASK_ID \
     --k_out 5 \
     --k_in 5 \
-    --n_max_param 2 \
-    --fold_type "loso" \
-    --run_name "loso_26jul25"
+    --n_max_param 96 \
+    --fold_type "CV"
 
 deactivate 
