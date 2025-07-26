@@ -16,7 +16,6 @@ from sklearn.base import clone
 
 from joblib import Parallel, delayed
 import itertools
-import polars as pl
 import ast
 ###################################################################################
 # Helper functions                                                                #
@@ -67,7 +66,7 @@ def load_data(directory):
     rgas_path = os.path.join(directory, rgas_file)
 
     # Load CSV data into pandas DataFrames/Series.
-    X_df = pl.read_csv(counts_path).to_pandas()
+    X_df = pd.read_csv(counts_path)
     # X_df = pd.read_csv(counts_path, index_col=0, engine='c')
 
     X_df = X_df.set_index(X_df.columns[0])
