@@ -109,7 +109,8 @@ class NeuralNet:
         model.compile(
             loss=loss,
             optimizer=optimizer,
-            metrics=['accuracy']
+            metrics=['accuracy'],
+            run_eagerly=True
         )
         
         self.model = model
