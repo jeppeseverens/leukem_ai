@@ -56,6 +56,11 @@ def main():
             'type': int,
             'default': 42,
             'help': 'Random seed for reproducibility (default: 42)'
+        },
+        'run_name': {
+            'type': str,
+            'default': 'run',
+            'help': 'Name of the run (default: run)'
         }
     }
 
@@ -80,7 +85,7 @@ def main():
     time = datetime.datetime.now().strftime("%Y%m%d_%H%M")
 
     # Create the output directory if it doesn't exist
-    output_dir = f"out/{args.model_type}_array/{time}"
+    output_dir = f"out/{args.model_type}_array/{args.run_name}"
     os.makedirs(output_dir, exist_ok=True)
     print(f"Output dir is {output_dir}")
 
@@ -122,7 +127,7 @@ def main():
     elif args.model_type == "NN":
         model = classifiers.NeuralNet
         param_grid = {
-            "n_genes": [3000, 5000, 10000],
+            "n_genes": [3000, 5000],
             "n_neurons": [
                 [800, 400, 100],
                 [400, 200, 50],
