@@ -3,9 +3,9 @@
 #SBATCH --array=0-95              # 96 hyperparameter combinations (0-indexed)
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1         # 1 core per hyperparameter combination
-#SBATCH --time=6:00:00           
-#SBATCH --error=job_output/job_array_cv.%A_%a.err
-#SBATCH --output=job_output/job_array_cv.%A_%a.out
+#SBATCH --time=06:00:00           
+#SBATCH --error=job_output/cv/job_array_cv.%A_%a.err
+#SBATCH --output=job_output/cvjob_array_cv.%A_%a.out
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --mail-user=j.f.severens@lumc.nl
 #SBATCH --mem=8G                  
@@ -13,7 +13,7 @@
 cd /exports/me-lcco-aml-hpc/Jeppe2/leukem_ai
 
 # Create job_output directory if it doesn't exist
-mkdir -p job_output
+mkdir -p job_output/cv
 
 source venv/bin/activate
 
