@@ -1,0 +1,16 @@
+---
+title: "inner_analyse"
+output: html_document
+date: "2025-08-02"
+---
+
+```{r, message = FALSE, warning = FALSE}
+source("~/Documents/AML_PhD/leukem_ai/R/analyse_inner_cv_new.r")
+```
+
+
+
+
+
+
+

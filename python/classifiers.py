@@ -119,21 +119,19 @@ class NeuralNet:
         if self.model is None:
             self.create_model(X, y)
 
-        
-        # Setup early stopping
-        callbacks = [
-            EarlyStopping(
-                monitor=self.params['monitor'],
-                patience=self.params['patience'],
-                min_delta=self.params['min_delta'],
-                restore_best_weights=True,
-                start_from_epoch = 10
+        # Handle validation data and early stopping
+        callbacks = []
+        if validation_data is not None:
+            # Only use early stopping when validation data is available
+            callbacks.append(
+                EarlyStopping(
+                    monitor=self.params['monitor'],
+                    patience=self.params['patience'],
+                    min_delta=self.params['min_delta'],
+                    restore_best_weights=True,
+                    start_from_epoch = 10
+                )
             )
-        ]
-        # Handle validation data
-        if validation_data is None:
-            kwargs['validation_split'] = self.params['validation_split']
-        else:
             kwargs['validation_data'] = validation_data
             
         # Add class weights if enabled

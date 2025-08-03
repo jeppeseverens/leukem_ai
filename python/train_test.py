@@ -427,55 +427,57 @@ def evaluate_outer_fold(
             print(f"Warning: Validation data contains unseen classes: {unseen_classes}")
             # Filter out samples with unseen classes
             mask = np.isin(y_test, list(label_encoder.classes_))
-            y_test = y_test[mask]
-            X_test = X_test[mask]
-            test_idx = test_idx[mask]
-            if len(y_test) == 0:
+            y_test_filtered = y_test[mask]
+            X_test_filtered = X_test[mask]
+            test_idx_filtered = test_idx[mask]
+            if len(y_test_filtered) == 0:
                 print("All validation samples have unseen classes. Skipping this fold.")
                 return None
+        else:
+            y_test_filtered = y_test
+            X_test_filtered = X_test
+            test_idx_filtered = test_idx
         
         # Fit and transform training labels
         y_train_encoded = label_encoder.transform(y_train)
         # Transform test labels using the same mapping (now safe)
-        y_test_encoded = label_encoder.transform(y_test)
+        y_test_encoded = label_encoder.transform(y_test_filtered)
 
         # Set classifier
         clf = model(**params)
         params["n_genes"] = n_genes
 
         if model_type == "NN":
-            clf.fit(X_train, y_train_encoded, validation_data =(X_test, y_test_encoded))
+            best_epoch = params.get("best_epoch", None)
+            if best_epoch is None:
+                raise ValueError("Best Epochs for NN is not available.")
+            clf.fit(X_train, y_train_encoded, epochs = best_epoch)
         else:
             clf.fit(X_train, y_train_encoded)
 
-        preds_prob = clf.predict_proba(X_test)
+        preds_prob = clf.predict_proba(X_test_filtered)
         preds_encoded = np.argmax(preds_prob, axis=1)
         
         # Remap predictions back to original labels
         preds = label_encoder.inverse_transform(preds_encoded)
         classes = label_encoder.classes_
-        if model_type == "NN":
-            history = clf.model.history.history
-            best_epoch = np.argmin(history['val_loss']) + 1  # Add 1 to match epoch count
-            params["best_epoch"] = best_epoch
             
         preds_prob = preds_prob.flatten()
         preds_prob = np.round(preds_prob, 4)
         preds_prob = preds_prob.tolist()
-        
 
         return {
             "outer_fold": outer_fold,
             "classes": classes,
             "params": params,
-            "accuracy": accuracy_score(y_test, preds),
-            "f1_macro": f1_score(y_test, preds, average="macro"),
-            "mcc": matthews_corrcoef(y_test, preds),
-            "kappa": cohen_kappa_score(y_test, preds),
-            "y_val": y_test,
+            "accuracy": accuracy_score(y_test_filtered, preds),
+            "f1_macro": f1_score(y_test_filtered, preds, average="macro"),
+            "mcc": matthews_corrcoef(y_test_filtered, preds),
+            "kappa": cohen_kappa_score(y_test_filtered, preds),
+            "y_val": y_test_filtered,
             "preds": preds,
             "preds_prob": json.dumps(preds_prob),
-            "sample_indices": test_idx
+            "sample_indices": test_idx_filtered
         }
 
     def ovr_eval():
