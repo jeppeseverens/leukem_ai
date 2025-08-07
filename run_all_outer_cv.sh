@@ -49,8 +49,8 @@ run_outer_cv() {
 # run_outer_cv "XGBOOST" "OvO" "loso" "inner_cv_best_params/XGBOOST/XGBOOST_best_param_OvO_loso.csv"
 
 echo "Running NN outer CV experiments..."
-run_outer_cv "NN" "standard" "CV" "inner_cv_best_params_n10/NN/NN_best_param_standard.csv"
-run_outer_cv "NN" "standard" "loso" "inner_cv_best_params_n10/NN/NN_best_param_standard_loso.csv"
+run_outer_cv "NN" "standard" "CV" "inner_cv_best_params_n10/NN/NEURAL_NET_best_param_standard.csv"
+run_outer_cv "NN" "standard" "loso" "inner_cv_best_params_n10/NN/NEURAL_NET_best_param_standard_loso.csv"
 
 echo "All outer CV experiments completed!"
 echo "=================================="

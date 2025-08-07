@@ -216,35 +216,53 @@ def evaluate_inner_fold(
         # Transform training labels
         y_train_encoded = label_encoder.transform(y_train_inner)
 
-        # Check if validation data contains unseen classes
+        # Check for unseen classes to determine validation data for NN training
         unseen_classes = set(y_val_inner) - set(label_encoder.classes_)
-        if unseen_classes:
-            print(f"Warning: Validation data contains unseen classes: {unseen_classes}")
-            # Filter out samples with unseen classes
-            mask = np.isin(y_val_inner, list(label_encoder.classes_))
-            y_val_inner_filtered = y_val_inner[mask]
-            X_val_inner_filtered = X_val_inner[mask]
-            original_val_inner_idx_filtered = original_val_inner_idx[mask]
-            if len(y_val_inner) == 0:
-                print("All validation samples have unseen classes. Skipping this fold.")
-                return None
-        else:
-            y_val_inner_filtered = y_val_inner
-            X_val_inner_filtered = X_val_inner
-            original_val_inner_idx_filtered = original_val_inner_idx
-            
-        # Transform validation labels (now safe since we checked for unseen classes)
-        y_val_encoded = label_encoder.transform(y_val_inner_filtered)
         
+        # Always fit model (with appropriate validation data for NN)
         if model_type == "NN":
-            clf.fit(X_train_inner, y_train_encoded, validation_data =(X_val_inner_filtered, y_val_encoded))
+            if unseen_classes:
+                print(f"Warning: Validation data contains unseen classes: {unseen_classes}")
+                # Use filtered validation data for NN training monitoring
+                val_mask = np.isin(y_val_inner, list(label_encoder.classes_))
+                X_val_for_training = X_val_inner[val_mask]
+                y_val_for_training = label_encoder.transform(y_val_inner[val_mask])
+                
+                if len(X_val_for_training) > 0:
+                    clf.fit(X_train_inner, y_train_encoded, validation_data=(X_val_for_training, y_val_for_training))
+                else:
+                    print("No validation samples with known classes. Training NN without validation monitoring.")
+                    clf.fit(X_train_inner, y_train_encoded)
+            else:
+                # All validation classes are known
+                y_val_encoded = label_encoder.transform(y_val_inner)
+                clf.fit(X_train_inner, y_train_encoded, validation_data=(X_val_inner, y_val_encoded))
         else:
             clf.fit(X_train_inner, y_train_encoded)
-        preds_prob = clf.predict_proba(X_val_inner_filtered)
-        preds = np.argmax(preds_prob, axis=1)
+        
+        # Make predictions on ALL validation samples
+        preds_prob = clf.predict_proba(X_val_inner)
+        preds_encoded = np.argmax(preds_prob, axis=1)
         
         # Convert predictions back to original labels
-        preds = label_encoder.inverse_transform(preds)
+        preds = label_encoder.inverse_transform(preds_encoded)
+        
+        # Prepare data for metric calculation (only samples with known classes)
+        if unseen_classes:
+            # Create mask for samples with known classes (for metric calculation)
+            mask = np.isin(y_val_inner, list(label_encoder.classes_))
+            y_val_inner_for_metrics = y_val_inner[mask]
+            preds_for_metrics = preds[mask]
+            original_val_inner_idx_for_metrics = original_val_inner_idx[mask]
+            
+            if len(y_val_inner_for_metrics) == 0:
+                print("All validation samples have unseen classes. Skipping metric calculation.")
+                return None
+        else:
+            # All classes are known, use all samples for metrics
+            y_val_inner_for_metrics = y_val_inner
+            preds_for_metrics = preds
+            original_val_inner_idx_for_metrics = original_val_inner_idx
                 
         if model_type == "NN":
             history = clf.model.history.history
@@ -260,14 +278,16 @@ def evaluate_inner_fold(
             "inner_fold": inner_fold,
             "classes": classes,
             "params": params,
-            "accuracy": accuracy_score(y_val_inner_filtered, preds),
-            "f1_macro": f1_score(y_val_inner_filtered, preds, average="macro"),
-            "mcc": matthews_corrcoef(y_val_inner_filtered, preds),
-            "kappa": cohen_kappa_score(y_val_inner_filtered, preds),
-            "y_val": y_val_inner,
-            "preds": preds,
-            "preds_prob": json.dumps(preds_prob),
-            "sample_indices": original_val_inner_idx_filtered
+            # Metrics calculated only on samples with known classes
+            "accuracy": accuracy_score(y_val_inner_for_metrics, preds_for_metrics),
+            "f1_macro": f1_score(y_val_inner_for_metrics, preds_for_metrics, average="macro"),
+            "mcc": matthews_corrcoef(y_val_inner_for_metrics, preds_for_metrics),
+            "kappa": cohen_kappa_score(y_val_inner_for_metrics, preds_for_metrics),
+            # But return predictions and true labels for ALL validation samples
+            "y_val": y_val_inner,  # All validation labels (including unseen classes)
+            "preds": preds,        # All predictions 
+            "preds_prob": json.dumps(preds_prob),  # All prediction probabilities
+            "sample_indices": original_val_inner_idx  # All sample indices
         }
 
     def ovr_eval():
@@ -421,27 +441,8 @@ def evaluate_outer_fold(
         label_encoder = LabelEncoder()
         label_encoder.fit(y_train)  # Fit only on training data
         
-        # Check if test data contains unseen classes
-        unseen_classes = set(y_test) - set(label_encoder.classes_)
-        if unseen_classes:
-            print(f"Warning: Validation data contains unseen classes: {unseen_classes}")
-            # Filter out samples with unseen classes
-            mask = np.isin(y_test, list(label_encoder.classes_))
-            y_test_filtered = y_test[mask]
-            X_test_filtered = X_test[mask]
-            test_idx_filtered = test_idx[mask]
-            if len(y_test_filtered) == 0:
-                print("All validation samples have unseen classes. Skipping this fold.")
-                return None
-        else:
-            y_test_filtered = y_test
-            X_test_filtered = X_test
-            test_idx_filtered = test_idx
-        
         # Fit and transform training labels
         y_train_encoded = label_encoder.transform(y_train)
-        # Transform test labels using the same mapping (now safe)
-        y_test_encoded = label_encoder.transform(y_test_filtered)
 
         # Set classifier
         clf = model(**params)
@@ -455,12 +456,30 @@ def evaluate_outer_fold(
         else:
             clf.fit(X_train, y_train_encoded)
 
-        preds_prob = clf.predict_proba(X_test_filtered)
+        # Make predictions on ALL test samples
+        preds_prob = clf.predict_proba(X_test)
         preds_encoded = np.argmax(preds_prob, axis=1)
         
         # Remap predictions back to original labels
         preds = label_encoder.inverse_transform(preds_encoded)
         classes = label_encoder.classes_
+        
+        # Check if test data contains unseen classes (for metric calculation only)
+        unseen_classes = set(y_test) - set(label_encoder.classes_)
+        if unseen_classes:
+            print(f"Warning: Test data contains unseen classes: {unseen_classes}")
+            # Filter samples for metric calculation only
+            mask = np.isin(y_test, list(label_encoder.classes_))
+            y_test_for_metrics = y_test[mask]
+            preds_for_metrics = preds[mask]
+            test_idx_for_metrics = test_idx[mask]
+            if len(y_test_for_metrics) == 0:
+                print("All test samples have unseen classes. Skipping metric calculation.")
+                return None
+        else:
+            y_test_for_metrics = y_test
+            preds_for_metrics = preds
+            test_idx_for_metrics = test_idx
             
         preds_prob = preds_prob.flatten()
         preds_prob = np.round(preds_prob, 4)
@@ -470,14 +489,16 @@ def evaluate_outer_fold(
             "outer_fold": outer_fold,
             "classes": classes,
             "params": params,
-            "accuracy": accuracy_score(y_test_filtered, preds),
-            "f1_macro": f1_score(y_test_filtered, preds, average="macro"),
-            "mcc": matthews_corrcoef(y_test_filtered, preds),
-            "kappa": cohen_kappa_score(y_test_filtered, preds),
-            "y_val": y_test_filtered,
-            "preds": preds,
-            "preds_prob": json.dumps(preds_prob),
-            "sample_indices": test_idx_filtered
+            # Metrics calculated only on samples with known classes
+            "accuracy": accuracy_score(y_test_for_metrics, preds_for_metrics),
+            "f1_macro": f1_score(y_test_for_metrics, preds_for_metrics, average="macro"),
+            "mcc": matthews_corrcoef(y_test_for_metrics, preds_for_metrics),
+            "kappa": cohen_kappa_score(y_test_for_metrics, preds_for_metrics),
+            # But return predictions and true labels for ALL test samples
+            "y_val": y_test,  # All test labels (including unseen classes)
+            "preds": preds,   # All predictions
+            "preds_prob": json.dumps(preds_prob),  # All prediction probabilities
+            "sample_indices": test_idx  # All sample indices
         }
 
     def ovr_eval():

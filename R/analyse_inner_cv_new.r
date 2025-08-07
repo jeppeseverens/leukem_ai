@@ -59,9 +59,9 @@ ENSEMBLE_WEIGHTS <- list(
   NN = list(SVM = 0, XGB = 0, NN = 1),
 
   # Equal weight combinations
-  SVM_XGB = list(SVM = 1, XGB = 1, NN = 0),
-  SVM_NN = list(SVM = 1, XGB = 0, NN = 1),
-  XGB_NN = list(SVM = 0, XGB = 1, NN = 1),
+  # SVM_XGB = list(SVM = 1, XGB = 1, NN = 0),
+  # SVM_NN = list(SVM = 1, XGB = 0, NN = 1),
+  # XGB_NN = list(SVM = 0, XGB = 1, NN = 1),
   ALL = list(SVM = 1, XGB = 1, NN = 1)# ,
 
   # Heavy weight combinations (2:1:1 ratios)
@@ -86,20 +86,20 @@ ENSEMBLE_WEIGHTS <- list(
 )
 
 # Generate all combinations of weights from 0 to 1 in 0.1 steps
-steps <- seq(0, 1, by = 0.1)
-grid <- expand.grid(SVM = steps, XGB = steps, NN = steps)
-
-# Filter combinations that sum to 1
-valid_combinations <- subset(grid, abs(SVM + XGB + NN - 1) < 0.1)
-
-# Convert to a named list
-ENSEMBLE_WEIGHTS <- apply(valid_combinations, 1, function(row) {
-  list(SVM = row["SVM"], XGB = row["XGB"], NN = row["NN"])
-})
-
-# Name the list elements for clarity (optional)
-names(ENSEMBLE_WEIGHTS) <- paste0("W", seq_along(ENSEMBLE_WEIGHTS))
-ENSEMBLE_WEIGHTS[["ALL"]] <- list(SVM = 1, XGB = 1, NN = 1)
+# steps <- seq(0, 1, by = 0.1)
+# grid <- expand.grid(SVM = steps, XGB = steps, NN = steps)
+# 
+# # Filter combinations that sum to 1
+# valid_combinations <- subset(grid, abs(SVM + XGB + NN - 1) < 0.1)
+# 
+# # Convert to a named list
+# ENSEMBLE_WEIGHTS <- apply(valid_combinations, 1, function(row) {
+#   list(SVM = row["SVM"], XGB = row["XGB"], NN = row["NN"])
+# })
+# 
+# # Name the list elements for clarity (optional)
+# names(ENSEMBLE_WEIGHTS) <- paste0("W", seq_along(ENSEMBLE_WEIGHTS))
+# ENSEMBLE_WEIGHTS[["ALL"]] <- list(SVM = 1, XGB = 1, NN = 1)
 # =============================================================================
 # Utility Functions
 # =============================================================================
@@ -383,7 +383,7 @@ generate_ovr_probability_matrices <- function(cv_results_df, best_params_df, lab
       probability_matrix$inner_fold <- inner_fold_id
       # Add outer fold name
       probability_matrix$outer_fold <- outer_fold_id
-      
+      probability_matrix$indices <- parse_numeric_string(inner_fold_data$sample_indices[1])
       fold_matrices[[as.character(inner_fold_id)]] <- probability_matrix
     }
     
@@ -446,7 +446,7 @@ generate_standard_probability_matrices <- function(cv_results_df, best_params_df
       probability_matrix <- data.frame(probability_matrix)
       probability_matrix$inner_fold <- inner_fold_id
       probability_matrix$outer_fold <- outer_fold_id
-      
+      probability_matrix$indices <- parse_numeric_string(inner_fold_data$sample_indices)
       fold_matrices[[as.character(inner_fold_id)]] <- probability_matrix
     }
     
@@ -457,7 +457,7 @@ generate_standard_probability_matrices <- function(cv_results_df, best_params_df
 }
 
 # =============================================================================
-# Improved Ensemble Analysis Functions
+# Ensemble Analysis Functions
 # =============================================================================
 
 #' Perform One-vs-Rest ensemble analysis for each class separately
@@ -718,7 +718,7 @@ analyze_ovr_ensemble_multiclass_performance <- function(ovr_ensemble_result, typ
     
     # Extract true labels and remove from probability matrix
     truth <- optimized_matrix$y
-    prob_matrix <- optimized_matrix[, !colnames(optimized_matrix) %in% c("y", "inner_fold", "outer_fold"), drop = FALSE]
+    prob_matrix <- optimized_matrix[, !colnames(optimized_matrix) %in% c("y", "inner_fold", "outer_fold", "indices"), drop = FALSE]
     
     # Get predictions (class with highest probability)
     preds <- colnames(prob_matrix)[apply(prob_matrix, 1, which.max)]
@@ -918,9 +918,9 @@ align_probability_matrices <- function(prob_matrices, fold_name, type) {
   
   # Remove non-probability columns from matrices (y, inner_fold, outer_fold)
   # Use proper column selection instead of setting to NULL
-  svm_matrix <- svm_matrix[, !colnames(svm_matrix) %in% c("y", "inner_fold", "outer_fold"), drop = FALSE]
-  xgb_matrix <- xgb_matrix[, !colnames(xgb_matrix) %in% c("y", "inner_fold", "outer_fold"), drop = FALSE]
-  nn_matrix <- nn_matrix[, !colnames(nn_matrix) %in% c("y", "inner_fold", "outer_fold"), drop = FALSE]
+  svm_matrix <- svm_matrix[, !colnames(svm_matrix) %in% c("y", "inner_fold", "outer_fold", "indices"), drop = FALSE]
+  xgb_matrix <- xgb_matrix[, !colnames(xgb_matrix) %in% c("y", "inner_fold", "outer_fold", "indices"), drop = FALSE]
+  nn_matrix <- nn_matrix[, !colnames(nn_matrix) %in% c("y", "inner_fold", "outer_fold", "indices"), drop = FALSE]
   
   # Get all unique class names across all models
   all_classes <- unique(c(
@@ -931,7 +931,7 @@ align_probability_matrices <- function(prob_matrices, fold_name, type) {
   
   # Get the minimum number of samples across all models
   min_samples <- min(nrow(svm_matrix), nrow(xgb_matrix), nrow(nn_matrix))
-  
+  max_samples <- max(nrow(svm_matrix), nrow(xgb_matrix), nrow(nn_matrix))
   # Align matrices by ensuring they have the same columns and sample size
   aligned_matrices <- list()
   
@@ -950,6 +950,10 @@ align_probability_matrices <- function(prob_matrices, fold_name, type) {
     
     # Reorder columns to match all_classes
     matrix_data <- matrix_data[, all_classes, drop = FALSE]
+    
+    if (nrow(matrix_data) < max_samples) {
+      cat(sprintf("The probabilties for %s have less samples then max_samples\n", model_name))
+    }
     
     # Truncate to minimum sample size if necessary
     if (nrow(matrix_data) > min_samples) {
@@ -1201,7 +1205,7 @@ analyze_optimized_ensemble_performance <- function(ensemble_result, type = "cv")
     
     # Extract true labels and remove from probability matrix
     truth <- optimized_matrix$y
-    prob_matrix <- optimized_matrix[, !colnames(optimized_matrix) %in% c("y", "inner_fold", "outer_fold"), drop = FALSE]
+    prob_matrix <- optimized_matrix[, !colnames(optimized_matrix) %in% c("y", "inner_fold", "outer_fold", "indices"), drop = FALSE]
     
     # Get predictions
     preds <- colnames(prob_matrix)[apply(prob_matrix, 1, which.max)]
@@ -1251,7 +1255,7 @@ compare_ensemble_performance <- function(results, type = "cv") {
       
       # Extract true labels and remove from probability matrix
       truth <- make.names(optimized_matrix$y)
-      prob_matrix <- optimized_matrix[, !colnames(optimized_matrix) %in% c("y", "inner_fold", "outer_fold"), drop = FALSE]
+      prob_matrix <- optimized_matrix[, !colnames(optimized_matrix) %in% c("y", "inner_fold", "outer_fold", "indices"), drop = FALSE]
       
       # Get predictions
       preds <- colnames(prob_matrix)[apply(prob_matrix, 1, which.max)]
@@ -1339,7 +1343,7 @@ compare_ensemble_performance <- function(results, type = "cv") {
       
       # Extract true labels and remove from probability matrix
       truth <- make.names(optimized_matrix$y)
-      prob_matrix <- optimized_matrix[, !colnames(optimized_matrix) %in% c("y", "inner_fold", "outer_fold"), drop = FALSE]
+      prob_matrix <- optimized_matrix[, !colnames(optimized_matrix) %in% c("y", "inner_fold", "outer_fold", "indices"), drop = FALSE]
       
       # Get predictions
       preds <- colnames(prob_matrix)[apply(prob_matrix, 1, which.max)]
@@ -1388,7 +1392,7 @@ compare_ensemble_performance <- function(results, type = "cv") {
 evaluate_single_matrix_with_rejection <- function(prob_matrix, fold_name, model_name, type) {
   # Extract true labels and remove from probability matrix
   truth <- prob_matrix$y
-  prob_matrix_clean <- prob_matrix[, !colnames(prob_matrix) %in% c("y", "inner_fold", "outer_fold"), drop = FALSE]
+  prob_matrix_clean <- prob_matrix[, !colnames(prob_matrix) %in% c("y", "inner_fold", "outer_fold", "indices"), drop = FALSE]
   
   # Clean class labels
   truth <- gsub("Class. ", "", truth)
@@ -1409,7 +1413,7 @@ evaluate_single_matrix_with_rejection <- function(prob_matrix, fold_name, model_
   preds <- factor(preds, levels = all_classes)
   
   # Test probability cutoffs 
-  prob_cutoffs <- seq(0.00, 1.00, by = 0.01)
+  prob_cutoffs <- seq(0.00, 1.00, by = 0.1)
   all_results <- data.frame()
   
   for (cutoff in prob_cutoffs) {

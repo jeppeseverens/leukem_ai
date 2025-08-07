@@ -7,6 +7,9 @@
 # evaluates final model performance.
 # =============================================================================
 
+# Set working directory
+setwd("~/Documents/AML_PhD/leukem_ai")
+
 # =============================================================================
 # Configuration and Constants
 # =============================================================================
@@ -53,14 +56,16 @@ DATA_FILTERS <- list(
 )
 
 # Base directory for ensemble weights
-WEIGHTS_BASE_DIR <- "inner_cv_best_params_n10"
+WEIGHTS_BASE_DIR <- "inner_cv_best_params_n10/ensemble_weights"
+
+# Base directory for rejection cut offs
+REJECTION_BASE_DIR <- "inner_cv_best_params_n10/rejection_analysis"
 
 # =============================================================================
-# Source Utility Functions from Inner CV Script
+# Source Utility Functions
 # =============================================================================
 
-# Source the inner CV script to get utility functions
-source("R/analyse_inner_cv_new.r", local = TRUE)
+source("R/utility_functions.R")
 
 # =============================================================================
 # Outer CV Specific Functions
@@ -78,7 +83,7 @@ load_outer_cv_results <- function(file_path, classification_type) {
     return(NULL)
   }
   
-  results <- safe_read_file(file_path, function(f) data.frame(data.table::fread(f)))
+  results <- safe_read_file(file_path, function(f) data.frame(data.table::fread(f, sep = ","), row.names = 1))
   
   if (is.null(results)) {
     warning(sprintf("Failed to load file: %s", file_path))
@@ -103,13 +108,13 @@ load_outer_cv_results <- function(file_path, classification_type) {
 #' @param label_mapping Label mapping data frame
 #' @return List of probability matrices organized by outer fold
 generate_outer_ovr_probability_matrices <- function(outer_cv_results, label_mapping) {
-  cat("Generating outer CV One-vs-Rest probability matrices...\n")
+  cat("Generating outer One-vs-Rest probability matrices...\n")
   
   outer_fold_ids <- unique(outer_cv_results$outer_fold)
   probability_matrices <- list()
   
   for (outer_fold_id in outer_fold_ids) {
-    cat(sprintf("  Processing outer fold %d...\n", outer_fold_id))
+    cat(sprintf("  Processing outer fold %s...\n", as.character(outer_fold_id)))
     
     outer_fold_data <- outer_cv_results[outer_cv_results$outer_fold == outer_fold_id, ]
     class_labels <- unique(outer_fold_data$class_label)
@@ -124,7 +129,7 @@ generate_outer_ovr_probability_matrices <- function(outer_cv_results, label_mapp
     num_samples <- length(parse_numeric_string(first_row$preds_prob))
     
     if (num_samples == 0) {
-      warning(sprintf("No valid predictions for outer fold %d", outer_fold_id))
+      warning(sprintf("No valid predictions for outer fold", outer_fold_id))
       next
     }
     
@@ -198,12 +203,12 @@ generate_outer_standard_probability_matrices <- function(outer_cv_results, label
   probability_matrices <- list()
   
   for (outer_fold_id in outer_fold_ids) {
-    cat(sprintf("  Processing outer fold %d...\n", outer_fold_id))
+    cat(sprintf("  Processing outer fold %s...\n", as.character(outer_fold_id)))
     
     fold_data <- outer_cv_results[outer_cv_results$outer_fold == outer_fold_id, ]
     
     if (nrow(fold_data) == 0) {
-      warning(sprintf("No data for outer fold %d", outer_fold_id))
+      warning(sprintf("No data for outer fold", outer_fold_id))
       next
     }
     
@@ -288,14 +293,6 @@ apply_ensemble_weights_to_outer_cv <- function(outer_prob_matrices, ensemble_wei
       warning(sprintf("Missing probability matrix for fold %s", fold_name))
       next
     }
-    
-    # Align matrices
-    aligned_matrices <- align_probability_matrices(
-      list(svm = list(cv = list(), loso = list()), 
-           xgboost = list(cv = list(), loso = list()), 
-           neural_net = list(cv = list(), loso = list())),
-      fold_name, type
-    )
     
     # Manual alignment since the function expects a different structure
     truth <- svm_matrix$y
