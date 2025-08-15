@@ -115,7 +115,7 @@ def filter_data(X, y, study_labels, min_n=20):
     unique_classes, class_counts = np.unique(y, return_counts=True)
     valid_classes = unique_classes[class_counts >= min_n]
 
-    valid_classes = [c for c in valid_classes if c != "AML NOS" and c != "Missing data"]
+    valid_classes = [c for c in valid_classes if c != "AML NOS" and c != "Missing data" and c != "Multi"]
 
     valid_indices_classes = np.isin(y, valid_classes)
 
