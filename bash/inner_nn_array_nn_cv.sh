@@ -34,6 +34,6 @@ python python/run_inner_cv_array.py \
     --k_in 5 \
     --n_max_param 96 \
     --fold_type "CV" \
-    --run_name "cv_15aug25"
+    --run_name "nn_cv_15aug25"
 
 deactivate 
