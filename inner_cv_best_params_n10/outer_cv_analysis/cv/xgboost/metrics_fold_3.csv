@@ -1,0 +1,7 @@
+"Metric","Value"
+"Kappa",0.810072975236272
+"Accuracy",0.836734693877551
+"Balanced_Accuracy",0.859291142148363
+"F1_Macro",0.738763586492244
+"Sensitivity_Macro",0.729347962122104
+"Specificity_Macro",0.989234322174623

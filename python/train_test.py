@@ -253,7 +253,6 @@ def evaluate_inner_fold(
             mask = np.isin(y_val_inner, list(label_encoder.classes_))
             y_val_inner_for_metrics = y_val_inner[mask]
             preds_for_metrics = preds[mask]
-            original_val_inner_idx_for_metrics = original_val_inner_idx[mask]
             
             if len(y_val_inner_for_metrics) == 0:
                 print("All validation samples have unseen classes. Skipping metric calculation.")
@@ -262,7 +261,6 @@ def evaluate_inner_fold(
             # All classes are known, use all samples for metrics
             y_val_inner_for_metrics = y_val_inner
             preds_for_metrics = preds
-            original_val_inner_idx_for_metrics = original_val_inner_idx
                 
         if model_type == "NN":
             history = clf.model.history.history

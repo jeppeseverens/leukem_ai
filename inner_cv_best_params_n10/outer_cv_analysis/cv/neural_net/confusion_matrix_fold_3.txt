@@ -1,0 +1,112 @@
+Confusion Matrix and Statistics
+
+                                       Reference
+Prediction                              AML.with.mutated.NPM1 AML.with.inv.3..t.3.3..GATA2.MECOM AML.with.t.9.11..MLLT3..KMT2A AML.with.inv.16..t.16.16..CBFB..MYH11
+  AML.with.mutated.NPM1                                    77                                  0                             0                                     1
+  AML.with.inv.3..t.3.3..GATA2.MECOM                        0                                  4                             0                                     0
+  AML.with.t.9.11..MLLT3..KMT2A                             0                                  0                            24                                     1
+  AML.with.inv.16..t.16.16..CBFB..MYH11                     0                                  0                             0                                    50
+  MDS.r                                                     5                                  0                             3                                     2
+  other.KMT2A                                               0                                  0                             3                                     1
+  AML.with.t.8.21..RUNX1..RUNX1T1                           0                                  0                             0                                     2
+  APL..t.15.17..PML..RARA                                   2                                  0                             0                                     0
+  AML.with.in.frame.bZIP.CEBPA                              1                                  0                             0                                     1
+  RBM15..MRTF1                                              0                                  0                             0                                     0
+  NUP98..NSD1                                               0                                  0                             0                                     0
+  FUS..ERG                                                  0                                  0                             0                                     0
+  AML.with.t.6.9..DEK..NUP214                               0                                  0                             0                                     0
+  ETV6..MNX1                                                0                                  0                             1                                     0
+  CBFA2T3..GLIS2                                            0                                  0                             0                                     0
+  KAT6A..CREBBP                                             1                                  0                             0                                     0
+  NUP98..KDM5A                                              0                                  0                             0                                     0
+  PICALM..MLLT10                                            0                                  0                             0                                     0
+                                       Reference
+Prediction                              MDS.r other.KMT2A AML.with.t.8.21..RUNX1..RUNX1T1 APL..t.15.17..PML..RARA AML.with.in.frame.bZIP.CEBPA RBM15..MRTF1 NUP98..NSD1
+  AML.with.mutated.NPM1                     3           0                               1                       3                            1            0           0
+  AML.with.inv.3..t.3.3..GATA2.MECOM        1           0                               1                       0                            0            0           0
+  AML.with.t.9.11..MLLT3..KMT2A             2           2                               1                       0                            0            0           0
+  AML.with.inv.16..t.16.16..CBFB..MYH11     1           0                               0                       0                            0            0           0
+  MDS.r                                    73           5                               0                       1                            0            2           0
+  other.KMT2A                               1          28                               1                       0                            0            0           0
+  AML.with.t.8.21..RUNX1..RUNX1T1           1           0                              53                       0                            0            0           0
+  APL..t.15.17..PML..RARA                   0           0                               0                      12                            1            0           0
+  AML.with.in.frame.bZIP.CEBPA              2           0                               1                       0                           24            0           0
+  RBM15..MRTF1                              0           0                               0                       0                            0            2           0
+  NUP98..NSD1                               2           0                               0                       0                            0            0          10
+  FUS..ERG                                  0           0                               0                       0                            0            0           0
+  AML.with.t.6.9..DEK..NUP214               0           0                               0                       0                            0            0           0
+  ETV6..MNX1                                0           0                               0                       0                            0            0           0
+  CBFA2T3..GLIS2                            2           0                               0                       0                            0            0           0
+  KAT6A..CREBBP                             1           0                               0                       0                            0            0           0
+  NUP98..KDM5A                              1           0                               0                       0                            0            0           0
+  PICALM..MLLT10                            3           0                               0                       0                            0            0           0
+                                       Reference
+Prediction                              FUS..ERG AML.with.t.6.9..DEK..NUP214 ETV6..MNX1 CBFA2T3..GLIS2 KAT6A..CREBBP NUP98..KDM5A PICALM..MLLT10
+  AML.with.mutated.NPM1                        0                           0          0              0             0            1              0
+  AML.with.inv.3..t.3.3..GATA2.MECOM           0                           0          0              0             0            0              0
+  AML.with.t.9.11..MLLT3..KMT2A                0                           0          0              0             0            0              0
+  AML.with.inv.16..t.16.16..CBFB..MYH11        0                           0          0              0             0            0              0
+  MDS.r                                        0                           0          0              2             0            0              0
+  other.KMT2A                                  0                           0          0              0             0            0              0
+  AML.with.t.8.21..RUNX1..RUNX1T1              0                           0          0              0             0            0              0
+  APL..t.15.17..PML..RARA                      0                           0          0              0             0            0              0
+  AML.with.in.frame.bZIP.CEBPA                 0                           0          0              0             0            0              0
+  RBM15..MRTF1                                 0                           0          0              0             0            0              0
+  NUP98..NSD1                                  0                           0          0              0             0            0              0
+  FUS..ERG                                     2                           0          0              0             0            0              0
+  AML.with.t.6.9..DEK..NUP214                  0                           7          0              0             0            0              0
+  ETV6..MNX1                                   0                           0          2              0             0            0              0
+  CBFA2T3..GLIS2                               0                           0          0              2             0            0              0
+  KAT6A..CREBBP                                0                           0          0              0             1            0              0
+  NUP98..KDM5A                                 0                           0          0              0             0            1              0
+  PICALM..MLLT10                               0                           0          0              0             0            0              2
+
+Overall Statistics
+                                          
+               Accuracy : 0.8481          
+                 95% CI : (0.8111, 0.8803)
+    No Information Rate : 0.2109          
+    P-Value [Acc > NIR] : < 2.2e-16       
+                                          
+                  Kappa : 0.8249          
+                                          
+ Mcnemar's Test P-Value : NA              
+
+Statistics by Class:
+
+                     Class: AML.with.mutated.NPM1 Class: AML.with.inv.3..t.3.3..GATA2.MECOM Class: AML.with.t.9.11..MLLT3..KMT2A
+Sensitivity                                0.8953                                   1.00000                              0.77419
+Specificity                                0.9718                                   0.99542                              0.98537
+Pos Pred Value                             0.8851                                   0.66667                              0.80000
+Neg Pred Value                             0.9746                                   1.00000                              0.98297
+Prevalence                                 0.1950                                   0.00907                              0.07029
+Detection Rate                             0.1746                                   0.00907                              0.05442
+Detection Prevalence                       0.1973                                   0.01361                              0.06803
+Balanced Accuracy                          0.9336                                   0.99771                              0.87978
+                     Class: AML.with.inv.16..t.16.16..CBFB..MYH11 Class: MDS.r Class: other.KMT2A Class: AML.with.t.8.21..RUNX1..RUNX1T1 Class: APL..t.15.17..PML..RARA
+Sensitivity                                                0.8621       0.7849            0.80000                                 0.9138                        0.75000
+Specificity                                                0.9974       0.9425            0.98522                                 0.9922                        0.99294
+Pos Pred Value                                             0.9804       0.7849            0.82353                                 0.9464                        0.80000
+Neg Pred Value                                             0.9795       0.9425            0.98280                                 0.9870                        0.99061
+Prevalence                                                 0.1315       0.2109            0.07937                                 0.1315                        0.03628
+Detection Rate                                             0.1134       0.1655            0.06349                                 0.1202                        0.02721
+Detection Prevalence                                       0.1156       0.2109            0.07710                                 0.1270                        0.03401
+Balanced Accuracy                                          0.9297       0.8637            0.89261                                 0.9530                        0.87147
+                     Class: AML.with.in.frame.bZIP.CEBPA Class: RBM15..MRTF1 Class: NUP98..NSD1 Class: FUS..ERG Class: AML.with.t.6.9..DEK..NUP214 Class: ETV6..MNX1
+Sensitivity                                      0.92308            0.500000            1.00000        1.000000                            1.00000          1.000000
+Specificity                                      0.98795            1.000000            0.99536        1.000000                            1.00000          0.997722
+Pos Pred Value                                   0.82759            1.000000            0.83333        1.000000                            1.00000          0.666667
+Neg Pred Value                                   0.99515            0.995444            1.00000        1.000000                            1.00000          1.000000
+Prevalence                                       0.05896            0.009070            0.02268        0.004535                            0.01587          0.004535
+Detection Rate                                   0.05442            0.004535            0.02268        0.004535                            0.01587          0.004535
+Detection Prevalence                             0.06576            0.004535            0.02721        0.004535                            0.01587          0.006803
+Balanced Accuracy                                0.95551            0.750000            0.99768        1.000000                            1.00000          0.998861
+                     Class: CBFA2T3..GLIS2 Class: KAT6A..CREBBP Class: NUP98..KDM5A Class: PICALM..MLLT10
+Sensitivity                       0.500000             1.000000            0.500000              1.000000
+Specificity                       0.995423             0.995455            0.997722              0.993166
+Pos Pred Value                    0.500000             0.333333            0.500000              0.400000
+Neg Pred Value                    0.995423             1.000000            0.997722              1.000000
+Prevalence                        0.009070             0.002268            0.004535              0.004535
+Detection Rate                    0.004535             0.002268            0.002268              0.004535
+Detection Prevalence              0.009070             0.006803            0.004535              0.011338
+Balanced Accuracy                 0.747712             0.997727            0.748861              0.996583

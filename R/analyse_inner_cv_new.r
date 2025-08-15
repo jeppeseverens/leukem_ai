@@ -31,8 +31,8 @@ MODEL_CONFIGS <- list(
   neural_net = list(
     classification_type = "standard",
     file_paths = list(
-      cv = "/Users/jsevere2/Documents/AML_PhD/predictor_out/NN/cv_27jul25",
-      loso = "/Users/jsevere2/Documents/AML_PhD/predictor_out/NN/loso_27jul25/"
+      cv = "/Users/jsevere2/Documents/AML_PhD/predictor_out/NN/cv_7aug25/",
+      loso = "/Users/jsevere2/Documents/AML_PhD/predictor_out/NN/loso_7aug25//"
     ),
     output_dir = "/Users/jsevere2/Documents/AML_PhD/leukem_ai/inner_cv_best_params_n10/NN"
   )
@@ -86,20 +86,20 @@ ENSEMBLE_WEIGHTS <- list(
 )
 
 # Generate all combinations of weights from 0 to 1 in 0.1 steps
-# steps <- seq(0, 1, by = 0.1)
-# grid <- expand.grid(SVM = steps, XGB = steps, NN = steps)
-# 
-# # Filter combinations that sum to 1
-# valid_combinations <- subset(grid, abs(SVM + XGB + NN - 1) < 0.1)
-# 
-# # Convert to a named list
-# ENSEMBLE_WEIGHTS <- apply(valid_combinations, 1, function(row) {
-#   list(SVM = row["SVM"], XGB = row["XGB"], NN = row["NN"])
-# })
-# 
-# # Name the list elements for clarity (optional)
-# names(ENSEMBLE_WEIGHTS) <- paste0("W", seq_along(ENSEMBLE_WEIGHTS))
-# ENSEMBLE_WEIGHTS[["ALL"]] <- list(SVM = 1, XGB = 1, NN = 1)
+steps <- seq(0, 1, by = 0.1)
+grid <- expand.grid(SVM = steps, XGB = steps, NN = steps)
+
+# Filter combinations that sum to 1
+valid_combinations <- subset(grid, abs(SVM + XGB + NN - 1) < 0.1)
+
+# Convert to a named list
+ENSEMBLE_WEIGHTS <- apply(valid_combinations, 1, function(row) {
+  list(SVM = row["SVM"], XGB = row["XGB"], NN = row["NN"])
+})
+
+# Name the list elements for clarity (optional)
+names(ENSEMBLE_WEIGHTS) <- paste0("W", seq_along(ENSEMBLE_WEIGHTS))
+ENSEMBLE_WEIGHTS[["ALL"]] <- list(SVM = 1, XGB = 1, NN = 1)
 # =============================================================================
 # Utility Functions
 # =============================================================================
@@ -911,6 +911,8 @@ align_probability_matrices <- function(prob_matrices, fold_name, type) {
     return(NULL)
   }
   
+  # # Expand and add zeroes for samples 
+  # !!! AEKJfhkasjefhkjdaef
   # Extract true labels
   truth_svm <- make.names(svm_matrix$y)
   truth_xgb <- make.names(xgb_matrix$y)
@@ -1413,7 +1415,7 @@ evaluate_single_matrix_with_rejection <- function(prob_matrix, fold_name, model_
   preds <- factor(preds, levels = all_classes)
   
   # Test probability cutoffs 
-  prob_cutoffs <- seq(0.00, 1.00, by = 0.1)
+  prob_cutoffs <- seq(0.00, 1.00, by = 0.01)
   all_results <- data.frame()
   
   for (cutoff in prob_cutoffs) {
@@ -1536,7 +1538,7 @@ find_optimal_cutoffs <- function(rejection_results, optimization_metric = "kappa
   optimal_cutoffs <- rejection_results %>%
     group_by(model, fold) %>%
     filter(!is.na(!!sym(optimization_metric))) %>%
-    filter( (is.na(rejected_accuracy) | rejected_accuracy < 0.5) & (perc_rejected < 0.10) ) %>%
+    filter( (is.na(rejected_accuracy) | rejected_accuracy < 0.5) & (perc_rejected < 0.05) ) %>%
     slice_max(!!sym(optimization_metric), with_ties = FALSE) %>%
     ungroup()
   
@@ -1715,24 +1717,7 @@ run_ensemble_analysis_for_both_types <- function(probability_matrices, weights) 
       cat(sprintf("Skipping %s analysis - missing data\n", toupper(analysis_type)))
       next
     }
-    
-    # # Perform ensemble analysis
-    # ensemble_results <- perform_ensemble_analysis(
-    #   list(probability_matrices = probability_matrices), 
-    #   weights, 
-    #   analysis_type
-    # )
-    # 
-    # # Generate optimized ensemble matrices (per-class optimization)
-    # optimized_ensemble_matrices <- generate_optimized_ensemble_matrices(
-    #   list(probability_matrices = probability_matrices), 
-    #   weights, 
-    #   analysis_type
-    # )
-    # 
-    # # Analyze optimized ensemble performance (per-class optimization)
-    # optimized_ensemble_performance <- analyze_optimized_ensemble_performance(optimized_ensemble_matrices, analysis_type)
-    
+
     # Perform global ensemble analysis
     global_ensemble_results <- perform_global_ensemble_analysis(
       list(probability_matrices = probability_matrices), 
@@ -1809,7 +1794,6 @@ compare_ensemble_performance_for_both_types <- function(results) {
     comparison_results <- list(
       probability_matrices = results$probability_matrices,
       ovr_ensemble_multiclass_performance = results[[analysis_type]]$ovr_ensemble_multiclass_performance,
-      # optimized_ensemble_performance = results[[analysis_type]]$optimized_ensemble_performance,
       global_optimized_ensemble_performance = results[[analysis_type]]$global_optimized_ensemble_performance
     )
     
