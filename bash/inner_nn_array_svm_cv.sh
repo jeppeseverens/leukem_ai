@@ -5,7 +5,7 @@
 #SBATCH --cpus-per-task=1         # 1 core per hyperparameter combination
 #SBATCH --time=06:00:00           
 #SBATCH --error=job_output/cv/job_array_cv.%A_%a.err
-#SBATCH --output=job_output/cvjob_array_cv.%A_%a.out
+#SBATCH --output=job_output/cv/job_array_cv.%A_%a.out
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --mail-user=j.f.severens@lumc.nl
 #SBATCH --mem=8G                  
