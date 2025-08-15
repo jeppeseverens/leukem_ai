@@ -24,7 +24,7 @@ echo "Processing hyperparameter combination $SLURM_ARRAY_TASK_ID out of 96"
 echo "=================================="
 
 # Define your arguments for each array job
-MODEL_TYPE="NN"
+MODEL_TYPE="XGBOOST"
 
 # Run CV fold type
 python python/run_inner_cv_array.py \
@@ -34,6 +34,6 @@ python python/run_inner_cv_array.py \
     --k_in 5 \
     --n_max_param 96 \
     --fold_type "CV" \
-    --run_name "cv_27jul25"
+    --run_name "cv_15aug25"
 
 deactivate 
