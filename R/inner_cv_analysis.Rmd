@@ -29,7 +29,7 @@ load_library_quietly("caret")
 # Filters
 DATA_FILTERS <- list(
   min_samples_per_subtype = 10,
-  excluded_subtypes = c("AML NOS", "Missing data"),
+  excluded_subtypes = c("AML NOS", "Missing data", "Multi"),
   selected_studies = c(
     "TCGA-LAML",
     "LEUCEGENE", 
@@ -40,7 +40,13 @@ DATA_FILTERS <- list(
 )
 
 # Load mapping of class labels to numeric labels
-label_mapping <- read.csv("~/Documents/AML_PhD/leukem_ai/label_mapping_df_n10.csv")
+label_mapping <- read.csv("~/Documents/AML_PhD/leukem_ai/label_mapping_15aug2025.csv")
+
+# Load leukemia subtype data
+leukemia_subtypes <- read.csv("../data/rgas.csv")$ICC_Subtype
+
+# Load study metadata
+study_names <- read.csv("../data/meta.csv")$Studies
 
 # Filter data based on criteria
 subtypes_with_sufficient_samples <- names(which(table(leukemia_subtypes) >= DATA_FILTERS$min_samples_per_subtype))
@@ -51,10 +57,10 @@ filter <- which(
 )
 
 # Load leukemia subtype data
-leukemia_subtypes <- read.csv("../data/rgas.csv")$ICC_Subtype[filter]
+filtered_leukemia_subtypes <- leukemia_subtypes[filter]
 
 # Load study metadata
-study_names <- read.csv("../data/meta.csv")$Studies[filter]
+filtered_study_names <- study_names[filter]
 ```
 
 
@@ -63,26 +69,26 @@ MODEL_CONFIGS <- list(
   svm = list(
     classification_type = "OvR",
     file_paths = list(
-      cv = "/Users/jsevere2/Documents/AML_PhD/predictor_out/SVM/20250611_1318/SVM_inner_cv_OvR_20250611_1318.csv",
-      loso = "/Users/jsevere2/Documents/AML_PhD/predictor_out/SVM/20250611_1927/SVM_inner_cv_loso_OvR_20250611_1927.csv"
+      cv = "/Users/jsevere2/Documents/AML_PhD/leukem_ai/out_2/SVM_array/svm_cv_15aug25/",
+      loso = "/Users/jsevere2/Documents/AML_PhD/leukem_ai/out_2/SVM_array/svm_loso_15aug25/"
     ),
-    output_dir = "/Users/jsevere2/Documents/AML_PhD/leukem_ai/inner_cv_best_params_n10/SVM"
+    output_dir = "/Users/jsevere2/Documents/AML_PhD/leukem_ai/inner_cv_best_params_n10/SVM_15aug"
   ),
   xgboost = list(
     classification_type = "OvR",
     file_paths = list(
-      cv = "/Users/jsevere2/Documents/AML_PhD/predictor_out/XGBOOST/20250612_0024/XGBOOST_inner_cv_OvR_20250612_0024.csv",
-      loso = "/Users/jsevere2/Documents/AML_PhD/predictor_out/XGBOOST/20250612_0516/XGBOOST_inner_cv_loso_OvR_20250612_0516.csv"
+      cv = "/Users/jsevere2/Documents/AML_PhD/leukem_ai/out_2/XGBOOST_array/xgb_cv_15aug25/",
+      loso = "/Users/jsevere2/Documents/AML_PhD/leukem_ai/out_2/XGBOOST_array/xgb_loso_15aug25/"
     ),
-    output_dir = "/Users/jsevere2/Documents/AML_PhD/leukem_ai/inner_cv_best_params_n10/XGBOOST"
+    output_dir = "/Users/jsevere2/Documents/AML_PhD/leukem_ai/inner_cv_best_params_n10/XGBOOST_15aug"
   ),
   neural_net = list(
     classification_type = "standard",
     file_paths = list(
-      cv = "/Users/jsevere2/Documents/AML_PhD/predictor_out/NN/cv_7aug25/",
-      loso = "/Users/jsevere2/Documents/AML_PhD/predictor_out/NN/loso_7aug25//"
+      cv = "/Users/jsevere2/Documents/AML_PhD/leukem_ai/out_2/NN_array/nn_cv_15aug25/",
+      loso = "/Users/jsevere2/Documents/AML_PhD/leukem_ai/out_2/NN_array/nn_loso_15aug25/"
     ),
-    output_dir = "/Users/jsevere2/Documents/AML_PhD/leukem_ai/inner_cv_best_params_n10/NN"
+    output_dir = "/Users/jsevere2/Documents/AML_PhD/leukem_ai/inner_cv_best_params_n10/NN_15aug"
   )
 )
 
@@ -178,17 +184,12 @@ load_all_model_data <- function(model_configs) {
     
     for (fold_type in names(config$file_paths)) {
       file_path <- config$file_paths[[fold_type]]
-      
+      results <- combine_csv_files(file_path)
       if (model_name == "neural_net") {
-        # Neural networks use directory of CSV files
-        results <- combine_csv_files(file_path)
         if (!is.null(results)) {
           results <- process_neural_net_results(results)
         }
-      } else {
-        # SVM and XGBoost use single CSV files
-        results <- data.frame(data.table::fread(file_path))
-      }
+      } 
       
       if (!is.null(results)) {
         model_results[[model_name]][[fold_type]] <- results
@@ -203,6 +204,24 @@ load_all_model_data <- function(model_configs) {
 
 model_results <- load_all_model_data(MODEL_CONFIGS)
 ```
+
+```{r}
+test <- model_results$neural_net$loso %>% group_by(across(c("inner_fold","outer_fold", "params"))) %>%
+    summarise(
+      mean_kappa = mean(kappa, na.rm = TRUE),
+      sd_kappa = sd(kappa, na.rm = TRUE),
+      mean_mcc = mean(mcc, na.rm = TRUE),
+      sd_mcc = sd(mcc, na.rm = TRUE),
+      mean_accuracy = mean(accuracy, na.rm = TRUE),
+      sd_accuracy = sd(accuracy, na.rm = TRUE),
+      across(any_of(c("class_0", "class_1")), first),
+      .groups = "drop_last"
+    ) %>% group_by(across(c("inner_fold","outer_fold"))) %>%
+    filter(mean_kappa == max(mean_kappa, na.rm = TRUE)) %>%
+    slice(1) %>%
+    ungroup()
+```
+
 
 ```{r}
 #' Extract the best hyperparameters per outer fold based on mean kappa
@@ -273,7 +292,18 @@ extract_all_best_parameters <- function(model_results, model_configs) {
 best_parameters <- extract_all_best_parameters(model_results, MODEL_CONFIGS)
 ```
 
+
+
 ```{r}
+#' Modify class labels to group related subtypes
+#' @param vector Vector of class labels
+#' @return Modified vector with grouped classes
+modify_classes <- function(vector) {
+  vector[grepl("MDS|TP53", vector)] <- "MDS.r"
+  vector[!grepl("MLLT3", vector) & grepl("KMT2A", vector)] <- "other.KMT2A"
+  vector
+}
+
 #' Save best parameters for all models
 #' @param best_parameters Best parameters for each model
 #' @param model_configs Model configurations
@@ -285,7 +315,7 @@ save_all_best_parameters <- function(best_parameters, model_configs) {
     output_dir <- config$output_dir
     
     cat(sprintf("Saving %s results...\n", toupper(model_name)))
-    create_directory_safely(output_dir)
+    dir.create(output_dir)
     
     for (fold_type in names(best_parameters[[model_name]])) {
       best_params <- best_parameters[[model_name]][[fold_type]]
@@ -467,13 +497,13 @@ generate_standard_probability_matrices <- function(cv_results_df, best_params_df
   probability_matrices
 }
 
-probability_matrices <- list()
+probability_matrices_1 <- list()
 probability_matrices_2 <- list()
 for (model_name in names(model_results)) {
     config <- MODEL_CONFIGS[[model_name]]
     cat(sprintf("Extracting %s probabilities...\n", toupper(model_name)))
     
-    probability_matrices[[model_name]] <- list()
+    probability_matrices_1[[model_name]] <- list()
     
     for (fold_type in names(model_results[[model_name]])) {
       results <- model_results[[model_name]][[fold_type]]
@@ -485,7 +515,7 @@ for (model_name in names(model_results)) {
         } else {
           probs <- generate_standard_probability_matrices(results, best_params, label_mapping, filtered_leukemia_subtypes)
         }
-        probability_matrices[[model_name]][[fold_type]] <- probs
+        probability_matrices_1[[model_name]][[fold_type]] <- probs
         probs_2 <- lapply(probs, function(prob) {
           MDS_cols <- grepl("MDS|TP53", colnames(prob))
           MDS <- rowSums(prob[,MDS_cols])
@@ -494,8 +524,10 @@ for (model_name in names(model_results)) {
           other_KMT2A <- rowSums(prob[,other_KMT2A_cols])
           
           prob <- prob[, !(MDS_cols | other_KMT2A_cols)]
-          prob$MDS <- MDS
-          prob$other_KMT2A <- other_KMT2A
+          prob$MDS.r <- MDS
+          prob$other.KMT2A <- other_KMT2A
+          prob$y <- modify_classes(prob$y)
+          colnames(prob) <- modify_classes(colnames(prob))
           return(prob)
         })
         
@@ -509,15 +541,6 @@ for (model_name in names(model_results)) {
 ```{r}
 performance_results <- list()
 results_list <- list()
-
-#' Modify class labels to group related subtypes
-#' @param vector Vector of class labels
-#' @return Modified vector with grouped classes
-modify_classes <- function(vector) {
-  vector[grepl("MDS|TP53", vector)] <- "MDS.r"
-  vector[!grepl("MLLT3", vector) & grepl("KMT2A", vector)] <- "other.KMT2A"
-  vector
-}
 
 get_per_model_performance <- function(probability_matrices){
 for (model in names(probability_matrices)) {
@@ -568,7 +591,7 @@ results_df <- do.call(rbind, results_list)
 results_df
 }
 library(dplyr)
-get_per_model_performance(probability_matrices) %>% group_by(model, method) %>% summarise(mean_kappa = mean(kappa), 
+get_per_model_performance(probability_matrices_1) %>% group_by(model, method) %>% summarise(mean_kappa = mean(kappa), 
                                                                            sd_kappa = sd(kappa),
                                                                            mean_mcc = mean(mcc),
                                                                            sd_mcc = sd(mcc))
@@ -581,7 +604,7 @@ get_per_model_performance(probability_matrices_2) %>% group_by(model, method) %>
 
 
 ```{r}
-generate_weights <- function(step = 0.1){
+generate_weights <- function(step = 0.3){
   # Generate all combinations of weights from 0 to 1 in 0.1 steps
   steps <- seq(0, 1, by = step)
   grid <- expand.grid(SVM = steps, XGB = steps, NN = steps)
@@ -601,15 +624,6 @@ generate_weights <- function(step = 0.1){
   ENSEMBLE_WEIGHTS[["ALL"]] <- list(SVM = 1, XGB = 1, NN = 1)
   
   return(ENSEMBLE_WEIGHTS)
-}
-
-#' Modify class labels to group related subtypes
-#' @param vector Vector of class labels
-#' @return Modified vector with grouped classes
-modify_classes <- function(vector) {
-  vector[grepl("MDS|TP53", vector)] <- "MDS.r"
-  vector[!grepl("MLLT3", vector) & grepl("KMT2A", vector)] <- "other.KMT2A"
-  vector
 }
 
 #' Perform One-vs-Rest ensemble analysis for each class separately
@@ -1253,7 +1267,7 @@ run_ensemble_analysis_for_both_types <- function(probability_matrices, weights) 
 
 ```{r}
 # Run ensemble analysis for both CV and LOSO
-ensemble_results <- run_ensemble_analysis_for_both_types(probability_matrices, generate_weights(0.1))
+ensemble_results_1 <- run_ensemble_analysis_for_both_types(probability_matrices_1, generate_weights(0.1))
 ensemble_results_2 <- run_ensemble_analysis_for_both_types(probability_matrices_2, generate_weights(0.1))
 
 ```
@@ -1414,7 +1428,7 @@ compare_ensemble_performance_for_both_types <- function(results) {
 
 # Compare ensemble performance for both CV and LOSO
 performance_comparisons <- compare_ensemble_performance_for_both_types(
-    list(probability_matrices = probability_matrices, cv = ensemble_results$cv, loso = ensemble_results$loso)
+    list(probability_matrices = probability_matrices_1, cv = ensemble_results_1$cv, loso = ensemble_results_1$loso)
   )
 ```
 ```{r}
@@ -1424,7 +1438,6 @@ performance_comparisons_2 <- compare_ensemble_performance_for_both_types(
 ```
 
 ```{r}
-
 #' Evaluate nested CV kappa with rejection for a single probability matrix
 #' @param prob_matrix Probability matrix with class probabilities and true labels
 #' @param fold_name Name of the fold being analyzed
@@ -1578,7 +1591,7 @@ find_optimal_cutoffs <- function(rejection_results, optimization_metric = "kappa
   optimal_cutoffs <- rejection_results %>%
     group_by(model, fold) %>%
     filter(!is.na(!!sym(optimization_metric))) %>%
-    filter( (is.na(rejected_accuracy) | rejected_accuracy < 0.5) & (perc_rejected < 0.05) ) %>%
+    filter( (is.na(rejected_accuracy) | rejected_accuracy < 0.5) & (perc_rejected < 0.025) ) %>%
     slice_max(!!sym(optimization_metric), with_ties = FALSE) %>%
     ungroup()
   
@@ -1712,8 +1725,8 @@ create_directory_safely <- function(dir_path) {
 
 ```{r}
 # Define output directory for saving results
-rejection_results <- run_complete_rejection_analysis(
-    probability_matrices, ensemble_results
+rejection_results_1 <- run_complete_rejection_analysis(
+    probability_matrices_1, ensemble_results_1
   )
 
 rejection_results_2 <- run_complete_rejection_analysis(

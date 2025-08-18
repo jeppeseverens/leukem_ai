@@ -44,10 +44,10 @@ class DESeq2RatioNormalizer(BaseEstimator, TransformerMixin):
             raise ValueError("Input count data must be in a numpy array.")
         
         # Filter genes with a sum of reads above 10% of number of samples.
-        ok_expressed_genes = X.sum(axis=0) > (0.1 * X.shape[0])
+        # ok_expressed_genes = X.sum(axis=0) > (0.1 * X.shape[0])
 
         # Filter the array to only include expressed genes.
-        X = X[:, ok_expressed_genes]
+        # X = X[:, ok_expressed_genes]
 
         # Compute the natural logarithm of counts (suppress warnings for log(0)).
         with np.errstate(divide="ignore"):
@@ -60,7 +60,7 @@ class DESeq2RatioNormalizer(BaseEstimator, TransformerMixin):
 
         # Store the computed attributes.
         self.logmeans_ = logmeans
-        self.ok_expressed_genes_ = ok_expressed_genes
+        # self.ok_expressed_genes_ = ok_expressed_genes
         self.finite_genes_ = finite_genes
         return self
 
@@ -87,7 +87,7 @@ class DESeq2RatioNormalizer(BaseEstimator, TransformerMixin):
             Normalized and log2-transformed count data.
         """
         # Select only the expressed genes determined during fitting.
-        X = X[:, self.ok_expressed_genes_]
+        #X = X[:, self.ok_expressed_genes_]
         with np.errstate(divide="ignore"):
             log_counts = np.log(X)
         # Compute log ratios for genes with finite log means.
@@ -130,15 +130,7 @@ class FeatureSelection(BaseEstimator, TransformerMixin):
         if self.study_per_patient is None:
             raise ValueError("study_per_patient must be provided.")
         
-        selected_studies = [
-            "BEATAML1.0-COHORT",
-            "AAML0531",
-            "AAML1031",
-            "AAML03P1",
-            "TCGA-LAML",
-            "LEUCEGENE",
-            "100LUMC"
-        ]
+        selected_studies = np.unique(study_per_patient)
         top_genes_by_study = {}
         
         for study in selected_studies:
@@ -199,15 +191,7 @@ class FeatureSelection2(BaseEstimator, TransformerMixin):
         if self.study_per_patient is None:
             raise ValueError("study_per_patient must be provided.")
         
-        selected_studies = [
-            "BEATAML1.0-COHORT",
-            "AAML0531",
-            "AAML1031",
-            "AAML03P1",
-            "TCGA-LAML",
-            "LEUCEGENE",
-            "100LUMC"
-        ]
+        selected_studies = np.unique(study_per_patient)
         top_genes_by_study = {}
         
         # Pre-allocate memory for study masks

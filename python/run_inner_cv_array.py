@@ -177,7 +177,7 @@ def main():
     # Define the pipeline
     pipe = Pipeline([
         ('DEseq2', transformers.DESeq2RatioNormalizer()),
-        ('feature_selection', transformers.FeatureSelection2()),
+        ('feature_selection', transformers.FeatureSelection()),
         ('scaler', StandardScaler())
     ])
     print("Pipeline set up")

@@ -19,24 +19,24 @@ OUTER_MODEL_CONFIGS <- list(
   svm = list(
     classification_type = "OvR",
     file_paths = list(
-      cv = "out/outer_cv/SVM_n10/SVM_outer_cv_CV_OvR_20250703_1254.csv",
-      loso = "out/outer_cv/SVM_n10/SVM_outer_cv_loso_OvR_20250703_1309.csv"
+      cv = "out/outer_cv/SVM_n10/SVM_outer_cv_CV_OvR_20250818_1613.csv",
+      loso = "out/outer_cv/SVM_n10/SVM_outer_cv_loso_OvR_20250818_1616.csv"
     ),
     output_dir = "inner_cv_best_params_n10/SVM"
   ),
   xgboost = list(
     classification_type = "OvR",
     file_paths = list(
-      cv = "out/outer_cv/XGBOOST_n10/XGBOOST_outer_cv_CV_OvR_20250703_1259.csv",
-      loso = "out/outer_cv/XGBOOST_n10/XGBOOST_outer_cv_loso_OvR_20250703_1312.csv"
+      cv = "out/outer_cv/XGBOOST_n10/XGBOOST_outer_cv_CV_OvR_20250818_1618.csv",
+      loso = "out/outer_cv/XGBOOST_n10/XGBOOST_outer_cv_loso_OvR_20250818_1623.csv"
     ),
     output_dir = "inner_cv_best_params_n10/XGBOOST"
   ),
   neural_net = list(
     classification_type = "standard",
     file_paths = list(
-      cv = "out/outer_cv/NN_n10/NN_outer_cv_CV_standard_20250807_1925.csv",
-      loso = "out/outer_cv/NN_n10/NN_outer_cv_loso_standard_20250807_1934.csv"
+      cv = "out/outer_cv/NN_n10/NN_outer_cv_CV_standard_20250818_1639.csv",
+      loso = "out/outer_cv/NN_n10/NN_outer_cv_loso_standard_20250818_1648.csv"
     ),
     output_dir = "inner_cv_best_params_n10/NN"
   )
@@ -45,7 +45,7 @@ OUTER_MODEL_CONFIGS <- list(
 # Data filtering criteria (same as inner CV)
 DATA_FILTERS <- list(
   min_samples_per_subtype = 10,
-  excluded_subtypes = c("AML NOS", "Missing data"),
+  excluded_subtypes = c("AML NOS", "Missing data", "Multi"),
   selected_studies = c(
     "TCGA-LAML",
     "LEUCEGENE", 
@@ -462,7 +462,7 @@ calculate_outer_cv_performance <- function(probability_matrices, type = "cv") {
       
       # Extract true labels and predictions
       truth <- prob_matrix$y
-      prob_cols <- prob_matrix[, !colnames(prob_matrix) %in% c("y", "outer_fold", "sample_indices"), drop = FALSE]
+      prob_cols <- prob_matrix[, !colnames(prob_matrix) %in% c("y", "outer_fold", "sample_indices", "study"), drop = FALSE]
       
       # Get predictions (class with highest probability)
       preds <- colnames(prob_cols)[apply(prob_cols, 1, which.max)]
@@ -1113,7 +1113,7 @@ main_outer_cv <- function() {
   
   # Load label mapping and data
   cat("Loading label mapping and data...\n")
-  label_mapping <- safe_read_file("label_mapping_df_n10.csv", read.csv)
+  label_mapping <- safe_read_file("label_mapping_15aug2025.csv", read.csv)
   if (is.null(label_mapping)) {
     stop("Failed to load label mapping file")
   }
