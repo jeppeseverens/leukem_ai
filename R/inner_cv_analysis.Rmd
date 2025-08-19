@@ -46,7 +46,8 @@ label_mapping <- read.csv("~/Documents/AML_PhD/leukem_ai/label_mapping_15aug2025
 leukemia_subtypes <- read.csv("../data/rgas.csv")$ICC_Subtype
 
 # Load study metadata
-study_names <- read.csv("../data/meta.csv")$Studies
+meta <- read.csv("../data/meta.csv") 
+study_names <- meta$Studies
 
 # Filter data based on criteria
 subtypes_with_sufficient_samples <- names(which(table(leukemia_subtypes) >= DATA_FILTERS$min_samples_per_subtype))
@@ -61,6 +62,8 @@ filtered_leukemia_subtypes <- leukemia_subtypes[filter]
 
 # Load study metadata
 filtered_study_names <- study_names[filter]
+
+meta <- meta[filter, ]
 ```
 
 
