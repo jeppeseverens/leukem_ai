@@ -34,6 +34,6 @@ python python/run_inner_cv_array.py \
     --k_in 5 \
     --n_max_param 96 \
     --fold_type "loso" \
-    --run_name "svm_loso_19aug25"
+    --run_name "svm_loso_19aug25_yesAMLmap"
 
 deactivate 

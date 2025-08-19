@@ -43,10 +43,10 @@ DATA_FILTERS <- list(
 label_mapping <- read.csv("~/Documents/AML_PhD/leukem_ai/label_mapping_15aug2025.csv")
 
 # Load leukemia subtype data
-leukemia_subtypes <- read.csv("../data/rgas.csv")$ICC_Subtype
+leukemia_subtypes <- read.csv("../data/rgas_yesAMLmap.csv")$ICC_Subtype
 
 # Load study metadata
-meta <- read.csv("../data/meta.csv") 
+meta <- read.csv("../data/meta_yesAMLmap.csv") 
 study_names <- meta$Studies
 
 # Filter data based on criteria
@@ -72,26 +72,26 @@ MODEL_CONFIGS <- list(
   svm = list(
     classification_type = "OvR",
     file_paths = list(
-      cv = "/Users/jsevere2/Documents/AML_PhD/leukem_ai/out_2/SVM_array/svm_cv_15aug25/",
-      loso = "/Users/jsevere2/Documents/AML_PhD/leukem_ai/out_2/SVM_array/svm_loso_15aug25/"
+      cv = "/Users/jsevere2/Documents/AML_PhD/leukem_ai/out_2/svm_cv_19aug25_yesAMLmap/",
+      loso = "/Users/jsevere2/Documents/AML_PhD/leukem_ai/out_2/svm_loso_19aug25_yesAMLmap/"
     ),
-    output_dir = "/Users/jsevere2/Documents/AML_PhD/leukem_ai/inner_cv_best_params_n10/SVM_15aug"
+    output_dir = "/Users/jsevere2/Documents/AML_PhD/leukem_ai/inner_cv_best_params_n10/SVM_19aug"
   ),
   xgboost = list(
     classification_type = "OvR",
     file_paths = list(
-      cv = "/Users/jsevere2/Documents/AML_PhD/leukem_ai/out_2/XGBOOST_array/xgb_cv_15aug25/",
-      loso = "/Users/jsevere2/Documents/AML_PhD/leukem_ai/out_2/XGBOOST_array/xgb_loso_15aug25/"
+      cv = "/Users/jsevere2/Documents/AML_PhD/leukem_ai/out_2/xgb_cv_19aug25_yesAMLmap/",
+      loso = "/Users/jsevere2/Documents/AML_PhD/leukem_ai/out_2/xgb_loso_19aug25_yesAMLmap/"
     ),
-    output_dir = "/Users/jsevere2/Documents/AML_PhD/leukem_ai/inner_cv_best_params_n10/XGBOOST_15aug"
+    output_dir = "/Users/jsevere2/Documents/AML_PhD/leukem_ai/inner_cv_best_params_n10/XGBOOST_19aug"
   ),
   neural_net = list(
     classification_type = "standard",
     file_paths = list(
-      cv = "/Users/jsevere2/Documents/AML_PhD/leukem_ai/out_2/NN_array/nn_cv_15aug25/",
-      loso = "/Users/jsevere2/Documents/AML_PhD/leukem_ai/out_2/NN_array/nn_loso_15aug25/"
+      cv = "/Users/jsevere2/Documents/AML_PhD/leukem_ai/out_2/nn_cv_19aug25_yesAMLmap/",
+      loso = "/Users/jsevere2/Documents/AML_PhD/leukem_ai/out_2/nn_loso_19aug25_yesAMLmap/"
     ),
-    output_dir = "/Users/jsevere2/Documents/AML_PhD/leukem_ai/inner_cv_best_params_n10/NN_15aug"
+    output_dir = "/Users/jsevere2/Documents/AML_PhD/leukem_ai/inner_cv_best_params_n10/NN_19aug"
   )
 )
 
@@ -1736,6 +1736,12 @@ rejection_results_2 <- run_complete_rejection_analysis(
     probability_matrices_2, ensemble_results_2
   )
 ```
+
+```{r}
+rejection_results_2[["cv"]][["optimal_results"]][["summary_stats"]]
+rejection_results_2[["loso"]][["optimal_results"]][["summary_stats"]]
+```
+
 ```{r}
 inner_cv_results <- list(
     model_results = model_results,
