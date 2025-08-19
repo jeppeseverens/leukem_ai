@@ -56,9 +56,9 @@ def load_data(directory):
         raise FileNotFoundError(f"No CSV files found in directory: {directory}")
 
     # Select the file that starts with the required prefixes 
-    meta_file = next(f for f in csv_files if f.startswith("meta"))
-    counts_file = next(f for f in csv_files if f.startswith("counts"))
-    rgas_file = next(f for f in csv_files if f.startswith("rgas"))
+    meta_file = next(f for f in csv_files if f.startswith("meta_"))
+    counts_file = next(f for f in csv_files if f.startswith("counts_"))
+    rgas_file = next(f for f in csv_files if f.startswith("rgas_"))
 
     # Construct full paths
     meta_path = os.path.join(directory, meta_file)
