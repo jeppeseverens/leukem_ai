@@ -127,7 +127,7 @@ def main():
     elif args.model_type == "NN":
         model = classifiers.NeuralNet
         param_grid = {
-            "n_genes": [2000, 3000, 5000, 7500],
+            "n_genes": [2000, 3000, 5000],
             "n_neurons": [
                 [800, 400, 200],
                 [400, 200, 100],
@@ -136,10 +136,10 @@ def main():
                 [400, 200]
             ],
             "use_batch_norm": [False],
-            "dropout_rate": [0.3, 0.5],
+            "dropout_rate": [0.5],
             "batch_size": [32],
             "patience": [30],
-            "l2_reg": [0.001, 0.01, 0],
+            "l2_reg": [0.001, 0.01],
             "class_weight": [True, False],
             "min_delta": [0.005],
             "learning_rate": [0.0001],

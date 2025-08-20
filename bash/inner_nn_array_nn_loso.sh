@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -J run_inner_nn_array_loso
-#SBATCH --array=0-95              # 96 hyperparameter combinations (0-indexed)
+#SBATCH --array=0-59              # 96 hyperparameter combinations (0-indexed)
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1         # 1 core per hyperparameter combination
 #SBATCH --time=16:00:00           # Shorter time per job
@@ -20,7 +20,7 @@ source venv/bin/activate
 export TF_CPP_MIN_LOG_LEVEL=2
 
 echo "Starting inner CV experiment (LOSO fold type) on SLURM_ARRAY_TASK_ID=$SLURM_ARRAY_TASK_ID"
-echo "Processing hyperparameter combination $SLURM_ARRAY_TASK_ID out of 96"
+echo "Processing hyperparameter combination $SLURM_ARRAY_TASK_ID out of 60"
 echo "=================================="
 
 # Define your arguments for each array job
@@ -32,7 +32,7 @@ python python/run_inner_cv_array.py \
     --param_index $SLURM_ARRAY_TASK_ID \
     --k_out 5 \
     --k_in 5 \
-    --n_max_param 96 \
+    --n_max_param 60 \
     --fold_type "loso" \
     --run_name "cv_20aug25_all"
 
