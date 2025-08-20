@@ -125,8 +125,8 @@ def filter_data(X, y, study_labels, min_n=20):
         "BEATAML1.0-COHORT",
         "AAML0531",
         "AAML1031",
-        #"AAML03P1",
-        #"100LUMC",
+        "AAML03P1",
+        "100LUMC",
     ]
 
     valid_indices_studies = np.isin(study_labels, selected_studies)
@@ -1024,16 +1024,6 @@ def run_inner_cv_loso(
     model_type = "any"
 ):
     
-    # Define the studies to use as folds
-    # studies_as_folds = [
-    #    "BEATAML1.0-COHORT",
-    #    "AAML0531",
-    #    "AAML1031",
-    #    "AAML03P1",
-    #    "TCGA-LAML",
-    #    "LEUCEGENE",
-    #    "100LUMC",
-    # ]
     param_combos = param_grid
 
     all_results = []
@@ -1273,17 +1263,6 @@ def run_outer_cv_loso(
     
     # Remove duplicates and sort
     n_genes_list = sorted(list(set(n_genes_list)))
-
-    # Define the studies to use as folds
-    # studies_as_folds = [
-    #     "BEATAML1.0-COHORT",
-    #     "AAML0531",
-    #     "AAML1031",
-    #     "AAML03P1",
-    #     "TCGA-LAML",
-    #     "LEUCEGENE",
-    #     "100LUMC",
-    # ]
 
     # Empty list to append results to
     all_results = []

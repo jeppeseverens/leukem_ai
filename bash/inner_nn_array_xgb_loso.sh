@@ -3,12 +3,12 @@
 #SBATCH --array=0-95              # 96 hyperparameter combinations (0-indexed)
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1         # 1 core per hyperparameter combination
-#SBATCH --time=06:00:00           # Shorter time per job
+#SBATCH --time=16:00:00           # Shorter time per job
 #SBATCH --error=job_output/loso/job_array_loso.%A_%a.err
 #SBATCH --output=job_output/loso/job_array_loso.%A_%a.out
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --mail-user=j.f.severens@lumc.nl
-#SBATCH --mem=8G                  
+#SBATCH --mem=12G                  
 
 cd /exports/me-lcco-aml-hpc/Jeppe2/leukem_ai
 
@@ -34,6 +34,6 @@ python python/run_inner_cv_array.py \
     --k_in 5 \
     --n_max_param 96 \
     --fold_type "loso" \
-    --run_name "xgb_loso_19aug25_yesAMLmap"
+    --run_name "cv_20aug25_all"
 
 deactivate 

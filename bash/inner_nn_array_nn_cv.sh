@@ -3,7 +3,7 @@
 #SBATCH --array=0-95              # 96 hyperparameter combinations (0-indexed)
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1         # 1 core per hyperparameter combination
-#SBATCH --time=06:00:00           
+#SBATCH --time=16:00:00           
 #SBATCH --error=job_output/cv/job_array_cv.%A_%a.err
 #SBATCH --output=job_output/cv/job_array_cv.%A_%a.out
 #SBATCH --mail-type=BEGIN,END,FAIL
@@ -34,6 +34,6 @@ python python/run_inner_cv_array.py \
     --k_in 5 \
     --n_max_param 96 \
     --fold_type "CV" \
-    --run_name "nn_cv_19aug25_yesAMLmap"
+    --run_name "cv_20aug25_all"
 
 deactivate 

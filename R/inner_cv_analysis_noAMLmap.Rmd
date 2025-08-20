@@ -154,7 +154,7 @@ add_class_labels <- function(data_frame, label_mapping) {
   }
   
   data_frame$class_label <- label_mapping$Label[data_frame$class + 1]
-  data_frame
+  as.data.frame(data_frame)
 }
 
 #' Process neural network results to clean epoch information
@@ -209,7 +209,7 @@ model_results <- load_all_model_data(MODEL_CONFIGS)
 ```
 
 ```{r}
-test <- model_results$neural_net$loso %>% group_by(across(c("inner_fold","outer_fold", "params"))) %>%
+test <- model_results[["neural_net"]][["loso"]] %>% group_by(across(c("inner_fold","outer_fold", "params"))) %>%
     summarise(
       mean_kappa = mean(kappa, na.rm = TRUE),
       sd_kappa = sd(kappa, na.rm = TRUE),
@@ -220,9 +220,7 @@ test <- model_results$neural_net$loso %>% group_by(across(c("inner_fold","outer_
       across(any_of(c("class_0", "class_1")), first),
       .groups = "drop_last"
     ) %>% group_by(across(c("inner_fold","outer_fold"))) %>%
-    filter(mean_kappa == max(mean_kappa, na.rm = TRUE)) %>%
-    slice(1) %>%
-    ungroup()
+    filter(mean_kappa == max(mean_kappa, na.rm = TRUE)) %>% slice(1)
 ```
 
 
@@ -294,7 +292,6 @@ extract_all_best_parameters <- function(model_results, model_configs) {
 # Extract best parameters
 best_parameters <- extract_all_best_parameters(model_results, MODEL_CONFIGS)
 ```
-
 
 
 ```{r}
@@ -1272,8 +1269,8 @@ run_ensemble_analysis_for_both_types <- function(probability_matrices, weights) 
 # Run ensemble analysis for both CV and LOSO
 ensemble_results_1 <- run_ensemble_analysis_for_both_types(probability_matrices_1, generate_weights(0.1))
 ensemble_results_2 <- run_ensemble_analysis_for_both_types(probability_matrices_2, generate_weights(0.1))
-
 ```
+
 ```{r}
 #' Calculate and display mean kappa across folds for all ensemble methods
 #' @param results Analysis results containing all ensemble performance metrics
@@ -1612,7 +1609,8 @@ find_optimal_cutoffs <- function(rejection_results, optimization_metric = "kappa
       sd_perc_rejected = sd(perc_rejected, na.rm = TRUE),
       n_folds = n(),
       .groups = "drop"
-    )
+    ) %>%
+  arrange(desc(mean_kappa))
   
   return(list(
     optimal_cutoffs = optimal_cutoffs,

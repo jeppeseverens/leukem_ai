@@ -40,7 +40,7 @@ DATA_FILTERS <- list(
 )
 
 # Load mapping of class labels to numeric labels
-label_mapping <- read.csv("~/Documents/AML_PhD/leukem_ai/label_mapping_15aug2025.csv")
+label_mapping <- read.csv("~/Documents/AML_PhD/leukem_ai/label_mapping_15aug2025_AMLmap.csv")
 
 # Load leukemia subtype data
 leukemia_subtypes <- read.csv("../data/rgas_yesAMLmap.csv")$ICC_Subtype
