@@ -1,6 +1,0 @@
-"outer_fold","params","mean_kappa","mean_acc"
-0,"{'C': 100, 'class_weight': 'balanced', 'gamma': 'auto', 'probability': True, 'n_genes': 3000}",0.811860493479071,0.834082157587934
-1,"{'C': 100, 'class_weight': 'balanced', 'gamma': 0.001, 'probability': True, 'n_genes': 3000}",0.798219172309493,0.821948769462582
-2,"{'C': 10, 'class_weight': 'balanced', 'gamma': 0.001, 'probability': True, 'n_genes': 3000}",0.803632830431083,0.826899837145945
-3,"{'C': 1000, 'class_weight': 'balanced', 'gamma': 'auto', 'probability': True, 'n_genes': 2000}",0.805981563413601,0.828650137741047
-4,"{'C': 10, 'class_weight': None, 'gamma': 0.0001, 'probability': True, 'n_genes': 3000}",0.812539014116227,0.834710743801653

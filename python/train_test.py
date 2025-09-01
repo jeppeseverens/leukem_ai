@@ -461,23 +461,6 @@ def evaluate_outer_fold(
         # Remap predictions back to original labels
         preds = label_encoder.inverse_transform(preds_encoded)
         classes = label_encoder.classes_
-        
-        # Check if test data contains unseen classes (for metric calculation only)
-        unseen_classes = set(y_test) - set(label_encoder.classes_)
-        if unseen_classes:
-            print(f"Warning: Test data contains unseen classes: {unseen_classes}")
-            # Filter samples for metric calculation only
-            mask = np.isin(y_test, list(label_encoder.classes_))
-            y_test_for_metrics = y_test[mask]
-            preds_for_metrics = preds[mask]
-            test_idx_for_metrics = test_idx[mask]
-            if len(y_test_for_metrics) == 0:
-                print("All test samples have unseen classes. Skipping metric calculation.")
-                return None
-        else:
-            y_test_for_metrics = y_test
-            preds_for_metrics = preds
-            test_idx_for_metrics = test_idx
             
         preds_prob = preds_prob.flatten()
         preds_prob = np.round(preds_prob, 4)
@@ -488,10 +471,10 @@ def evaluate_outer_fold(
             "classes": classes,
             "params": params,
             # Metrics calculated only on samples with known classes
-            "accuracy": accuracy_score(y_test_for_metrics, preds_for_metrics),
-            "f1_macro": f1_score(y_test_for_metrics, preds_for_metrics, average="macro"),
-            "mcc": matthews_corrcoef(y_test_for_metrics, preds_for_metrics),
-            "kappa": cohen_kappa_score(y_test_for_metrics, preds_for_metrics),
+            "accuracy": 0,
+            "f1_macro": 0,
+            "mcc": 0,
+            "kappa": 0,
             # But return predictions and true labels for ALL test samples
             "y_val": y_test,  # All test labels (including unseen classes)
             "preds": preds,   # All predictions
@@ -876,6 +859,152 @@ def run_inner_cv_single_param(
                     all_results.extend(result)
             else:
                 print(f"Warning: No valid results for outer fold {outer_fold}, inner fold {inner_fold}")
+
+    # Convert to DataFrame
+    df_results = pd.DataFrame(all_results)
+    return df_results
+
+
+def run_train_test_single_param(
+    X,
+    y,
+    study_labels,
+    model,
+    single_param,
+    pipe,
+    multi_type="standard",
+    k_out=5,
+    model_type="any"
+):
+    """
+    Function for final hyperparameter selection using simple train/test splits.
+    Similar to run_inner_cv_single_param but without inner cross-validation.
+    Used to select the best hyperparameters after inner CV evaluation.
+    """
+    # Define cv folds for train/test splits
+    outer_cv = StratifiedKFold(n_splits=k_out, shuffle=True, random_state=42)
+    
+    # Single parameter instead of list
+    n_genes_list = [single_param["n_genes"]]
+    all_results = []
+
+    # Combine y and study labels so can be stratified on study and y
+    combined = [str(a) + " " + str(b) for a, b in zip(y, study_labels)]
+
+    # Make train/test splits (no inner CV)
+    for fold, (train_idx, test_idx) in enumerate(outer_cv.split(X, combined)):
+        print(f"fold {fold}")
+        
+        # Once per fold, data is preprocessed
+        processed_X, y_train, y_test = pre_process_data(
+            n_genes_list,
+            X,
+            y,
+            train_idx,
+            test_idx,
+            study_labels,
+            pipe,
+        )
+        
+        # Process single hyperparameter combination
+        result = evaluate_inner_fold(
+            fold,  # Use fold as outer_fold
+            0,     # No inner fold, use 0
+            processed_X,
+            y_train,
+            y_test,
+            test_idx,  # Original test indices
+            model,
+            single_param.copy(),  # Make copy to avoid modifying original
+            multi_type=multi_type,
+            model_type=model_type
+        )
+
+        # Handle result
+        if result is not None:
+            if isinstance(result, dict):
+                all_results.append(result)
+            elif isinstance(result, list):
+                all_results.extend(result)
+        else:
+            print(f"Warning: No valid results for fold {fold}")
+
+    # Convert to DataFrame
+    df_results = pd.DataFrame(all_results)
+    return df_results
+
+
+def run_train_test_loso_single_param(
+    X,
+    y,
+    study_labels,
+    model,
+    single_param,
+    pipe,
+    multi_type="standard",
+    model_type="any"
+):
+    """
+    Function for final hyperparameter selection using LOSO (Leave One Study Out) splits.
+    Similar to run_inner_cv_loso_single_param but without inner cross-validation.
+    Used to select the best hyperparameters after inner CV evaluation.
+    """
+    # Single parameter instead of list
+    n_genes_list = [single_param["n_genes"]]
+    all_results = []
+    
+    studies_as_folds = np.unique(study_labels)
+    
+    for test_study_name in studies_as_folds:
+        print(f"--- Fold: Holding out Study '{test_study_name}' for Testing ---")
+
+        # Create masks for train/test split
+        test_mask = study_labels == test_study_name
+        train_mask = ~test_mask
+
+        # Split data
+        X_train = X[train_mask]
+        y_train = y[train_mask]
+        study_labels_train = study_labels[train_mask]
+        X_test = X[test_mask]
+        y_test = y[test_mask]
+        
+        # Get test indices
+        test_idx = np.where(test_mask)[0]
+
+        # Pre-process Data for this fold
+        processed_X = pre_process_data_loso(
+            n_genes_list,
+            X_train,
+            X_test,
+            study_labels_train,
+            pipe
+        )
+
+        # Process single hyperparameter combination
+        result = evaluate_inner_fold(
+            test_study_name,  # Use study name as fold identifier
+            0,               # No inner fold, use 0
+            processed_X,
+            y_train,
+            y_test,
+            test_idx,
+            model,
+            single_param.copy(),  # Make copy to avoid modifying original
+            multi_type=multi_type,
+            model_type=model_type
+        )
+
+        # Handle result
+        if result is not None:
+            if isinstance(result, list):
+                all_results.extend(result)
+            elif isinstance(result, dict):
+                all_results.append(result)
+        else:
+            print(f"  No valid results for fold '{test_study_name}'")
+
+        print(f"  Finished evaluation for fold '{test_study_name}'.")
 
     # Convert to DataFrame
     df_results = pd.DataFrame(all_results)

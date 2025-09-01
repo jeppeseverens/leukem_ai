@@ -1,4 +1,25 @@
 ```{r}
+source("~/Documents/AML_PhD/leukem_ai/R/analyse_inner_cv_new.r")
+```
+```{r}
 source("~/Documents/AML_PhD/leukem_ai/R/analyse_outer_cv.r")
+```
+
+
+```{r}
+Global_Optimized_per_class <- outer_cv_results[["per_class_summaries"]][["cv"]] %>% filter(Model == "Global_Optimized") %>% select(Class, Mean_F1)
+Global_Optimized_per_class <- left_join(Global_Optimized_per_class, 
+outer_cv_results[["rejection_per_class_summaries"]][["cv"]]%>% filter(Model == "Global_Optimized") %>% select(Class, Mean_F1) %>% rename(Mean_F1_with_rej = Mean_F1)
+)
+Global_Optimized_per_class
+```
+
+```{r}
+
+cms <- lapply(outer_cv_results[["detailed_performance"]][["cv"]][["Global_Optimized"]], function(x){
+  x[["confusion_matrix"]][["table"]]
+})
+Global_Optimized_total_cm <- Reduce(`+`, cms)
+write.csv(Global_Optimized_total_cm, "~/Documents/AML_PhD/leukem_ai/inner_cv_best_params_n10/combined_cm.csv")
 ```
 

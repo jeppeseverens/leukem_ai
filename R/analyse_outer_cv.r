@@ -7,9 +7,6 @@
 # evaluates final model performance.
 # =============================================================================
 
-# Set working directory
-setwd("~/Documents/AML_PhD/leukem_ai")
-
 # =============================================================================
 # Configuration and Constants
 # =============================================================================
@@ -19,26 +16,23 @@ OUTER_MODEL_CONFIGS <- list(
   svm = list(
     classification_type = "OvR",
     file_paths = list(
-      cv = "out/outer_cv/SVM_n10/SVM_outer_cv_CV_OvR_20250818_1613.csv",
-      loso = "out/outer_cv/SVM_n10/SVM_outer_cv_loso_OvR_20250818_1616.csv"
-    ),
-    output_dir = "inner_cv_best_params_n10/SVM"
+      cv = "../data/out/outer_cv/SVM_n10/SVM_outer_cv_CV_OvR_20250821_0926.csv",
+      loso = "../data/out/outer_cv/SVM_n10/SVM_outer_cv_loso_OvR_20250821_0929.csv"
+    )
   ),
   xgboost = list(
     classification_type = "OvR",
     file_paths = list(
-      cv = "out/outer_cv/XGBOOST_n10/XGBOOST_outer_cv_CV_OvR_20250818_1618.csv",
-      loso = "out/outer_cv/XGBOOST_n10/XGBOOST_outer_cv_loso_OvR_20250818_1623.csv"
-    ),
-    output_dir = "inner_cv_best_params_n10/XGBOOST"
+      cv = "../data/out/outer_cv/XGBOOST_n10/XGBOOST_outer_cv_CV_OvR_20250821_0932.csv",
+      loso = "../data/out/outer_cv/XGBOOST_n10/XGBOOST_outer_cv_loso_OvR_20250821_0936.csv"
+    )
   ),
   neural_net = list(
     classification_type = "standard",
     file_paths = list(
-      cv = "out/outer_cv/NN_n10/NN_outer_cv_CV_standard_20250818_1639.csv",
-      loso = "out/outer_cv/NN_n10/NN_outer_cv_loso_standard_20250818_1648.csv"
-    ),
-    output_dir = "inner_cv_best_params_n10/NN"
+      cv = "../data/out/outer_cv/NN_n10/NN_outer_cv_CV_standard_20250821_0940.csv",
+      loso = "../data/out/outer_cv/NN_n10/NN_outer_cv_loso_standard_20250821_0951.csv"
+    )
   )
 )
 
@@ -48,18 +42,19 @@ DATA_FILTERS <- list(
   excluded_subtypes = c("AML NOS", "Missing data", "Multi"),
   selected_studies = c(
     "TCGA-LAML",
-    "LEUCEGENE", 
+    "LEUCEGENE",
     "BEATAML1.0-COHORT",
     "AAML0531",
-    "AAML1031"
+    "AAML1031",
+    "AAML03P1",
+    "100LUMC"
   )
 )
-
 # Base directory for ensemble weights
-WEIGHTS_BASE_DIR <- "inner_cv_best_params_n10/ensemble_weights"
+WEIGHTS_BASE_DIR <- "inner_cv_best_params_n10/ensemble_weights_20aug/ensemble_weights"
 
 # Base directory for rejection cut offs
-REJECTION_BASE_DIR <- "inner_cv_best_params_n10/rejection_analysis"
+REJECTION_BASE_DIR <- "inner_cv_best_params_n10/cutoffs_20aug"
 
 # =============================================================================
 # Source Utility Functions
@@ -75,7 +70,7 @@ source("R/utility_functions.R")
 #' @param vector Vector of class labels
 #' @return Modified vector with grouped classes
 modify_classes <- function(vector) {
-  vector[grepl("MDS|TP53", vector)] <- "MDS.r"
+  vector[grepl("MDS|TP53|MECOM", vector)] <- "MDS.r.and.MECOM"
   vector[!grepl("MLLT3", vector) & grepl("KMT2A", vector)] <- "other.KMT2A"
   vector
 }
@@ -343,7 +338,7 @@ apply_ensemble_weights_to_outer_cv <- function(outer_prob_matrices, ensemble_wei
         warning(sprintf("No OvR weights for fold %s, using equal weights", fold_name))
         fold_weights <- list()
         for (class_name in all_classes) {
-          fold_weights[[gsub("Class.", "", class_name)]] <- list(weights = list(SVM = 1, XGB = 1, NN = 1))
+          fold_weights[[gsub("Class.", "", class_name)]] <- list(weights = list(SVM = 1, XGB = 0, NN = 0))
         }
       }
       
@@ -364,7 +359,7 @@ apply_ensemble_weights_to_outer_cv <- function(outer_prob_matrices, ensemble_wei
           class_weights <- fold_weights[[clean_class_name_no_dots]]$weights
         } else {
           # Use equal weights as fallback
-          class_weights <- list(SVM = 1, XGB = 1, NN = 1)
+          class_weights <- list(SVM = 1, XGB = 0, NN = 0)
         }
         
         # Calculate weighted ensemble for this class
@@ -384,7 +379,7 @@ apply_ensemble_weights_to_outer_cv <- function(outer_prob_matrices, ensemble_wei
       fold_weights <- weights_to_use[[fold_name]]
       if (is.null(fold_weights)) {
         warning(sprintf("No global weights for fold %s, using equal weights", fold_name))
-        fold_weights <- list(weights = list(SVM = 1, XGB = 1, NN = 1))
+        fold_weights <- list(weights = list(SVM = 1, XGB = 0, NN = 0))
       }
       
       weights <- fold_weights$weights
@@ -481,6 +476,21 @@ calculate_outer_cv_performance <- function(probability_matrices, type = "cv") {
       # Calculate confusion matrix and metrics
       cm <- caret::confusionMatrix(preds, truth)
       
+      # Extract per-class metrics
+      per_class_metrics <- list()
+      if (!is.null(cm$byClass) && nrow(cm$byClass) > 0) {
+        for (class_name in rownames(cm$byClass)) {
+          per_class_metrics[[class_name]] <- list(
+            Sensitivity = cm$byClass[class_name, "Sensitivity"],
+            Specificity = cm$byClass[class_name, "Specificity"],
+            Precision = cm$byClass[class_name, "Precision"],
+            Recall = cm$byClass[class_name, "Recall"],
+            F1 = cm$byClass[class_name, "F1"],
+            Balanced_Accuracy = cm$byClass[class_name, "Balanced Accuracy"]
+          )
+        }
+      }
+      
       model_performance[[fold_name]] <- list(
         confusion_matrix = cm,
         kappa = as.numeric(cm$overall["Kappa"]),
@@ -488,7 +498,8 @@ calculate_outer_cv_performance <- function(probability_matrices, type = "cv") {
         balanced_accuracy = mean(cm$byClass[, "Balanced Accuracy"], na.rm = TRUE),
         f1_macro = mean(cm$byClass[, "F1"], na.rm = TRUE),
         sensitivity_macro = mean(cm$byClass[, "Sensitivity"], na.rm = TRUE),
-        specificity_macro = mean(cm$byClass[, "Specificity"], na.rm = TRUE)
+        specificity_macro = mean(cm$byClass[, "Specificity"], na.rm = TRUE),
+        per_class_metrics = per_class_metrics
       )
     }
     
@@ -541,101 +552,74 @@ summarize_outer_cv_performance <- function(performance_results) {
   return(summary_data)
 }
 
-#' Generate comprehensive performance comparison plots
-#' @param performance_summary Summary data frame from summarize_outer_cv_performance
-#' @param output_dir Directory to save plots
-#' @param type Type of analysis ("cv" or "loso")
-generate_outer_cv_performance_plots <- function(performance_summary, output_dir, type = "cv") {
-  cat("Generating outer CV performance plots...\n")
+#' Summarize per-class performance metrics across all folds
+#' @param performance_results Performance results from calculate_outer_cv_performance
+#' @return Data frame with per-class summary statistics
+summarize_per_class_performance <- function(performance_results) {
+  cat("Summarizing per-class performance metrics...\n")
   
-  # Load plotting libraries
-  load_library_quietly("ggplot2")
-  load_library_quietly("reshape2")
+  per_class_summary <- data.frame()
   
-  # Create output directory
-  create_directory_safely(output_dir)
-  
-  # Prepare data for plotting
-  plot_data <- performance_summary[, c("Model", "Mean_Kappa", "Mean_Accuracy", "Mean_Balanced_Accuracy", "Mean_F1_Macro")]
-  plot_data_long <- reshape2::melt(plot_data, id.vars = "Model", variable.name = "Metric", value.name = "Value")
-  plot_data_long$Metric <- gsub("Mean_", "", plot_data_long$Metric)
-  
-  # Plot 1: Performance comparison across metrics
-  p1 <- ggplot(plot_data_long, aes(x = Model, y = Value, fill = Metric)) +
-    geom_bar(stat = "identity", position = "dodge") +
-    labs(title = sprintf("Outer CV Performance Comparison (%s)", toupper(type)),
-         x = "Model",
-         y = "Performance Value") +
-    theme_minimal() +
-    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
-    facet_wrap(~Metric, scales = "free_y")
-  
-  # Plot 2: Kappa comparison with error bars
-  error_data <- performance_summary[, c("Model", "Mean_Kappa", "SD_Kappa")]
-  p2 <- ggplot(error_data, aes(x = reorder(Model, Mean_Kappa), y = Mean_Kappa)) +
-    geom_col(fill = "steelblue", alpha = 0.7) +
-    geom_errorbar(aes(ymin = Mean_Kappa - SD_Kappa, ymax = Mean_Kappa + SD_Kappa), 
-                  width = 0.2, color = "black") +
-    labs(title = sprintf("Kappa Performance with Standard Deviation (%s)", toupper(type)),
-         x = "Model",
-         y = "Kappa") +
-    theme_minimal() +
-    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
-    coord_flip()
-  
-  # Save plots
-  ggsave(file.path(output_dir, sprintf("outer_cv_performance_comparison_%s.png", type)), p1, width = 12, height = 8)
-  ggsave(file.path(output_dir, sprintf("outer_cv_kappa_comparison_%s.png", type)), p2, width = 10, height = 6)
-  
-  cat(sprintf("  Plots saved to: %s\n", output_dir))
-}
-
-#' Save outer CV results and performance metrics
-#' @param outer_cv_results All outer CV results and performance data
-#' @param output_base_dir Base directory for saving results
-save_outer_cv_results <- function(outer_cv_results, output_base_dir) {
-  cat("Saving outer CV results...\n")
-  
-  for (type in c("cv", "loso")) {
-    if (!type %in% names(outer_cv_results$performance_summaries)) next
+  for (model_name in names(performance_results)) {
+    model_perf <- performance_results[[model_name]]
     
-    type_output_dir <- file.path(output_base_dir, "outer_cv_analysis", type)
-    create_directory_safely(type_output_dir)
+    if (length(model_perf) == 0) next
     
-    # Save performance summary
-    performance_summary <- outer_cv_results$performance_summaries[[type]]
-    write.csv(performance_summary, 
-              file.path(type_output_dir, "performance_summary.csv"), 
-              row.names = FALSE)
+    # Get all unique classes across all folds
+    all_classes <- unique(unlist(lapply(model_perf, function(x) names(x$per_class_metrics))))
     
-    # Save detailed performance results
-    detailed_performance <- outer_cv_results$detailed_performance[[type]]
-    for (model_name in names(detailed_performance)) {
-      model_dir <- file.path(type_output_dir, model_name)
-      create_directory_safely(model_dir)
+    for (class_name in all_classes) {
+      # Extract metrics for this class across all folds
+      sensitivities <- numeric(0)
+      specificities <- numeric(0)
+      precisions <- numeric(0)
+      recalls <- numeric(0)
+      f1_scores <- numeric(0)
+      balanced_accuracies <- numeric(0)
       
-      for (fold_name in names(detailed_performance[[model_name]])) {
-        fold_result <- detailed_performance[[model_name]][[fold_name]]
-        
-        # Save confusion matrix
-        cm_file <- file.path(model_dir, sprintf("confusion_matrix_fold_%s.txt", fold_name))
-        capture.output(print(fold_result$confusion_matrix), file = cm_file)
-        
-        # Save metrics
-        metrics <- data.frame(
-          Metric = c("Kappa", "Accuracy", "Balanced_Accuracy", "F1_Macro", "Sensitivity_Macro", "Specificity_Macro"),
-          Value = c(fold_result$kappa, fold_result$accuracy, fold_result$balanced_accuracy, 
-                   fold_result$f1_macro, fold_result$sensitivity_macro, fold_result$specificity_macro),
+      for (fold_name in names(model_perf)) {
+        fold_perf <- model_perf[[fold_name]]
+        if (!is.null(fold_perf$per_class_metrics) && class_name %in% names(fold_perf$per_class_metrics)) {
+          class_metrics <- fold_perf$per_class_metrics[[class_name]]
+          sensitivities <- c(sensitivities, class_metrics$Sensitivity)
+          specificities <- c(specificities, class_metrics$Specificity)
+          precisions <- c(precisions, class_metrics$Precision)
+          recalls <- c(recalls, class_metrics$Recall)
+          f1_scores <- c(f1_scores, class_metrics$F1)
+          balanced_accuracies <- c(balanced_accuracies, class_metrics$Balanced_Accuracy)
+        }
+      }
+      
+      # Calculate summary statistics for this class
+      if (length(sensitivities) > 0) {
+        class_summary <- data.frame(
+          Model = model_name,
+          Class = class_name,
+          N_Folds = length(sensitivities),
+          Mean_Sensitivity = mean(sensitivities, na.rm = TRUE),
+          SD_Sensitivity = sd(sensitivities, na.rm = TRUE),
+          Mean_Specificity = mean(specificities, na.rm = TRUE),
+          SD_Specificity = sd(specificities, na.rm = TRUE),
+          Mean_Precision = mean(precisions, na.rm = TRUE),
+          SD_Precision = sd(precisions, na.rm = TRUE),
+          Mean_Recall = mean(recalls, na.rm = TRUE),
+          SD_Recall = sd(recalls, na.rm = TRUE),
+          Mean_F1 = mean(f1_scores, na.rm = TRUE),
+          SD_F1 = sd(f1_scores, na.rm = TRUE),
+          Mean_Balanced_Accuracy = mean(balanced_accuracies, na.rm = TRUE),
+          SD_Balanced_Accuracy = sd(balanced_accuracies, na.rm = TRUE),
           stringsAsFactors = FALSE
         )
-        write.csv(metrics, 
-                  file.path(model_dir, sprintf("metrics_fold_%s.csv", fold_name)), 
-                  row.names = FALSE)
+        
+        per_class_summary <- rbind(per_class_summary, class_summary)
       }
     }
-    
-    cat(sprintf("  Saved %s results to: %s\n", toupper(type), type_output_dir))
   }
+  
+  # Sort by model and then by mean F1 score (descending)
+  per_class_summary <- per_class_summary[order(per_class_summary$Model, -per_class_summary$Mean_F1), ]
+  
+  return(per_class_summary)
 }
 
 # =============================================================================
@@ -649,33 +633,46 @@ save_outer_cv_results <- function(outer_cv_results, output_base_dir) {
 load_optimal_cutoffs <- function(rejection_base_dir, type = "cv") {
   cat(sprintf("Loading optimal cutoffs for %s analysis...\n", toupper(type)))
   
-  cutoff_dir <- file.path(rejection_base_dir, type)
+  # Load cutoffs from the main directory
+  optimal_cutoffs_file <- file.path(rejection_base_dir, "cutoffs.csv")
   
-  if (!dir.exists(cutoff_dir)) {
-    warning(sprintf("Cutoff directory does not exist: %s", cutoff_dir))
+  if (!file.exists(optimal_cutoffs_file)) {
+    warning(sprintf("Cutoffs file not found: %s", optimal_cutoffs_file))
     return(NULL)
   }
   
-  # Load optimal cutoffs
-  optimal_cutoffs_file <- file.path(cutoff_dir, "optimal_cutoffs.csv")
-  summary_stats_file <- file.path(cutoff_dir, "summary_statistics.csv")
-  
-  optimal_cutoffs <- NULL
-  summary_stats <- NULL
-  
-  if (file.exists(optimal_cutoffs_file)) {
-    optimal_cutoffs <- safe_read_file(optimal_cutoffs_file, read.csv)
-    cat(sprintf("  Loaded optimal cutoffs from: %s\n", optimal_cutoffs_file))
-  } else {
-    warning(sprintf("Optimal cutoffs file not found: %s", optimal_cutoffs_file))
+  # Load all cutoffs and filter by type
+  all_cutoffs <- safe_read_file(optimal_cutoffs_file, read.csv)
+  if (is.null(all_cutoffs)) {
+    warning("Failed to load cutoffs file")
+    return(NULL)
   }
   
-  if (file.exists(summary_stats_file)) {
-    summary_stats <- safe_read_file(summary_stats_file, read.csv)
-    cat(sprintf("  Loaded summary statistics from: %s\n", summary_stats_file))
-  } else {
-    warning(sprintf("Summary statistics file not found: %s", summary_stats_file))
+  # Filter cutoffs by type
+  optimal_cutoffs <- all_cutoffs[all_cutoffs$type == type, ]
+  
+  if (nrow(optimal_cutoffs) == 0) {
+    warning(sprintf("No cutoffs found for type: %s", type))
+    return(NULL)
   }
+  
+  cat(sprintf("  Loaded %d cutoffs for %s analysis from: %s\n", nrow(optimal_cutoffs), toupper(type), optimal_cutoffs_file))
+  
+  # Calculate summary statistics
+  summary_stats <- optimal_cutoffs %>%
+    group_by(model) %>%
+    summarise(
+      mean_cutoff = mean(prob_cutoff, na.rm = TRUE),
+      sd_cutoff = sd(prob_cutoff, na.rm = TRUE),
+      mean_kappa = mean(kappa, na.rm = TRUE),
+      sd_kappa = sd(kappa, na.rm = TRUE),
+      mean_accuracy = mean(accuracy, na.rm = TRUE),
+      sd_accuracy = sd(accuracy, na.rm = TRUE),
+      mean_perc_rejected = mean(perc_rejected, na.rm = TRUE),
+      sd_perc_rejected = sd(perc_rejected, na.rm = TRUE),
+      n_folds = n(),
+      .groups = "drop"
+    )
   
   return(list(
     optimal_cutoffs = optimal_cutoffs,
@@ -773,7 +770,7 @@ apply_rejection_analysis_to_outer_cv <- function(probability_matrices, optimal_c
 #' @param model_name Name of the model being analyzed
 #' @param type Type of analysis ("cv" or "loso")
 #' @param cutoff Probability cutoff to apply
-#' @return Data frame with rejection analysis results
+#' @return List with rejection analysis results and per-class metrics
 evaluate_single_matrix_with_rejection_and_cutoff <- function(prob_matrix, fold_name, model_name, type, cutoff) {
   # Extract true labels and remove from probability matrix
   truth <- prob_matrix$y
@@ -815,6 +812,21 @@ evaluate_single_matrix_with_rejection_and_cutoff <- function(prob_matrix, fold_n
   kappa <- as.numeric(cm$overall["Kappa"])
   accuracy <- as.numeric(cm$overall["Accuracy"])
   
+  # Extract per-class metrics for accepted samples
+  per_class_metrics <- list()
+  if (!is.null(cm$byClass) && nrow(cm$byClass) > 0) {
+    for (class_name in rownames(cm$byClass)) {
+      per_class_metrics[[class_name]] <- list(
+        Sensitivity = cm$byClass[class_name, "Sensitivity"],
+        Specificity = cm$byClass[class_name, "Specificity"],
+        Precision = cm$byClass[class_name, "Precision"],
+        Recall = cm$byClass[class_name, "Recall"],
+        F1 = cm$byClass[class_name, "F1"],
+        Balanced_Accuracy = cm$byClass[class_name, "Balanced Accuracy"]
+      )
+    }
+  }
+  
   # Calculate metrics for rejected samples (if any)
   rejected_accuracy <- NA
   if (length(rejected_indices) > 0) {
@@ -823,20 +835,23 @@ evaluate_single_matrix_with_rejection_and_cutoff <- function(prob_matrix, fold_n
     rejected_accuracy <- sum(rejected_truth == rejected_preds) / length(rejected_indices)
   }
   
-  # Return results
-  data.frame(
-    model = model_name,
-    type = type,
-    fold = fold_name,
-    prob_cutoff = cutoff,
-    kappa = kappa,
-    accuracy = accuracy,
-    n_accepted = length(accepted_indices),
-    n_rejected = length(rejected_indices),
-    perc_rejected = length(rejected_indices) / nrow(prob_matrix),
-    rejected_accuracy = rejected_accuracy,
-    total_samples = nrow(prob_matrix),
-    stringsAsFactors = FALSE
+  # Return results as a list
+  list(
+    summary = data.frame(
+      model = model_name,
+      type = type,
+      fold = fold_name,
+      prob_cutoff = cutoff,
+      kappa = kappa,
+      accuracy = accuracy,
+      n_accepted = length(accepted_indices),
+      n_rejected = length(rejected_indices),
+      perc_rejected = length(rejected_indices) / nrow(prob_matrix),
+      rejected_accuracy = rejected_accuracy,
+      total_samples = nrow(prob_matrix),
+      stringsAsFactors = FALSE
+    ),
+    per_class_metrics = per_class_metrics
   )
 }
 
@@ -851,8 +866,9 @@ summarize_rejection_analysis <- function(rejection_results, type = "cv") {
     return(NULL)
   }
   
-  # Combine all results
-  all_results <- do.call(rbind, rejection_results)
+  # Extract summary results
+  all_summaries <- lapply(rejection_results, function(x) x$summary)
+  all_results <- do.call(rbind, all_summaries)
   
   if (nrow(all_results) == 0) {
     return(NULL)
@@ -876,47 +892,75 @@ summarize_rejection_analysis <- function(rejection_results, type = "cv") {
       .groups = "drop"
     )
   
+  # Extract and summarize per-class metrics
+  per_class_summary <- data.frame()
+  
+  for (model_name in unique(all_results$model)) {
+    model_results <- rejection_results[grepl(paste0("^", model_name, "_"), names(rejection_results))]
+    
+    # Get all unique classes across all folds for this model
+    all_classes <- unique(unlist(lapply(model_results, function(x) names(x$per_class_metrics))))
+    
+    for (class_name in all_classes) {
+      # Extract metrics for this class across all folds
+      sensitivities <- numeric(0)
+      specificities <- numeric(0)
+      precisions <- numeric(0)
+      recalls <- numeric(0)
+      f1_scores <- numeric(0)
+      balanced_accuracies <- numeric(0)
+      
+      for (fold_result in model_results) {
+        if (!is.null(fold_result$per_class_metrics) && class_name %in% names(fold_result$per_class_metrics)) {
+          class_metrics <- fold_result$per_class_metrics[[class_name]]
+          sensitivities <- c(sensitivities, class_metrics$Sensitivity)
+          specificities <- c(specificities, class_metrics$Specificity)
+          precisions <- c(precisions, class_metrics$Precision)
+          recalls <- c(recalls, class_metrics$Recall)
+          f1_scores <- c(f1_scores, class_metrics$F1)
+          balanced_accuracies <- c(balanced_accuracies, class_metrics$Balanced_Accuracy)
+        }
+      }
+      
+      # Calculate summary statistics for this class
+      if (length(sensitivities) > 0) {
+        class_summary <- data.frame(
+          Model = model_name,
+          Class = class_name,
+          Type = type,
+          N_Folds = length(sensitivities),
+          Mean_Sensitivity = mean(sensitivities, na.rm = TRUE),
+          SD_Sensitivity = sd(sensitivities, na.rm = TRUE),
+          Mean_Specificity = mean(specificities, na.rm = TRUE),
+          SD_Specificity = sd(specificities, na.rm = TRUE),
+          Mean_Precision = mean(precisions, na.rm = TRUE),
+          SD_Precision = sd(precisions, na.rm = TRUE),
+          Mean_Recall = mean(recalls, na.rm = TRUE),
+          SD_Recall = sd(recalls, na.rm = TRUE),
+          Mean_F1 = mean(f1_scores, na.rm = TRUE),
+          SD_F1 = sd(f1_scores, na.rm = TRUE),
+          Mean_Balanced_Accuracy = mean(balanced_accuracies, na.rm = TRUE),
+          SD_Balanced_Accuracy = sd(balanced_accuracies, na.rm = TRUE),
+          stringsAsFactors = FALSE
+        )
+        
+        per_class_summary <- rbind(per_class_summary, class_summary)
+      }
+    }
+  }
+  
+  # Sort by model and then by mean F1 score (descending)
+  if (nrow(per_class_summary) > 0) {
+    per_class_summary <- per_class_summary[order(per_class_summary$Model, -per_class_summary$Mean_F1), ]
+  }
+  
   return(list(
     detailed_results = all_results,
-    summary_stats = summary_stats
+    summary_stats = summary_stats,
+    per_class_summary = per_class_summary
   ))
 }
 
-#' Save rejection analysis results for outer CV
-#' @param rejection_summary Rejection analysis summary
-#' @param output_base_dir Base directory for output files
-#' @param type Type of analysis ("cv" or "loso")
-save_rejection_analysis_results <- function(rejection_summary, output_base_dir, type = "cv") {
-  if (is.null(rejection_summary)) {
-    cat(sprintf("No rejection analysis results to save for %s\n", toupper(type)))
-    return()
-  }
-  
-  cat(sprintf("Saving rejection analysis results for %s...\n", toupper(type)))
-  
-  output_dir <- file.path(output_base_dir, "outer_cv_analysis", type, "rejection_analysis")
-  create_directory_safely(output_dir)
-  
-  # Save detailed results
-  if (!is.null(rejection_summary$detailed_results)) {
-    write.csv(rejection_summary$detailed_results, 
-              file.path(output_dir, "detailed_rejection_results.csv"), 
-              row.names = FALSE)
-    cat(sprintf("  Saved detailed results to: %s\n", file.path(output_dir, "detailed_rejection_results.csv")))
-  }
-  
-  # Save summary statistics
-  if (!is.null(rejection_summary$summary_stats)) {
-    write.csv(rejection_summary$summary_stats, 
-              file.path(output_dir, "rejection_summary_statistics.csv"), 
-              row.names = FALSE)
-    cat(sprintf("  Saved summary statistics to: %s\n", file.path(output_dir, "rejection_summary_statistics.csv")))
-    
-    # Display summary
-    cat(sprintf("\n=== Rejection Analysis Summary for %s ===\n", toupper(type)))
-    print(rejection_summary$summary_stats)
-  }
-}
 
 #' Compare performance with and without rejection analysis
 #' @param detailed_performance Performance results without rejection
@@ -981,120 +1025,13 @@ compare_performance_with_rejection <- function(detailed_performance, rejection_s
   
   # Sort by kappa improvement (descending)
   if (nrow(comparison_results) > 0) {
-    comparison_results <- comparison_results[order(comparison_results$Kappa_Improvement, decreasing = TRUE), ]
+    comparison_results <- comparison_results[order(comparison_results$Rejection_Kappa, decreasing = TRUE), ]
   }
   
   return(comparison_results)
 }
 
-#' Save performance comparison results
-#' @param performance_comparison Performance comparison results
-#' @param output_base_dir Base directory for output files
-#' @param type Type of analysis ("cv" or "loso")
-save_performance_comparison <- function(performance_comparison, output_base_dir, type = "cv") {
-  if (is.null(performance_comparison) || nrow(performance_comparison) == 0) {
-    cat(sprintf("No performance comparison results to save for %s\n", toupper(type)))
-    return()
-  }
-  
-  cat(sprintf("Saving performance comparison for %s...\n", toupper(type)))
-  
-  output_dir <- file.path(output_base_dir, "outer_cv_analysis", type, "rejection_analysis")
-  create_directory_safely(output_dir)
-  
-  # Save comparison results
-  write.csv(performance_comparison, 
-            file.path(output_dir, "performance_comparison_with_rejection.csv"), 
-            row.names = FALSE)
-  
-  cat(sprintf("  Saved performance comparison to: %s\n", 
-              file.path(output_dir, "performance_comparison_with_rejection.csv")))
-  
-  # Display summary
-  cat(sprintf("\n=== Performance Comparison with Rejection for %s ===\n", toupper(type)))
-  print(performance_comparison)
-}
 
-#' Generate performance comparison plots
-#' @param performance_comparison Performance comparison results
-#' @param output_base_dir Base directory for output files
-#' @param type Type of analysis ("cv" or "loso")
-generate_performance_comparison_plots <- function(performance_comparison, output_base_dir, type = "cv") {
-  if (is.null(performance_comparison) || nrow(performance_comparison) == 0) {
-    cat(sprintf("No performance comparison data to plot for %s\n", toupper(type)))
-    return()
-  }
-  
-  cat(sprintf("Generating performance comparison plots for %s...\n", toupper(type)))
-  
-  # Load plotting libraries
-  load_library_quietly("ggplot2")
-  load_library_quietly("reshape2")
-  
-  output_dir <- file.path(output_base_dir, "outer_cv_analysis", type, "rejection_analysis")
-  create_directory_safely(output_dir)
-  
-  # Prepare data for plotting
-  plot_data <- performance_comparison[, c("Model", "Original_Kappa", "Rejection_Kappa", "Original_Accuracy", "Rejection_Accuracy")]
-  
-  # Plot 1: Kappa comparison
-  p1 <- ggplot(plot_data, aes(x = Model)) +
-    geom_point(aes(y = Original_Kappa, color = "Original"), size = 3, alpha = 0.7) +
-    geom_point(aes(y = Rejection_Kappa, color = "With Rejection"), size = 3, alpha = 0.7) +
-    geom_segment(aes(x = Model, xend = Model, y = Original_Kappa, yend = Rejection_Kappa), 
-                 alpha = 0.5, size = 1) +
-    labs(title = sprintf("Kappa Performance Comparison (%s)", toupper(type)),
-         x = "Model",
-         y = "Kappa",
-         color = "Performance Type") +
-    theme_minimal() +
-    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
-    scale_color_manual(values = c("Original" = "blue", "With Rejection" = "red"))
-  
-  # Plot 2: Accuracy comparison
-  p2 <- ggplot(plot_data, aes(x = Model)) +
-    geom_point(aes(y = Original_Accuracy, color = "Original"), size = 3, alpha = 0.7) +
-    geom_point(aes(y = Rejection_Accuracy, color = "With Rejection"), size = 3, alpha = 0.7) +
-    geom_segment(aes(x = Model, xend = Model, y = Original_Accuracy, yend = Rejection_Accuracy), 
-                 alpha = 0.5, size = 1) +
-    labs(title = sprintf("Accuracy Performance Comparison (%s)", toupper(type)),
-         x = "Model",
-         y = "Accuracy",
-         color = "Performance Type") +
-    theme_minimal() +
-    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
-    scale_color_manual(values = c("Original" = "blue", "With Rejection" = "red"))
-  
-  # Plot 3: Improvement vs Percent Rejected
-  improvement_data <- performance_comparison[, c("Model", "Kappa_Improvement", "Accuracy_Improvement", "Mean_Percent_Rejected")]
-  
-  p3 <- ggplot(improvement_data, aes(x = Mean_Percent_Rejected, y = Kappa_Improvement, color = Model)) +
-    geom_point(size = 3, alpha = 0.7) +
-    geom_text(aes(label = Model), vjust = -0.5, size = 3) +
-    labs(title = sprintf("Kappa Improvement vs Percent Rejected (%s)", toupper(type)),
-         x = "Mean Percent Rejected (%)",
-         y = "Kappa Improvement") +
-    theme_minimal() +
-    theme(legend.position = "none")
-  
-  # Plot 4: Improvement vs Percent Rejected (Accuracy)
-  p4 <- ggplot(improvement_data, aes(x = Mean_Percent_Rejected, y = Accuracy_Improvement, color = Model)) +
-    geom_point(size = 3, alpha = 0.7) +
-    geom_text(aes(label = Model), vjust = -0.5, size = 3) +
-    labs(title = sprintf("Accuracy Improvement vs Percent Rejected (%s)", toupper(type)),
-         x = "Mean Percent Rejected (%)",
-         y = "Accuracy Improvement") +
-    theme_minimal() +
-    theme(legend.position = "none")
-  
-  # Save individual plots
-  ggsave(file.path(output_dir, sprintf("kappa_comparison_%s.png", type)), p1, width = 10, height = 6)
-  ggsave(file.path(output_dir, sprintf("accuracy_comparison_%s.png", type)), p2, width = 10, height = 6)
-  ggsave(file.path(output_dir, sprintf("kappa_improvement_vs_rejected_%s.png", type)), p3, width = 10, height = 6)
-  ggsave(file.path(output_dir, sprintf("accuracy_improvement_vs_rejected_%s.png", type)), p4, width = 10, height = 6)
-  
-  cat(sprintf("  Performance comparison plots saved to: %s\n", output_dir))
-}
 
 # =============================================================================
 # Main Outer CV Analysis Function
@@ -1113,19 +1050,19 @@ main_outer_cv <- function() {
   
   # Load label mapping and data
   cat("Loading label mapping and data...\n")
-  label_mapping <- safe_read_file("label_mapping_15aug2025.csv", read.csv)
+  label_mapping <- safe_read_file("label_mapping_all.csv", read.csv)
   if (is.null(label_mapping)) {
     stop("Failed to load label mapping file")
   }
   
   # Load leukemia subtype data
-  leukemia_subtypes <- safe_read_file("data/rgas.csv", function(f) read.csv(f)$ICC_Subtype)
+  leukemia_subtypes <- safe_read_file("data/rgas_20aug25.csv", function(f) read.csv(f)$ICC_Subtype)
   if (is.null(leukemia_subtypes)) {
     stop("Failed to load leukemia subtype data")
   }
   
   # Load study metadata
-  study_names <- safe_read_file("data/meta.csv", function(f) read.csv(f)$Studies)
+  study_names <- safe_read_file("data/meta_20aug25.csv", function(f) read.csv(f)$Studies)
   if (is.null(study_names)) {
     stop("Failed to load study metadata")
   }
@@ -1177,6 +1114,21 @@ main_outer_cv <- function() {
         } else {
           probs <- generate_outer_standard_probability_matrices(results, label_mapping, filtered_leukemia_subtypes)
         }
+        probs <- lapply(probs, function(prob) {
+          MDS_cols <- grepl("MDS|TP53|MECOM", colnames(prob))
+          MDS <- rowSums(prob[,MDS_cols])
+          
+          other_KMT2A_cols <- grepl("KMT2A", colnames(prob)) & !grepl("MLLT3", colnames(prob))
+          other_KMT2A <- rowSums(prob[,other_KMT2A_cols])
+          
+          prob <- prob[, !(MDS_cols | other_KMT2A_cols)]
+          
+          prob$MDS.r <- MDS
+          prob$other.KMT2A <- other_KMT2A
+          prob$y <- modify_classes(prob$y)
+          colnames(prob) <- modify_classes(colnames(prob))
+          return(prob)
+        })
         outer_probability_matrices[[model_name]][[fold_type]] <- probs
       }
     }
@@ -1251,6 +1203,7 @@ main_outer_cv <- function() {
   cat("Calculating performance metrics...\n")
   detailed_performance <- list()
   performance_summaries <- list()
+  per_class_summaries <- list()
   
   for (type in c("cv", "loso")) {
     cat(sprintf("Analyzing %s performance...\n", toupper(type)))
@@ -1261,18 +1214,14 @@ main_outer_cv <- function() {
     # Generate performance summary
     performance_summaries[[type]] <- summarize_outer_cv_performance(detailed_performance[[type]])
     
+    # Generate per-class performance summary
+    per_class_summaries[[type]] <- summarize_per_class_performance(detailed_performance[[type]])
+    
     cat(sprintf("\n=== %s Performance Summary ===\n", toupper(type)))
     print(performance_summaries[[type]])
-  }
-  
-  # Generate plots and save results
-  output_base_dir <- "inner_cv_best_params_n10"
-  
-  for (type in c("cv", "loso")) {
-    if (type %in% names(performance_summaries)) {
-      plot_output_dir <- file.path(output_base_dir, "outer_cv_analysis", type, "plots")
-      generate_outer_cv_performance_plots(performance_summaries[[type]], plot_output_dir, type)
-    }
+    
+    cat(sprintf("\n=== %s Per-Class Performance Summary ===\n", toupper(type)))
+    print(per_class_summaries[[type]])
   }
   
   # Load optimal cutoffs for rejection analysis
@@ -1310,7 +1259,12 @@ main_outer_cv <- function() {
     }
     
     rejection_summary[[type]] <- summarize_rejection_analysis(rejection_results[[type]], type)
-    save_rejection_analysis_results(rejection_summary[[type]], output_base_dir, type)
+    
+    # Display per-class rejection analysis summary
+    if (!is.null(rejection_summary[[type]]$per_class_summary)) {
+      cat(sprintf("\n=== %s Rejection Analysis Per-Class Performance Summary ===\n", toupper(type)))
+      print(rejection_summary[[type]]$per_class_summary)
+    }
   }
   
   # Compare performance with and without rejection
@@ -1326,16 +1280,6 @@ main_outer_cv <- function() {
     performance_comparison[[type]] <- compare_performance_with_rejection(
       detailed_performance[[type]], rejection_summary[[type]], type
     )
-    save_performance_comparison(performance_comparison[[type]], output_base_dir, type)
-  }
-  
-  # Generate plots comparing performance with and without rejection
-  for (type in c("cv", "loso")) {
-    if (!type %in% names(performance_comparison)) {
-      warning(sprintf("No performance comparison results for %s, skipping plot generation", type))
-      next
-    }
-    generate_performance_comparison_plots(performance_comparison[[type]], output_base_dir, type)
   }
   
   # Save all results
@@ -1345,16 +1289,14 @@ main_outer_cv <- function() {
     ensemble_matrices = ensemble_matrices,
     detailed_performance = detailed_performance,
     performance_summaries = performance_summaries,
+    per_class_summaries = per_class_summaries,
     ensemble_weights_used = ensemble_weights,
     rejection_analysis_results = rejection_results,
     rejection_summary = rejection_summary,
+    rejection_per_class_summaries = lapply(rejection_summary, function(x) x$per_class_summary),
     performance_comparison = performance_comparison
   )
-  
-  save_outer_cv_results(outer_cv_results, output_base_dir)
-  
-  cat("=== Outer Cross-Validation Analysis Complete! ===\n")
-  
+  saveRDS(inner_cv_results, "../data/out/inner_cv/inner_cv_results.rds")
   return(outer_cv_results)
 }
 

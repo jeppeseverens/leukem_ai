@@ -1,14 +1,11 @@
----
-title: "inner_cv_analysis"
-output: html_document
-date: "2025-08-14"
----
+#' Create directory safely
+#' @param dir_path Directory path to create
+create_directory_safely <- function(dir_path) {
+  if (!dir.exists(dir_path)) {
+    dir.create(dir_path, recursive = TRUE, showWarnings = FALSE)
+  }
+}
 
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
-```
-
-```{r}
 load_library_quietly <- function(package_name) {
   invisible(capture.output(
     suppressMessages(
@@ -22,31 +19,30 @@ load_library_quietly <- function(package_name) {
 load_library_quietly("plyr")
 load_library_quietly("dplyr")
 load_library_quietly("stringr")
-load_library_quietly("caret")
-```
 
-```{r}
 # Filters
 DATA_FILTERS <- list(
   min_samples_per_subtype = 10,
   excluded_subtypes = c("AML NOS", "Missing data", "Multi"),
   selected_studies = c(
-    "TCGA-LAML",
-    "LEUCEGENE", 
-    "BEATAML1.0-COHORT",
-    "AAML0531",
-    "AAML1031"
+        "TCGA-LAML",
+        "LEUCEGENE",
+        "BEATAML1.0-COHORT",
+        "AAML0531",
+        "AAML1031",
+        "AAML03P1",
+        "100LUMC"
   )
 )
 
 # Load mapping of class labels to numeric labels
-label_mapping <- read.csv("~/Documents/AML_PhD/leukem_ai/label_mapping_15aug2025_AMLmap.csv")
+label_mapping <- read.csv("/data/label_mapping_all.csv")
 
 # Load leukemia subtype data
-leukemia_subtypes <- read.csv("../data/rgas_yesAMLmap.csv")$ICC_Subtype
+leukemia_subtypes <- read.csv("/data/rgas_20aug25.csv")$ICC_Subtype
 
 # Load study metadata
-meta <- read.csv("../data/meta_yesAMLmap.csv") 
+meta <- read.csv("/data/meta_20aug25.csv") 
 study_names <- meta$Studies
 
 # Filter data based on criteria
@@ -64,34 +60,31 @@ filtered_leukemia_subtypes <- leukemia_subtypes[filter]
 filtered_study_names <- study_names[filter]
 
 meta <- meta[filter, ]
-```
 
-
-```{r}
 MODEL_CONFIGS <- list(
   svm = list(
     classification_type = "OvR",
     file_paths = list(
-      cv = "/Users/jsevere2/Documents/AML_PhD/leukem_ai/out_2/svm_cv_19aug25_yesAMLmap/",
-      loso = "/Users/jsevere2/Documents/AML_PhD/leukem_ai/out_2/svm_loso_19aug25_yesAMLmap/"
+      cv = "/Users/jsevere2/Documents/SVM_array/cv_20aug25_all/",
+      loso = "/Users/jsevere2/Documents/SVM_array/loso_20aug25_all/"
     ),
-    output_dir = "/Users/jsevere2/Documents/AML_PhD/leukem_ai/inner_cv_best_params_n10/SVM_19aug"
+    output_dir = "/Users/jsevere2/Documents/AML_PhD/leukem_ai/inner_cv_best_params_n10/SVM_20aug25"
   ),
   xgboost = list(
     classification_type = "OvR",
     file_paths = list(
-      cv = "/Users/jsevere2/Documents/AML_PhD/leukem_ai/out_2/xgb_cv_19aug25_yesAMLmap/",
-      loso = "/Users/jsevere2/Documents/AML_PhD/leukem_ai/out_2/xgb_loso_19aug25_yesAMLmap/"
+      cv = "/Users/jsevere2/Documents/XGBOOST_array/cv_20aug25_all/",
+      loso = "/Users/jsevere2/Documents/XGBOOST_array/loso_20aug25_all/"
     ),
-    output_dir = "/Users/jsevere2/Documents/AML_PhD/leukem_ai/inner_cv_best_params_n10/XGBOOST_19aug"
+    output_dir = "/Users/jsevere2/Documents/AML_PhD/leukem_ai/inner_cv_best_params_n10/XGBOOST_20aug25"
   ),
   neural_net = list(
     classification_type = "standard",
     file_paths = list(
-      cv = "/Users/jsevere2/Documents/AML_PhD/leukem_ai/out_2/nn_cv_19aug25_yesAMLmap/",
-      loso = "/Users/jsevere2/Documents/AML_PhD/leukem_ai/out_2/nn_loso_19aug25_yesAMLmap/"
+      cv = "/Users/jsevere2/Documents/NN_array/cv_20aug25_all/",
+      loso = "/Users/jsevere2/Documents/NN_array/loso_20aug25_all/"
     ),
-    output_dir = "/Users/jsevere2/Documents/AML_PhD/leukem_ai/inner_cv_best_params_n10/NN_19aug"
+    output_dir = "/Users/jsevere2/Documents/AML_PhD/leukem_ai/inner_cv_best_params_n10/NN_20aug25"
   )
 )
 
@@ -154,7 +147,7 @@ add_class_labels <- function(data_frame, label_mapping) {
   }
   
   data_frame$class_label <- label_mapping$Label[data_frame$class + 1]
-  data_frame
+  as.data.frame(data_frame)
 }
 
 #' Process neural network results to clean epoch information
@@ -209,7 +202,7 @@ model_results <- load_all_model_data(MODEL_CONFIGS)
 ```
 
 ```{r}
-test <- model_results$neural_net$loso %>% group_by(across(c("inner_fold","outer_fold", "params"))) %>%
+test <- model_results[["neural_net"]][["loso"]] %>% group_by(across(c("inner_fold","outer_fold", "params"))) %>%
     summarise(
       mean_kappa = mean(kappa, na.rm = TRUE),
       sd_kappa = sd(kappa, na.rm = TRUE),
@@ -220,9 +213,7 @@ test <- model_results$neural_net$loso %>% group_by(across(c("inner_fold","outer_
       across(any_of(c("class_0", "class_1")), first),
       .groups = "drop_last"
     ) %>% group_by(across(c("inner_fold","outer_fold"))) %>%
-    filter(mean_kappa == max(mean_kappa, na.rm = TRUE)) %>%
-    slice(1) %>%
-    ungroup()
+    filter(mean_kappa == max(mean_kappa, na.rm = TRUE)) %>% slice(1)
 ```
 
 
@@ -294,7 +285,6 @@ extract_all_best_parameters <- function(model_results, model_configs) {
 # Extract best parameters
 best_parameters <- extract_all_best_parameters(model_results, MODEL_CONFIGS)
 ```
-
 
 
 ```{r}
@@ -500,13 +490,12 @@ generate_standard_probability_matrices <- function(cv_results_df, best_params_df
   probability_matrices
 }
 
-probability_matrices_1 <- list()
-probability_matrices_2 <- list()
+probability_matrices <- list()
 for (model_name in names(model_results)) {
     config <- MODEL_CONFIGS[[model_name]]
     cat(sprintf("Extracting %s probabilities...\n", toupper(model_name)))
     
-    probability_matrices_1[[model_name]] <- list()
+    probability_matrices_2[[model_name]] <- list()
     
     for (fold_type in names(model_results[[model_name]])) {
       results <- model_results[[model_name]][[fold_type]]
@@ -518,8 +507,8 @@ for (model_name in names(model_results)) {
         } else {
           probs <- generate_standard_probability_matrices(results, best_params, label_mapping, filtered_leukemia_subtypes)
         }
-        probability_matrices_1[[model_name]][[fold_type]] <- probs
-        probs_2 <- lapply(probs, function(prob) {
+
+        probs <- lapply(probs, function(prob) {
           MDS_cols <- grepl("MDS|TP53", colnames(prob))
           MDS <- rowSums(prob[,MDS_cols])
           
@@ -534,7 +523,7 @@ for (model_name in names(model_results)) {
           return(prob)
         })
         
-        probability_matrices_2[[model_name]][[fold_type]] <- probs_2
+        probability_matrices_2[[model_name]][[fold_type]] <- probs
         remove(probs)
       }
     }
@@ -593,20 +582,119 @@ for (model in names(probability_matrices)) {
 results_df <- do.call(rbind, results_list)
 results_df
 }
-library(dplyr)
-get_per_model_performance(probability_matrices_1) %>% group_by(model, method) %>% summarise(mean_kappa = mean(kappa), 
-                                                                           sd_kappa = sd(kappa),
-                                                                           mean_mcc = mean(mcc),
-                                                                           sd_mcc = sd(mcc))
 
+library(dplyr)
 get_per_model_performance(probability_matrices_2) %>% group_by(model, method) %>% summarise(mean_kappa = mean(kappa), 
                                                                            sd_kappa = sd(kappa),
                                                                            mean_mcc = mean(mcc),
                                                                            sd_mcc = sd(mcc))
+
+per_model_results <- get_per_model_performance(probability_matrices_2)
+```
+
+```{r}
+per_model_results <- per_model_results[per_model_results$method == "loso",]
+
+per_class_results <- list()
+i <- 1
+for (model in unique(per_model_results$model)){
+  for (fold in unique(per_model_results$fold_name)){
+    subset <- per_model_results[per_model_results$model == model & per_model_results$fold_name==fold,]
+    subset <- subset$confusion_matrix[[1]]
+    subset <- subset$byClass
+    subset <- data.frame(subset)
+    subset$class <- rownames(subset)
+    subset$model <- model
+    subset$fold <- fold
+    per_class_results[[i]] <- subset
+    i = i +1
+  }
+}
+
+per_class_results <- do.call(rbind, per_class_results)
+keep <- paste0("Class: ", make.names(names(which(table(leukemia_subtypes)<20))))
+per_class_results <- per_class_results[per_class_results$class %in% keep,]
+per_class_results <- per_class_results %>% group_by(model) %>% summarise(mean_f1 = mean(F1, na.rm = TRUE))
+
+per_class_results
 ```
 
 
 ```{r}
+#' Save ensemble weights used for each fold and analysis type
+#' @param ensemble_results Ensemble analysis results containing weights used
+#' @param output_base_dir Base directory for output files
+save_ensemble_weights <- function(ensemble_results, output_base_dir) {
+  cat("Saving ensemble weights used...\n")
+  
+  for (analysis_type in names(ensemble_results)) {
+    cat(sprintf("Saving weights for %s analysis...\n", toupper(analysis_type)))
+    
+    # Create output directory for this analysis type
+    weights_output_dir <- file.path(output_base_dir, "ensemble_weights", analysis_type)
+    create_directory_safely(weights_output_dir)
+    
+    # Save OvR ensemble weights
+    if ("ovr_ensemble_weights_used" %in% names(ensemble_results[[analysis_type]])) {
+      ovr_weights <- ensemble_results[[analysis_type]]$ovr_ensemble_weights_used
+      
+      # Convert to a more structured format for saving
+      ovr_weights_df <- data.frame()
+      
+      for (fold_name in names(ovr_weights)) {
+        fold_weights <- ovr_weights[[fold_name]]
+        
+        for (class_name in names(fold_weights)) {
+          class_weight_info <- fold_weights[[class_name]]
+          
+          ovr_weights_df <- rbind(ovr_weights_df, data.frame(
+            fold = fold_name,
+            class = class_name,
+            weight_name = class_weight_info$weight_name,
+            svm_weight = class_weight_info$weights$SVM,
+            xgb_weight = class_weight_info$weights$XGB,
+            nn_weight = class_weight_info$weights$NN,
+            f1_score = class_weight_info$f1_score,
+            stringsAsFactors = FALSE
+          ))
+        }
+      }
+      
+      # Save OvR weights
+      ovr_weights_file <- file.path(weights_output_dir, "ovr_ensemble_weights_used.csv")
+      write.csv(ovr_weights_df, ovr_weights_file, row.names = FALSE)
+      cat(sprintf("  Saved OvR weights: %s\n", ovr_weights_file))
+    }
+    
+    # Save global ensemble weights
+    if ("global_ensemble_weights_used" %in% names(ensemble_results[[analysis_type]])) {
+      global_weights <- ensemble_results[[analysis_type]]$global_ensemble_weights_used
+      
+      # Convert to data frame format
+      global_weights_df <- data.frame()
+      
+      for (fold_name in names(global_weights)) {
+        fold_weight_info <- global_weights[[fold_name]]
+        
+        global_weights_df <- rbind(global_weights_df, data.frame(
+          fold = fold_name,
+          weight_name = fold_weight_info$weight_name,
+          svm_weight = fold_weight_info$weights$SVM,
+          xgb_weight = fold_weight_info$weights$XGB,
+          nn_weight = fold_weight_info$weights$NN,
+          kappa = fold_weight_info$kappa,
+          stringsAsFactors = FALSE
+        ))
+      }
+      
+      # Save global weights
+      global_weights_file <- file.path(weights_output_dir, "global_ensemble_weights_used.csv")
+      write.csv(global_weights_df, global_weights_file, row.names = FALSE)
+      cat(sprintf("  Saved global weights: %s\n", global_weights_file))
+    }
+  }
+}
+
 generate_weights <- function(step = 0.3){
   # Generate all combinations of weights from 0 to 1 in 0.1 steps
   steps <- seq(0, 1, by = step)
@@ -624,7 +712,7 @@ generate_weights <- function(step = 0.3){
   
   # Name the list elements for clarity (optional)
   names(ENSEMBLE_WEIGHTS) <- paste0("W", seq_along(ENSEMBLE_WEIGHTS))
-  ENSEMBLE_WEIGHTS[["ALL"]] <- list(SVM = 1, XGB = 1, NN = 1)
+  ENSEMBLE_WEIGHTS[["ALL"]] <- list(SVM = 1, XGB = 0, NN = 0)
   
   return(ENSEMBLE_WEIGHTS)
 }
@@ -1270,10 +1358,12 @@ run_ensemble_analysis_for_both_types <- function(probability_matrices, weights) 
 
 ```{r}
 # Run ensemble analysis for both CV and LOSO
-ensemble_results_1 <- run_ensemble_analysis_for_both_types(probability_matrices_1, generate_weights(0.1))
-ensemble_results_2 <- run_ensemble_analysis_for_both_types(probability_matrices_2, generate_weights(0.1))
+ensemble_results <- run_ensemble_analysis_for_both_types(probability_matrices,  generate_weights(0.1))
 
+weights_dir <- "../inner_cv_best_params_n10/ensemble_weights_20aug"
+save_ensemble_weights(ensemble_results,  weights_dir)
 ```
+
 ```{r}
 #' Calculate and display mean kappa across folds for all ensemble methods
 #' @param results Analysis results containing all ensemble performance metrics
@@ -1428,15 +1518,10 @@ compare_ensemble_performance_for_both_types <- function(results) {
   
   performance_comparisons
 }
-
-# Compare ensemble performance for both CV and LOSO
-performance_comparisons <- compare_ensemble_performance_for_both_types(
-    list(probability_matrices = probability_matrices_1, cv = ensemble_results_1$cv, loso = ensemble_results_1$loso)
-  )
 ```
 ```{r}
-performance_comparisons_2 <- compare_ensemble_performance_for_both_types(
-    list(probability_matrices = probability_matrices_2, cv = ensemble_results_2$cv, loso = ensemble_results_2$loso)
+performance_comparisons <- compare_ensemble_performance_for_both_types(
+    list(probability_matrices = probability_matrices,  cv = ensemble_results_2$cv, loso = ensemble_results_2$loso)
   )
 ```
 
@@ -1589,7 +1674,7 @@ evaluate_all_matrices_with_rejection <- function(probability_matrices, ensemble_
 #' @return Data frame with optimal cutoffs for each model/ensemble
 find_optimal_cutoffs <- function(rejection_results, optimization_metric = "kappa") {
   cat("Finding optimal probability cutoffs...\n")
-  
+
   # Group by model and fold, then find the cutoff that maximizes the optimization metric
   optimal_cutoffs <- rejection_results %>%
     group_by(model, fold) %>%
@@ -1612,7 +1697,8 @@ find_optimal_cutoffs <- function(rejection_results, optimization_metric = "kappa
       sd_perc_rejected = sd(perc_rejected, na.rm = TRUE),
       n_folds = n(),
       .groups = "drop"
-    )
+    ) %>%
+  arrange(desc(mean_kappa))
   
   return(list(
     optimal_cutoffs = optimal_cutoffs,
@@ -1715,25 +1801,12 @@ run_complete_rejection_analysis <- function(probability_matrices, ensemble_resul
   
   return(rejection_results)
 }
-
-#' Create directory safely
-#' @param dir_path Directory path to create
-create_directory_safely <- function(dir_path) {
-  if (!dir.exists(dir_path)) {
-    dir.create(dir_path, recursive = TRUE, showWarnings = FALSE)
-  }
-}
 ```
 
 
 ```{r}
-# Define output directory for saving results
-rejection_results_1 <- run_complete_rejection_analysis(
-    probability_matrices_1, ensemble_results_1
-  )
-
-rejection_results_2 <- run_complete_rejection_analysis(
-    probability_matrices_2, ensemble_results_2
+rejection_results <- run_complete_rejection_analysis(
+    probability_matrices,  ensemble_results_2
   )
 ```
 
@@ -1743,22 +1816,31 @@ rejection_results_2[["loso"]][["optimal_results"]][["summary_stats"]]
 ```
 
 ```{r}
-inner_cv_results <- list(
-    model_results = model_results,
-    best_parameters = best_parameters,
-    probability_matrices = probability_matrices,
-    ensemble_results = ensemble_results,
-    performance_comparisons = performance_comparisons,
-    rejection_results = rejection_results
-  )
+# Extract the optimal cutoffs dataframes
+cv_cutoffs <- rejection_results_2[["cv"]][["optimal_results"]][["optimal_cutoffs"]]
+loso_cutoffs <- rejection_results_2[["loso"]][["optimal_results"]][["optimal_cutoffs"]]
 
+# Add source column to each dataframe
+cv_cutoffs$source <- "cv"
+loso_cutoffs$source <- "loso"
+
+cutoff_dir <- "../inner_cv_best_params_n10/cutoffs_20aug"
+dir.create(cutoff_dir)
+# Bind the dataframes together
+combined_cutoffs <- rbind(cv_cutoffs, loso_cutoffs)
+write.csv(combined_cutoffs, "../inner_cv_best_params_n10/cutoffs_20aug/cutoffs.csv")
+```
+
+
+```{r}
 inner_cv_results <- list(
     model_results = model_results,
     best_parameters = best_parameters,
-    probability_matrices = probability_matrices_2,
-    ensemble_results = ensemble_results_2,
-    performance_comparisons = performance_comparisons_2,
+    probability_matrices = probability_matrices, 
+    ensemble_results = ensemble_results, 
+    performance_comparisons = performance_comparisons, 
     rejection_results = rejection_results_2
   )
+saveRDS(inner_cv_results, "../inner_cv_best_params_n10/inner_cv_results.rds")
 ```
 

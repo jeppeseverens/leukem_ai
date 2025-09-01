@@ -1,8 +1,0 @@
-"outer_fold","params","mean_kappa","mean_acc"
-"100LUMC","{'C': 1, 'class_weight': 'balanced', 'gamma': 'scale', 'probability': True, 'n_genes': 1000}",0.737155598193447,0.777655348737634
-"AAML03P1","{'C': 10, 'class_weight': None, 'gamma': 0.0001, 'probability': True, 'n_genes': 2000}",0.734724699140204,0.778778267633977
-"AAML0531","{'C': 10, 'class_weight': 'balanced', 'gamma': 0.0001, 'probability': True, 'n_genes': 3000}",0.698123793470149,0.747298825755871
-"AAML1031","{'C': 10, 'class_weight': None, 'gamma': 0.0001, 'probability': True, 'n_genes': 2000}",0.727671277707991,0.77275719351376
-"BEATAML1.0-COHORT","{'C': 100, 'class_weight': None, 'gamma': 0.0001, 'probability': True, 'n_genes': 3000}",0.795707850193084,0.826442788041026
-"LEUCEGENE","{'C': 10, 'class_weight': None, 'gamma': 0.0001, 'probability': True, 'n_genes': 2000}",0.72778871668302,0.771018198043629
-"TCGA-LAML","{'C': 10, 'class_weight': 'balanced', 'gamma': 0.0001, 'probability': True, 'n_genes': 3000}",0.726016649470334,0.771296696422366
