@@ -1,0 +1,3717 @@
+---
+title: "Analysis Results"
+output: 
+  html_document:
+    df_print: paged
+    toc: true
+    toc_float: true
+---
+
+# Setup
+
+## -- Load Analysis Scripts
+
+```{r}
+#source("~/Documents/AML_PhD/leukem_ai/R/inner_cv_analysis.R")
+```
+
+```{r}
+source("~/Documents/AML_PhD/leukem_ai/R/outer_cv_analysis.r")
+```
+
+
+```{r}
+modify_classes <- function(vector) {
+    # Convert factor to character to avoid invalid factor level warnings
+    was_factor <- is.factor(vector)
+    vector <- as.character(vector)
+    
+    vector[grepl("MDS|TP53|MECOM", vector)] <- "MDS.r/MECOM"
+    vector[!grepl("MLLT3", vector) & grepl("KMT2A", vector)] <- "other.KMT2A"
+    
+    # Optionally convert back to factor if input was factor
+    if (was_factor) {
+      vector <- factor(vector)
+    }
+    vector
+  }
+
+# Filters
+DATA_FILTERS <- list(
+  min_samples_per_subtype = 10,
+  excluded_subtypes = c("AML NOS", "Missing data", "Multi"),
+  selected_studies = c(
+    "TCGA-LAML",
+    "LEUCEGENE",
+    "BEATAML1.0-COHORT",
+    "AAML0531",
+    "AAML1031",
+    "AAML03P1",
+    "100LUMC"
+  )
+)
+
+# Load mapping of class labels to numeric labels
+label_mapping <- read.csv("../data/label_mapping_all.csv")
+
+# Load leukemia subtype data
+leukemia_subtypes <- read.csv("../data/rgas_20aug25.csv")$ICC_Subtype
+
+# Load study metadata
+meta <- read.csv("../data/meta_20aug25.csv")
+study_names <- meta$Studies
+
+# Filter data based on criteria
+subtypes_with_sufficient_samples <- names(which(table(leukemia_subtypes) >= DATA_FILTERS$min_samples_per_subtype))
+filter <- which(
+  leukemia_subtypes %in% subtypes_with_sufficient_samples &
+    !leukemia_subtypes %in% DATA_FILTERS$excluded_subtypes &
+    study_names %in% DATA_FILTERS$selected_studies
+)
+
+leukemia_subtypes_mod <- modify_classes(leukemia_subtypes)
+
+filtered_leukemia_subtypes <- leukemia_subtypes[filter]
+
+# Load study metadata
+filtered_study_names <- study_names[filter]
+
+meta <- meta[filter, ]
+meta$classes <- filtered_leukemia_subtypes
+```
+
+```{r}
+dir.create("../writing/tables")
+dir.create("../writing/figures")
+```
+
+# Training Cohort Tables
+
+## -- Supplementary Table 1: All Subtypes (Included and Excluded)
+
+```{r results='asis'}
+library(dplyr)
+library(knitr)
+library(kableExtra)
+
+# Create data frame for included classes
+included_df <- data.frame(
+  Subtype = filtered_leukemia_subtypes,
+  Cohort = filtered_study_names,
+  stringsAsFactors = FALSE
+)
+
+# Create data frame for excluded classes
+excluded_df <- data.frame(
+  Subtype = leukemia_subtypes[-filter],
+  Cohort = study_names[-filter],
+  stringsAsFactors = FALSE
+)
+
+# Define cohort order (adults first, then pediatric)
+cohort_order <- c(
+  # Adult cohorts
+  "TCGA-LAML",
+  "LEUCEGENE",
+  "BEATAML1.0-COHORT",
+  "100LUMC",
+  # Pediatric cohorts
+  "AAML0531",
+  "AAML1031",
+  "AAML03P1"
+)
+
+# Function to create cross-tabulation table
+create_subtype_table <- function(df, cohort_order) {
+  # Create cross-tabulation
+  ct <- table(df$Subtype, df$Cohort)
+  ct_df <- as.data.frame.matrix(ct)
+  
+  # Ensure all cohorts are present (even if 0 counts)
+  for (cohort in cohort_order) {
+    if (!cohort %in% colnames(ct_df)) {
+      ct_df[[cohort]] <- 0
+    }
+  }
+  
+  # Reorder columns according to cohort_order
+  ct_df <- ct_df[, cohort_order, drop = FALSE]
+  
+  # Add Total column
+  ct_df$Total <- rowSums(ct_df)
+  
+  # Sort rows by Total (high to low)
+  ct_df <- ct_df[order(-ct_df$Total), , drop = FALSE]
+  
+  # Move rownames to a column
+  ct_df <- cbind(Subtype = rownames(ct_df), ct_df)
+  rownames(ct_df) <- NULL
+  
+  return(ct_df)
+}
+
+# Create tables for included and excluded classes
+# For included, we need to show merged classes with breakdowns
+included_df_modified <- included_df
+included_df_modified$Subtype_Original <- included_df$Subtype
+included_df_modified$Subtype_Merged <- modify_classes(included_df$Subtype)
+
+# Create table with merged classes
+included_table_merged <- create_subtype_table(
+  data.frame(Subtype = included_df_modified$Subtype_Merged, 
+             Cohort = included_df_modified$Cohort), 
+  cohort_order
+)
+
+# Rename merged subtypes for display
+included_table_merged$Subtype <- gsub("MDS\\.r/MECOM", "MDS-related and MECOM rearrangement", included_table_merged$Subtype)
+included_table_merged$Subtype <- gsub("other\\.KMT2A", "Other KMT2A rearrangements", included_table_merged$Subtype)
+
+# Create breakdown tables for merged classes
+# MDS.r/MECOM breakdown
+mds_mecom_subtypes <- included_df_modified$Subtype_Original[included_df_modified$Subtype_Merged == "MDS.r/MECOM"]
+if (length(mds_mecom_subtypes) > 0) {
+  mds_mecom_breakdown <- create_subtype_table(
+    data.frame(Subtype = mds_mecom_subtypes, 
+               Cohort = included_df_modified$Cohort[included_df_modified$Subtype_Merged == "MDS.r/MECOM"]),
+    cohort_order
+  )
+  # Rename MECOM fusion to MECOM rearrangements in breakdown
+  mds_mecom_breakdown$Subtype <- gsub("MECOM fusion", "MECOM rearrangements", mds_mecom_breakdown$Subtype)
+  mds_mecom_breakdown$Subtype <- paste0("<span style='padding-left:20px;'>└─ ", mds_mecom_breakdown$Subtype, "</span>")
+}
+
+# other.KMT2A breakdown
+other_kmt2a_subtypes <- included_df_modified$Subtype_Original[included_df_modified$Subtype_Merged == "other.KMT2A"]
+if (length(other_kmt2a_subtypes) > 0) {
+  other_kmt2a_breakdown <- create_subtype_table(
+    data.frame(Subtype = other_kmt2a_subtypes, 
+               Cohort = included_df_modified$Cohort[included_df_modified$Subtype_Merged == "other.KMT2A"]),
+    cohort_order
+  )
+  other_kmt2a_breakdown$Subtype <- paste0("<span style='padding-left:20px;'>└─ ", other_kmt2a_breakdown$Subtype, "</span>")
+}
+
+# Build the included table with hierarchical structure
+included_table_final <- data.frame()
+stripe_groups <- c()  # Track which stripe group each row belongs to
+current_stripe <- 1
+
+for (i in 1:nrow(included_table_merged)) {
+  subtype <- included_table_merged$Subtype[i]
+  # Add the merged class row
+  included_table_final <- rbind(included_table_final, included_table_merged[i, ])
+  stripe_groups <- c(stripe_groups, current_stripe)
+  
+  # Add breakdown rows if this is a merged class
+  if (subtype == "MDS-related and MECOM rearrangement" && exists("mds_mecom_breakdown")) {
+    included_table_final <- rbind(included_table_final, mds_mecom_breakdown)
+    # Add same stripe group for all breakdown rows
+    stripe_groups <- c(stripe_groups, rep(current_stripe, nrow(mds_mecom_breakdown)))
+  } else if (subtype == "Other KMT2A rearrangements" && exists("other_kmt2a_breakdown")) {
+    included_table_final <- rbind(included_table_final, other_kmt2a_breakdown)
+    # Add same stripe group for all breakdown rows
+    stripe_groups <- c(stripe_groups, rep(current_stripe, nrow(other_kmt2a_breakdown)))
+  }
+  
+  # Increment stripe for next group
+  current_stripe <- current_stripe + 1
+}
+
+# Create excluded table (no merging needed)
+excluded_table <- create_subtype_table(excluded_df, cohort_order)
+
+# Add Group column
+included_table_final$Group <- "Included"
+excluded_table$Group <- "Excluded"
+
+# Add totals per study split by included/excluded
+included_totals <- data.frame(
+  Subtype = "Total",
+  t(colSums(included_table_merged[, cohort_order])),  # Use merged table for correct totals
+  Total = sum(included_table_merged$Total),
+  Group = "Included",
+  stringsAsFactors = FALSE
+)
+colnames(included_totals) <- c("Subtype", cohort_order, "Total", "Group")
+
+excluded_totals <- data.frame(
+  Subtype = "Total",
+  t(colSums(excluded_table[, cohort_order])),
+  Total = sum(excluded_table$Total),
+  Group = "Excluded",
+  stringsAsFactors = FALSE
+)
+colnames(excluded_totals) <- c("Subtype", cohort_order, "Total", "Group")
+
+# Combine all tables
+combined_table_with_totals <- rbind(
+  included_table_final[, c("Group", "Subtype", cohort_order, "Total")],
+  included_totals[, c("Group", "Subtype", cohort_order, "Total")],
+  excluded_table[, c("Group", "Subtype", cohort_order, "Total")],
+  excluded_totals[, c("Group", "Subtype", cohort_order, "Total")]
+)
+combined_table_with_totals$Group <- NULL
+
+# Create formatted table with manual striping
+table_output <- kable(combined_table_with_totals, 
+      format = "html",
+      caption = "Table 1: Distribution of Leukemia Subtypes by Cohort",
+      row.names = FALSE, escape = FALSE) %>%
+  kable_styling(
+    bootstrap_options = c("condensed"),
+    full_width = FALSE,
+    position = "left"
+  )
+
+# Apply manual striping for included rows
+# Stripe colors for included section - merged classes share stripe with their breakdowns
+for (i in 1:length(stripe_groups)) {
+  stripe_color <- if (stripe_groups[i] %% 2 == 1) "#f9f9f9" else "white"
+  table_output <- table_output %>%
+    row_spec(i, background = stripe_color)
+}
+
+# Apply striping for excluded rows (standard alternating)
+excluded_start <- nrow(included_table_final) + 2
+excluded_end <- nrow(combined_table_with_totals) - 1
+for (i in excluded_start:excluded_end) {
+  row_index <- i - excluded_start + 1
+  stripe_color <- if (row_index %% 2 == 1) "#f9f9f9" else "white"
+  table_output <- table_output %>%
+    row_spec(i, background = stripe_color)
+}
+
+# Add section headers and total row styling
+table_output <- table_output %>%
+  pack_rows("Included", 1, nrow(included_table_final)+1, 
+            label_row_css = "background-color: #e6f2ff; font-weight: bold;", indent = F) %>%
+  pack_rows("Excluded", excluded_start, nrow(combined_table_with_totals),
+            label_row_css = "background-color: #ffe6e6; font-weight: bold;", indent = F) %>%
+  add_header_above(c(" " = 1, "Adult Cohorts" = 4, "Pediatric Cohorts" = 3, " " = 1))
+
+table_output
+save_kable(table_output, "../writing/tables/supplementary_table1.png", zoom = 2)
+```
+
+## -- Table 1: Included Subtypes Only
+
+```{r results='asis'}
+# Simple table with only included classes (no breakdown)
+# Add a total row
+included_totals_simple <- data.frame(
+  Subtype = "Total",
+  t(colSums(included_table_merged[, cohort_order])),
+  Total = sum(included_table_merged$Total),
+  stringsAsFactors = FALSE
+)
+colnames(included_totals_simple) <- c("Subtype", cohort_order, "Total")
+# Combine with the merged table
+included_simple <- rbind(included_table_merged, included_totals_simple)
+
+length(included_table_merged$Subtype)
+
+# Create formatted table
+simple_table <- kable(included_simple, 
+      format = "html",
+      caption = "Table 1: Included Leukemia Subtypes by Cohort",
+      row.names = FALSE, 
+      escape = FALSE) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "condensed"),
+    full_width = FALSE,
+    position = "left"
+  ) %>%
+  row_spec(nrow(included_simple), bold = TRUE, background = "#e6f2ff") %>%
+  add_header_above(c(" " = 1, "Adult Cohorts" = 4, "Pediatric Cohorts" = 3, " " = 1))
+
+simple_table
+save_kable(simple_table, "../writing/tables/table1.png", zoom = 2)
+```
+
+# Model Performance Results
+
+```{r}
+outer_cv_results$performance_summaries$cv
+```
+```{r}
+outer_cv_results$performance_summaries$loso
+```
+
+
+##  --Performance Boxplots
+
+```{r}
+types = c("cv", "loso")
+models <- names(outer_cv_results$detailed_performance$cv)
+
+
+results_per_fold <- data.frame()
+
+for (type_i in types){
+for (model_i in models){
+  folds <- names(outer_cv_results$detailed_performance[[type_i]][[models[1]]])
+  for (fold_i in folds){
+    results_per_fold <- rbind(results_per_fold, 
+                              data.frame(type = type_i, 
+                                         model = model_i, 
+                                         fold = fold_i, 
+                                         kappa = outer_cv_results$detailed_performance[[type_i]][[model_i]][[fold_i]][["kappa"]],
+                                         accuracy = outer_cv_results$detailed_performance[[type_i]][[model_i]][[fold_i]][["accuracy"]])
+                              
+                              )
+  }
+}
+}
+
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(ComplexHeatmap)
+library(circlize)
+library(ggplotify)
+library(grid)
+
+results_per_fold$model <- gsub("_", " ", results_per_fold$model)
+results_per_fold$model <- gsub("xgboost", "XGBoost", results_per_fold$model)
+results_per_fold$model <- gsub("svm", "SVM", results_per_fold$model)
+results_per_fold$model <- gsub("neural net", "DNN", results_per_fold$model)
+results_per_fold$model <- gsub("Optimized", "Ensemble", results_per_fold$model)
+
+colours <- c("#fd7f6f", "#7eb0d5", "#b2e061", "#bd7ebe", "#ffb55a")
+names(colours) <- c("XGBoost", "DNN", "SVM", "OvR Ensemble", "Global Ensemble")
+
+# Create separate ordering for each type
+results_per_fold <- results_per_fold %>%
+  group_by(type, model) %>%
+  mutate(mean_kappa = mean(kappa)) %>%
+  ungroup() %>%
+  mutate(model_ordered = paste(type, model, sep = "_"),
+         model_ordered = reorder(model_ordered, mean_kappa))
+
+# Compute per-model means for annotations
+means_cv <- results_per_fold %>%
+  dplyr::filter(type == "cv") %>%
+  dplyr::group_by(model) %>%
+  dplyr::summarise(mean_kappa = mean(kappa), .groups = "drop")
+
+means_loso <- results_per_fold %>%
+  dplyr::filter(type == "loso") %>%
+  dplyr::group_by(model) %>%
+  dplyr::summarise(mean_kappa = mean(kappa), .groups = "drop")
+box_width = 0.6
+p1 <- ggplot(results_per_fold %>% dplyr::filter(type == "cv"),
+             aes(x = reorder(model, mean_kappa), y = kappa, fill = model)) +
+  geom_boxplot(width = box_width, alpha = 1, outlier.shape = NA) +
+  geom_jitter(width = 0.2, size = 2, alpha = 0.7) +
+  geom_text(data = means_cv,
+            aes(x = reorder(model, mean_kappa), y = 0.76, label = sprintf("%.2f", mean_kappa)),
+            inherit.aes = FALSE, size = 3.5) +
+  theme_bw() +
+  labs(
+    title = "CV: Boxplots of performance",
+    x = "Model",
+    y = "Cohen's Kappa",
+    fill = "Model"
+  ) +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ylim(0.75, 1) +
+  scale_fill_manual(values = colours)
+
+p2 <- ggplot(results_per_fold %>% dplyr::filter(type == "loso"),
+             aes(x = reorder(model, mean_kappa), y = kappa, fill = model)) +
+  geom_boxplot(alpha = 1, width = box_width, outlier.shape = NA) +
+  geom_jitter(width = 0.2, size = 2, alpha = 0.7) +
+  geom_text(data = means_loso,
+            aes(x = reorder(model, mean_kappa), y = 0.76, label = sprintf("%.2f", mean_kappa)),
+            inherit.aes = FALSE, size = 3.5) +
+  theme_bw() +
+  labs(
+    title = "LOSO: Boxplots of performance",
+    x = "Model",
+    y = "Cohen's Kappa",
+    fill = "Model"
+  ) +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ylim(0.75, 1) +
+  scale_fill_manual(values = colours)
+
+library(patchwork)
+p1 + p2
+```
+
+##  --Performance Resampling
+```{r}
+# Bootstrap resampling to calculate 95% CI for each model's kappa
+# Using STRATIFIED bootstrap to preserve cohort structure and class distribution
+
+# Function to calculate Cohen's kappa (same as used later in the document)
+calculate_kappa <- function(predictions, truth) {
+  all_classes <- unique(c(predictions, truth))
+  cm <- table(factor(predictions, levels = all_classes), 
+              factor(truth, levels = all_classes))
+  n <- sum(cm)
+  observed_accuracy <- sum(diag(cm)) / n
+  row_sums <- rowSums(cm)
+  col_sums <- colSums(cm)
+  expected_accuracy <- sum(row_sums * col_sums) / (n^2)
+  kappa <- (observed_accuracy - expected_accuracy) / (1 - expected_accuracy)
+  return(kappa)
+}
+
+# Set bootstrap parameters
+set.seed(42)
+n_bootstrap <- 1000
+
+# Extract sample-level predictions with cohort/fold information for all models
+extract_predictions_by_fold <- function(type_i, model_i) {
+  folds <- names(outer_cv_results$detailed_performance[[type_i]][[model_i]])
+  pred_df <- data.frame()
+  
+  for (fold_i in folds) {
+    fold_data <- outer_cv_results$detailed_performance[[type_i]][[model_i]][[fold_i]]
+    pred_df <- rbind(pred_df, data.frame(
+      fold = fold_i,
+      prediction = fold_data$predictions,
+      truth = fold_data$truth,
+      stringsAsFactors = FALSE
+    ))
+  }
+  
+  # Apply class modifications
+  pred_df$prediction_mod <- modify_classes(pred_df$prediction)
+  pred_df$truth_mod <- modify_classes(pred_df$truth)
+  
+  return(pred_df)
+}
+
+# ============================================================================
+# METHOD 1: Stratified Bootstrap (resample within each cohort/fold)
+# Preserves cohort structure and approximate class distribution
+# ============================================================================
+bootstrap_stratified <- data.frame()
+
+for (type_i in c("cv", "loso")) {
+  models <- names(outer_cv_results$detailed_performance[[type_i]])
+  
+  for (model_i in models) {
+    pred_df <- extract_predictions_by_fold(type_i, model_i)
+    folds <- unique(pred_df$fold)
+    
+    # Calculate observed kappa
+    observed_kappa <- calculate_kappa(pred_df$prediction_mod, pred_df$truth_mod)
+    
+    # Stratified bootstrap: resample within each fold
+    boot_kappa <- numeric(n_bootstrap)
+    
+    for (b in 1:n_bootstrap) {
+      boot_pred <- c()
+      boot_truth <- c()
+      
+      for (fold_i in folds) {
+        fold_data <- pred_df[pred_df$fold == fold_i, ]
+        n_fold <- nrow(fold_data)
+        idx <- sample(1:n_fold, replace = TRUE)
+        boot_pred <- c(boot_pred, fold_data$prediction_mod[idx])
+        boot_truth <- c(boot_truth, fold_data$truth_mod[idx])
+      }
+      
+      boot_kappa[b] <- calculate_kappa(boot_pred, boot_truth)
+    }
+    
+    ci_95 <- quantile(boot_kappa, c(0.025, 0.975))
+    
+    bootstrap_stratified <- rbind(bootstrap_stratified, data.frame(
+      type = type_i,
+      model = model_i,
+      method = "stratified",
+      n_samples = nrow(pred_df),
+      n_folds = length(folds),
+      observed_kappa = observed_kappa,
+      boot_mean = mean(boot_kappa),
+      boot_se = sd(boot_kappa),
+      ci_lower = ci_95[1],
+      ci_upper = ci_95[2]
+    ))
+  }
+}
+
+# ============================================================================
+# METHOD 2: Single-Cohort Stratified Bootstrap (LOSO only)
+# Randomly select ONE cohort per iteration and resample only within that cohort
+# Other cohorts remain unchanged - isolates per-cohort sampling variance
+# ============================================================================
+bootstrap_loso_single <- data.frame()
+
+models <- names(outer_cv_results$detailed_performance$loso)
+
+for (model_i in models) {
+  pred_df <- extract_predictions_by_fold("loso", model_i)
+  folds <- unique(pred_df$fold)
+  n_folds <- length(folds)
+  
+  # Calculate observed kappa
+  observed_kappa <- calculate_kappa(pred_df$prediction_mod, pred_df$truth_mod)
+  
+  # Single-cohort stratified bootstrap
+  boot_kappa <- numeric(n_bootstrap)
+  
+  for (b in 1:n_bootstrap) {
+    # Randomly select ONE cohort to resample
+    resample_fold <- sample(folds, 1)
+    
+    boot_pred <- c()
+    boot_truth <- c()
+    
+    #for (fold_i in folds) {
+      fold_data <- pred_df[pred_df$fold == resample_fold, ]
+      
+      #if (fold_i == resample_fold) {
+        # Resample within this cohort
+        n_fold <- nrow(fold_data)
+        idx <- sample(1:n_fold, replace = TRUE)
+        boot_pred <- c(boot_pred, fold_data$prediction_mod[idx])
+        boot_truth <- c(boot_truth, fold_data$truth_mod[idx])
+      #} else {
+        # Keep other cohorts unchanged
+      #  boot_pred <- c(boot_pred, fold_data$prediction_mod)
+      #  boot_truth <- c(boot_truth, fold_data$truth_mod)
+      #}
+    #}
+    
+    boot_kappa[b] <- calculate_kappa(boot_pred, boot_truth)
+  }
+  
+  ci_95 <- quantile(boot_kappa, c(0.025, 0.975))
+  
+  bootstrap_loso_single <- rbind(bootstrap_loso_single, data.frame(
+    type = "loso",
+    model = model_i,
+    method = "single_cohort",
+    n_samples = nrow(pred_df),
+    n_folds = n_folds,
+    observed_kappa = observed_kappa,
+    boot_mean = mean(boot_kappa),
+    boot_se = sd(boot_kappa),
+    ci_lower = ci_95[1],
+    ci_upper = ci_95[2]
+  ))
+}
+
+# ============================================================================
+# METHOD 3: Study-Level Bootstrap (LOSO only)
+# Resample which studies to include - captures study-level variance
+# Note: With only 7 studies, this gives coarser estimates
+# ============================================================================
+bootstrap_loso_study <- data.frame()
+
+for (model_i in models) {
+  pred_df <- extract_predictions_by_fold("loso", model_i)
+  folds <- unique(pred_df$fold)
+  n_folds <- length(folds)
+  
+  # Calculate observed kappa
+  observed_kappa <- calculate_kappa(pred_df$prediction_mod, pred_df$truth_mod)
+  
+  # Study-level bootstrap: resample which studies to include (with replacement)
+  # Each bootstrap includes n_folds studies (some may be repeated, some omitted)
+  boot_kappa <- numeric(n_bootstrap)
+  
+  for (b in 1:n_bootstrap) {
+    # Sample studies with replacement
+    sampled_folds <- sample(folds, n_folds, replace = TRUE)
+    
+    boot_pred <- c()
+    boot_truth <- c()
+    
+    for (fold_i in sampled_folds) {
+      fold_data <- pred_df[pred_df$fold == fold_i, ]
+      boot_pred <- c(boot_pred, fold_data$prediction_mod)
+      boot_truth <- c(boot_truth, fold_data$truth_mod)
+    }
+    
+    boot_kappa[b] <- calculate_kappa(boot_pred, boot_truth)
+  }
+  
+  ci_95 <- quantile(boot_kappa, c(0.025, 0.975))
+  
+  bootstrap_loso_study <- rbind(bootstrap_loso_study, data.frame(
+    type = "loso",
+    model = model_i,
+    method = "study_level",
+    n_samples = nrow(pred_df),
+    n_folds = n_folds,
+    observed_kappa = observed_kappa,
+    boot_mean = mean(boot_kappa),
+    boot_se = sd(boot_kappa),
+    ci_lower = ci_95[1],
+    ci_upper = ci_95[2]
+  ))
+}
+
+# Combine results
+bootstrap_results <- rbind(bootstrap_stratified, bootstrap_loso_single, bootstrap_loso_study)
+
+# Tidy model names for display
+bootstrap_results$model <- gsub("_", " ", bootstrap_results$model)
+bootstrap_results$model <- gsub("xgboost", "XGBoost", bootstrap_results$model)
+bootstrap_results$model <- gsub("svm", "SVM", bootstrap_results$model)
+bootstrap_results$model <- gsub("neural net", "DNN", bootstrap_results$model)
+bootstrap_results$model <- gsub("Optimized", "Ensemble", bootstrap_results$model)
+
+# Display results
+cat("\n=================================================================\n")
+cat("Bootstrap Results (", n_bootstrap, " iterations)\n", sep = "")
+cat("=================================================================\n\n")
+
+cat("CV Results (Stratified by Fold):\n")
+cat("---------------------------------\n")
+cv_results <- bootstrap_results[bootstrap_results$type == "cv", ]
+cv_results <- cv_results[order(-cv_results$observed_kappa), ]
+for (i in 1:nrow(cv_results)) {
+  cat(sprintf("  %s: κ = %.4f, 95%% CI [%.4f, %.4f], SE = %.4f\n",
+              cv_results$model[i], cv_results$observed_kappa[i],
+              cv_results$ci_lower[i], cv_results$ci_upper[i], cv_results$boot_se[i]))
+}
+
+cat("\nLOSO Results - Stratified Bootstrap (resample within ALL studies):\n")
+cat("------------------------------------------------------------------\n")
+cat("Resamples within every cohort simultaneously. May overestimate variance.\n\n")
+loso_strat <- bootstrap_results[bootstrap_results$type == "loso" & 
+                                  bootstrap_results$method == "stratified", ]
+loso_strat <- loso_strat[order(-loso_strat$observed_kappa), ]
+for (i in 1:nrow(loso_strat)) {
+  cat(sprintf("  %s: κ = %.4f, 95%% CI [%.4f, %.4f], SE = %.4f\n",
+              loso_strat$model[i], loso_strat$observed_kappa[i],
+              loso_strat$ci_lower[i], loso_strat$ci_upper[i], loso_strat$boot_se[i]))
+}
+
+cat("\nLOSO Results - Single-Cohort Bootstrap (resample within ONE random cohort):\n")
+cat("---------------------------------------------------------------------------\n")
+cat("Each iteration randomly selects ONE cohort to resample\n\n")
+loso_single <- bootstrap_results[bootstrap_results$type == "loso" & 
+                                   bootstrap_results$method == "single_cohort", ]
+loso_single <- loso_single[order(-loso_single$observed_kappa), ]
+for (i in 1:nrow(loso_single)) {
+  cat(sprintf("  %s: κ = %.4f, 95%% CI [%.4f, %.4f], SE = %.4f\n",
+              loso_single$model[i], loso_single$observed_kappa[i],
+              loso_single$ci_lower[i], loso_single$ci_upper[i], loso_single$boot_se[i]))
+}
+
+cat("\nLOSO Results - Study-Level Bootstrap (resample which studies to include):\n")
+cat("--------------------------------------------------------------------------\n")
+cat("This captures study-level variance (which studies happen to be in the data).\n")
+cat("Note: With only 7 studies, CIs may be coarser.\n\n")
+loso_study <- bootstrap_results[bootstrap_results$type == "loso" & 
+                                  bootstrap_results$method == "study_level", ]
+loso_study <- loso_study[order(-loso_study$observed_kappa), ]
+for (i in 1:nrow(loso_study)) {
+  cat(sprintf("  %s: κ = %.4f, 95%% CI [%.4f, %.4f], SE = %.4f\n",
+              loso_study$model[i], loso_study$observed_kappa[i],
+              loso_study$ci_lower[i], loso_study$ci_upper[i], loso_study$boot_se[i]))
+}
+
+cat("\n\nInterpretation:\n")
+cat("===============\n")
+cat("- Stratified (all cohorts): Resamples within every cohort - combined variance.\n")
+cat("- Single-Cohort: Resamples one random cohort per iteration - more conservative,\n")
+cat("  isolates individual cohort contributions to overall variance.\n")
+cat("- Study-Level: Resamples which studies to include - captures generalization\n")
+cat("  variance to new studies (the goal of LOSO). Wider CIs = more study variability.\n")
+```
+
+##  --Performance Boxplots with resampling
+```{r}
+# Generate STRATIFIED bootstrap samples for visualization
+# Store individual bootstrap kappa values for boxplots
+
+set.seed(42)
+n_bootstrap_viz <- 100  # Fewer samples for cleaner visualization
+
+# ============================================================================
+# Stratified Bootstrap Samples (resample within each fold/cohort)
+# ============================================================================
+bootstrap_samples_stratified <- data.frame()
+
+for (type_i in c("cv", "loso")) {
+  models <- names(outer_cv_results$detailed_performance[[type_i]])
+  
+  for (model_i in models) {
+    pred_df <- extract_predictions_by_fold(type_i, model_i)
+    folds <- unique(pred_df$fold)
+    
+    for (b in 1:n_bootstrap_viz) {
+      boot_pred <- c()
+      boot_truth <- c()
+      
+      # Stratified: resample within each fold
+      for (fold_i in folds) {
+        fold_data <- pred_df[pred_df$fold == fold_i, ]
+        n_fold <- nrow(fold_data)
+        idx <- sample(1:n_fold, replace = TRUE)
+        boot_pred <- c(boot_pred, fold_data$prediction_mod[idx])
+        boot_truth <- c(boot_truth, fold_data$truth_mod[idx])
+      }
+      
+      boot_kappa <- calculate_kappa(boot_pred, boot_truth)
+      
+      bootstrap_samples_stratified <- rbind(bootstrap_samples_stratified, data.frame(
+        type = type_i,
+        model = model_i,
+        method = "stratified",
+        bootstrap_iter = b,
+        kappa = boot_kappa
+      ))
+    }
+  }
+}
+
+# ============================================================================
+# Single-Cohort Bootstrap Samples (LOSO only - resample ONE random cohort)
+# ============================================================================
+bootstrap_samples_single <- data.frame()
+
+models <- names(outer_cv_results$detailed_performance$loso)
+
+for (model_i in models) {
+  pred_df <- extract_predictions_by_fold("loso", model_i)
+  folds <- unique(pred_df$fold)
+  
+  for (b in 1:n_bootstrap_viz) {
+    # Randomly select ONE cohort to resample
+    resample_fold <- sample(folds, 1)
+    
+    boot_pred <- c()
+    boot_truth <- c()
+    
+    for (fold_i in folds) {
+      fold_data <- pred_df[pred_df$fold == fold_i, ]
+      
+      if (fold_i == resample_fold) {
+        # Resample within this cohort
+        n_fold <- nrow(fold_data)
+        idx <- sample(1:n_fold, replace = TRUE)
+        boot_pred <- c(boot_pred, fold_data$prediction_mod[idx])
+        boot_truth <- c(boot_truth, fold_data$truth_mod[idx])
+      } else {
+        # Keep other cohorts unchanged
+        boot_pred <- c(boot_pred, fold_data$prediction_mod)
+        boot_truth <- c(boot_truth, fold_data$truth_mod)
+      }
+    }
+    
+    boot_kappa <- calculate_kappa(boot_pred, boot_truth)
+    
+    bootstrap_samples_single <- rbind(bootstrap_samples_single, data.frame(
+      type = "loso",
+      model = model_i,
+      method = "single_cohort",
+      bootstrap_iter = b,
+      kappa = boot_kappa
+    ))
+  }
+}
+
+# ============================================================================
+# Study-Level Bootstrap Samples (LOSO only - resample which studies to include)
+# ============================================================================
+bootstrap_samples_study <- data.frame()
+
+for (model_i in models) {
+  pred_df <- extract_predictions_by_fold("loso", model_i)
+  folds <- unique(pred_df$fold)
+  n_folds <- length(folds)
+  
+  for (b in 1:n_bootstrap_viz) {
+    # Sample studies with replacement
+    sampled_folds <- sample(folds, n_folds, replace = TRUE)
+    
+    boot_pred <- c()
+    boot_truth <- c()
+    
+    for (fold_i in sampled_folds) {
+      fold_data <- pred_df[pred_df$fold == fold_i, ]
+      boot_pred <- c(boot_pred, fold_data$prediction_mod)
+      boot_truth <- c(boot_truth, fold_data$truth_mod)
+    }
+    
+    boot_kappa <- calculate_kappa(boot_pred, boot_truth)
+    
+    bootstrap_samples_study <- rbind(bootstrap_samples_study, data.frame(
+      type = "loso",
+      model = model_i,
+      method = "study_level",
+      bootstrap_iter = b,
+      kappa = boot_kappa
+    ))
+  }
+}
+
+# Combine all bootstrap samples
+bootstrap_samples <- rbind(bootstrap_samples_stratified, bootstrap_samples_single, bootstrap_samples_study)
+
+# Tidy model names
+bootstrap_samples$model <- gsub("_", " ", bootstrap_samples$model)
+bootstrap_samples$model <- gsub("xgboost", "XGBoost", bootstrap_samples$model)
+bootstrap_samples$model <- gsub("svm", "SVM", bootstrap_samples$model)
+bootstrap_samples$model <- gsub("neural net", "DNN", bootstrap_samples$model)
+bootstrap_samples$model <- gsub("Optimized", "Ensemble", bootstrap_samples$model)
+
+# Calculate mean kappa per model for ordering
+bootstrap_samples <- bootstrap_samples %>%
+  group_by(type, model, method) %>%
+  mutate(mean_kappa = mean(kappa)) %>%
+  ungroup()
+
+# ============================================================================
+# PLOT 1: CV Stratified Bootstrap
+# ============================================================================
+means_cv_boot <- bootstrap_samples %>%
+  filter(type == "cv", method == "stratified") %>%
+  group_by(model) %>%
+  summarise(mean_kappa = mean(kappa), 
+            ci_lower = quantile(kappa, 0.025),
+            ci_upper = quantile(kappa, 0.975),
+            .groups = "drop")
+
+p1_boot <- ggplot(bootstrap_samples %>% filter(type == "cv", method == "stratified"),
+                  aes(x = reorder(model, mean_kappa), y = kappa, fill = model)) +
+  geom_boxplot(alpha = 0.8, outlier.shape = NA) +
+  geom_jitter(width = 0.15, size = 1.5, alpha = 0.3, color = "gray30") +
+  geom_text(data = means_cv_boot,
+            aes(x = reorder(model, mean_kappa), y = 0.76, 
+                label = sprintf("%.3f\n[%.3f-%.3f]", mean_kappa, ci_lower, ci_upper)),
+            inherit.aes = FALSE, size = 2.8) +
+  theme_bw() +
+  labs(
+    title = "CV: Stratified bootstrap",
+    subtitle = sprintf("Resampling within each fold (%d iterations)", n_bootstrap_viz),
+    x = "Model",
+    y = "Cohen's Kappa",
+    fill = "Model"
+  ) +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ylim(0.75, 1) +
+  scale_fill_manual(values = colours)
+
+# ============================================================================
+# PLOT 2: LOSO Stratified Bootstrap (within-study sampling variance)
+# ============================================================================
+means_loso_strat <- bootstrap_samples %>%
+  filter(type == "loso", method == "stratified") %>%
+  group_by(model) %>%
+  summarise(mean_kappa = mean(kappa),
+            ci_lower = quantile(kappa, 0.025),
+            ci_upper = quantile(kappa, 0.975),
+            .groups = "drop")
+
+p2_boot_strat <- ggplot(bootstrap_samples %>% filter(type == "loso", method == "stratified"),
+                        aes(x = reorder(model, mean_kappa), y = kappa, fill = model)) +
+  geom_boxplot(alpha = 0.8, outlier.shape = NA) +
+  geom_jitter(width = 0.15, size = 1.5, alpha = 0.3, color = "gray30") +
+  geom_text(data = means_loso_strat,
+            aes(x = reorder(model, mean_kappa), y = 0.76, 
+                label = sprintf("%.3f\n[%.3f-%.3f]", mean_kappa, ci_lower, ci_upper)),
+            inherit.aes = FALSE, size = 2.8) +
+  theme_bw() +
+  labs(
+    title = "LOSO: Stratified bootstrap",
+    subtitle = "Resampling within each study (sampling variance)",
+    x = "Model",
+    y = "Cohen's Kappa",
+    fill = "Model"
+  ) +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ylim(0.75, 1) +
+  scale_fill_manual(values = colours)
+
+# ============================================================================
+# PLOT 3: LOSO Single-Cohort Bootstrap (one random cohort resampled)
+# ============================================================================
+means_loso_single <- bootstrap_samples %>%
+  filter(type == "loso", method == "single_cohort") %>%
+  group_by(model) %>%
+  summarise(mean_kappa = mean(kappa),
+            ci_lower = quantile(kappa, 0.025),
+            ci_upper = quantile(kappa, 0.975),
+            .groups = "drop")
+
+p2_boot_single <- ggplot(bootstrap_samples %>% filter(type == "loso", method == "single_cohort"),
+                         aes(x = reorder(model, mean_kappa), y = kappa, fill = model)) +
+  geom_boxplot(alpha = 0.8, outlier.shape = NA) +
+  geom_jitter(width = 0.15, size = 1.5, alpha = 0.3, color = "gray30") +
+  geom_text(data = means_loso_single,
+            aes(x = reorder(model, mean_kappa), y = 0.76, 
+                label = sprintf("%.3f\n[%.3f-%.3f]", mean_kappa, ci_lower, ci_upper)),
+            inherit.aes = FALSE, size = 2.8) +
+  theme_bw() +
+  labs(
+    title = "LOSO: Single-cohort bootstrap",
+    subtitle = "Resample ONE random cohort per iteration",
+    x = "Model",
+    y = "Cohen's Kappa",
+    fill = "Model"
+  ) +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ylim(0.75, 1) +
+  scale_fill_manual(values = colours)
+
+# ============================================================================
+# PLOT 4: LOSO Study-Level Bootstrap (study-level variance)
+# ============================================================================
+means_loso_study <- bootstrap_samples %>%
+  filter(type == "loso", method == "study_level") %>%
+  group_by(model) %>%
+  summarise(mean_kappa = mean(kappa),
+            ci_lower = quantile(kappa, 0.025),
+            ci_upper = quantile(kappa, 0.975),
+            .groups = "drop")
+
+p2_boot_study <- ggplot(bootstrap_samples %>% filter(type == "loso", method == "study_level"),
+                        aes(x = reorder(model, mean_kappa), y = kappa, fill = model)) +
+  geom_boxplot(alpha = 0.8, outlier.shape = NA) +
+  geom_jitter(width = 0.15, size = 1.5, alpha = 0.3, color = "gray30") +
+  geom_text(data = means_loso_study,
+            aes(x = reorder(model, mean_kappa), y = 0.76, 
+                label = sprintf("%.3f\n[%.3f-%.3f]", mean_kappa, ci_lower, ci_upper)),
+            inherit.aes = FALSE, size = 2.8) +
+  theme_bw() +
+  labs(
+    title = "LOSO: Study-level bootstrap",
+    subtitle = "Resample which studies to include",
+    x = "Model",
+    y = "Cohen's Kappa",
+    fill = "Model"
+  ) +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ylim(0.75, 1) +
+  scale_fill_manual(values = colours)
+
+# Combined plots - 2x2 layout
+(p1_boot + p2_boot_strat) / (p2_boot_single + p2_boot_study) +
+  plot_annotation(
+    title = "Bootstrap Resampled Performance",
+    subtitle = "CV (top-left) | LOSO: All-cohort stratified (top-right) | Single-cohort (bottom-left) | Study-level (bottom-right)"
+  )
+```
+
+```{r}
+# Compare variance sources: fold-based, stratified bootstrap, and study-level bootstrap
+cat("\n=================================================================\n")
+cat("Comparison of Variance Estimation Methods\n")
+cat("=================================================================\n\n")
+
+# Fold-based variance (original)
+fold_var <- results_per_fold %>%
+  group_by(type, model) %>%
+  summarise(
+    fold_mean = mean(kappa), 
+    fold_sd = sd(kappa), 
+    .groups = "drop"
+  )
+
+# Bootstrap variance (stratified)
+boot_strat_var <- bootstrap_samples %>%
+  filter(method == "stratified") %>%
+  group_by(type, model) %>%
+  summarise(
+    boot_strat_mean = mean(kappa),
+    boot_strat_se = sd(kappa),
+    .groups = "drop"
+  )
+
+# Bootstrap variance (single-cohort, LOSO only)
+boot_single_var <- bootstrap_samples %>%
+  filter(method == "single_cohort") %>%
+  group_by(type, model) %>%
+  summarise(
+    boot_single_mean = mean(kappa),
+    boot_single_se = sd(kappa),
+    .groups = "drop"
+  )
+
+# Bootstrap variance (study-level, LOSO only)
+boot_study_var <- bootstrap_samples %>%
+  filter(method == "study_level") %>%
+  group_by(type, model) %>%
+  summarise(
+    boot_study_mean = mean(kappa),
+    boot_study_se = sd(kappa),
+    .groups = "drop"
+  )
+
+# Merge all
+comparison <- fold_var %>%
+  left_join(boot_strat_var, by = c("type", "model")) %>%
+  left_join(boot_single_var, by = c("type", "model")) %>%
+  left_join(boot_study_var, by = c("type", "model"))
+
+cat("CV Results:\n")
+cat("-----------\n")
+cv_comp <- comparison %>% filter(type == "cv") %>% 
+  select(model, fold_mean, fold_sd, boot_strat_se)
+print(cv_comp)
+
+cat("\n\nLOSO Results:\n")
+cat("-------------\n")
+cat("fold_sd:        Between-fold variance (7 cohorts)\n")
+cat("boot_strat_se:  Resample ALL cohorts (combined within-study variance)\n")
+cat("boot_single_se: Resample ONE random cohort (isolated per-cohort variance)\n")
+cat("boot_study_se:  Resample which studies (study-level/generalization variance)\n\n")
+loso_comp <- comparison %>% filter(type == "loso") %>%
+  select(model, fold_mean, fold_sd, boot_strat_se, boot_single_se, boot_study_se)
+print(loso_comp)
+
+cat("\n\nInterpretation:\n")
+cat("---------------\n")
+cat("- fold_sd: Observed variance across the 7 LOSO folds (study-level effects)\n")
+cat("- boot_strat_se: Combined sampling variance when resampling ALL cohorts\n")
+cat("- boot_single_se: More conservative - resamples ONE cohort at a time\n")
+cat("  (Smaller SE since only 1/7 of data varies per iteration)\n")
+cat("- boot_study_se: Study selection variance - if we had different studies\n")
+cat("\nExpected: boot_single_se < boot_strat_se (only one cohort changes per iter)\n")
+cat("If boot_study_se >> boot_single_se: study selection dominates over sampling variance.\n")
+```
+
+
+##  --Overall Summary Statistics
+
+```{r}
+library(ComplexHeatmap)
+# Summary heatmaps of mean and SD per model for CV and LOSO (including accuracy)
+summary_stats <- results_per_fold %>%
+  dplyr::group_by(type, model) %>%
+  dplyr::summarise(
+    mean_kappa = mean(kappa),
+    sd_kappa = sd(kappa),
+    mean_accuracy = mean(accuracy),
+    sd_accuracy = sd(accuracy),
+    .groups = "drop"
+  )
+
+# CV ordering and data
+cv_stats <- summary_stats %>% dplyr::filter(type == "cv") %>%
+  dplyr::arrange(dplyr::desc(mean_kappa)) %>%
+  dplyr::mutate(model = factor(model, levels = unique(model)))
+
+# LOSO ordering and data
+loso_stats <- summary_stats %>% dplyr::filter(type == "loso") %>%
+  dplyr::arrange(dplyr::desc(mean_kappa)) %>%
+  dplyr::mutate(model = factor(model, levels = unique(model)))
+
+# ComplexHeatmap: combined heatmaps per CV and LOSO with per-metric shared scales
+# Build matrices for CV (ordered by mean kappa)
+cv_row_order <- as.character(cv_stats$model)
+cv_mat <- cbind(
+  Mean = cv_stats$mean_kappa,
+  SD   = cv_stats$sd_kappa,
+  Mean = cv_stats$mean_accuracy,
+  SD   = cv_stats$sd_accuracy
+)
+colnames(cv_mat) <- c("Mean", "SD", "Mean", "SD")
+rownames(cv_mat) <- cv_row_order
+
+# Build matrices for LOSO (ordered by mean kappa)
+loso_row_order <- as.character(loso_stats$model)
+loso_mat <- cbind(
+  Mean = loso_stats$mean_kappa,
+  SD   = loso_stats$sd_kappa,
+  Mean = loso_stats$mean_accuracy,
+  SD   = loso_stats$sd_accuracy
+)
+colnames(loso_mat) <- c("Mean", "SD", "Mean", "SD")
+rownames(loso_mat) <- loso_row_order
+
+# Column grouping for hierarchical headers
+col_groups <- factor(c("Kappa", "Kappa", "Accuracy", "Accuracy"), levels = c("Kappa", "Accuracy"))
+
+# Build normalized color-value matrices so each metric has sensible shared scales
+normalize_vec <- function(x, lims) {
+  if (diff(lims) == 0) return(rep(0.5, length(x)))
+  pmin(pmax((x - lims[1]) / (lims[2] - lims[1]), 0), 1)
+}
+
+# Normalize CV matrix (columns 1-2 are Kappa, 3-4 are Accuracy)
+mean_kappa_limits <- range(cv_mat[, 1], na.rm = TRUE)
+sd_kappa_limits <- range(cv_mat[, 2], na.rm = TRUE)
+mean_acc_limits <- range(cv_mat[, 3], na.rm = TRUE)
+sd_acc_limits <- range(cv_mat[, 4], na.rm = TRUE)
+
+cv_colval_mat <- cv_mat
+cv_colval_mat[, 1] <- normalize_vec(cv_mat[, 1], mean_kappa_limits)
+cv_colval_mat[, 2] <- 1 - normalize_vec(cv_mat[, 2], sd_kappa_limits)
+cv_colval_mat[, 3] <- normalize_vec(cv_mat[, 3], mean_acc_limits)
+cv_colval_mat[, 4] <- 1 - normalize_vec(cv_mat[, 4], sd_acc_limits)
+
+# Normalize LOSO matrix
+mean_kappa_limits <- range(loso_mat[, 1], na.rm = TRUE)
+sd_kappa_limits <- range(loso_mat[, 2], na.rm = TRUE)
+mean_acc_limits <- range(loso_mat[, 3], na.rm = TRUE)
+sd_acc_limits <- range(loso_mat[, 4], na.rm = TRUE)
+
+loso_colval_mat <- loso_mat
+loso_colval_mat[, 1] <- normalize_vec(loso_mat[, 1], mean_kappa_limits)
+loso_colval_mat[, 2] <- 1 - normalize_vec(loso_mat[, 2], sd_kappa_limits)
+loso_colval_mat[, 3] <- normalize_vec(loso_mat[, 3], mean_acc_limits)
+loso_colval_mat[, 4] <- 1 - normalize_vec(loso_mat[, 4], sd_acc_limits)
+
+# Palette applied to normalized [0,1] values
+palette_fun <- circlize::colorRamp2(c(0, 1), c("#e5f5e6", "#31a354"))
+
+# CV combined heatmap with hierarchical column headers (Kappa/Accuracy above Mean/SD)
+ht_cv <- Heatmap(
+  cv_mat,
+  name = NULL,
+  row_names_side = "left",
+  column_names_side = "top",
+  row_names_gp = gpar(fontsize = 10),
+  column_names_gp = gpar(fontsize = 10),
+  column_split = col_groups,
+  column_title_gp = gpar(fontsize = 11, fontface = "bold"),
+  cluster_rows = FALSE,
+  cluster_columns = FALSE,
+  cluster_column_slices = FALSE,
+  rect_gp = gpar(col = "#d9d9d9", lwd = 0.5),
+  height = unit(nrow(cv_mat) * 4, "mm"),
+  width = unit(65, "mm"),
+  cell_fun = function(j, i, x, y, width, height, fill) {
+    val <- cv_mat[i, j]
+    norm_val <- cv_colval_mat[i, j]
+    grid.rect(x, y, width = width, height = height,
+              gp = gpar(fill = palette_fun(norm_val), col = "#d9d9d9", lwd = 0.5))
+    grid.text(sprintf("%.3f", val), x, y, gp = gpar(fontsize = 10))
+  },
+  show_heatmap_legend = FALSE,
+  column_names_rot = 0,
+  column_names_centered = TRUE,
+  column_gap = unit(2, "mm")
+)
+
+cv_heatmap_plot <- ggplotify::as.ggplot(function() ComplexHeatmap::draw(ht_cv, padding = unit(c(10, 0, 10, 5), "mm"),
+  column_title = "CV: Overall Performance",
+  column_title_gp = gpar(fontsize = 13)))
+
+# LOSO combined heatmap with hierarchical column headers (Kappa/Accuracy above Mean/SD)
+ht_loso <- Heatmap(
+  loso_mat,
+  name = NULL,
+  row_names_side = "left",
+  column_names_side = "top",
+  row_names_gp = gpar(fontsize = 10),
+  column_names_gp = gpar(fontsize = 10),
+  column_split = col_groups,
+  column_title_gp = gpar(fontsize = 11, fontface = "bold"),
+  cluster_rows = FALSE,
+  cluster_columns = FALSE,
+  cluster_column_slices = FALSE,
+  rect_gp = gpar(col = "#d9d9d9", lwd = 0.5),
+  height = unit(nrow(loso_mat) * 4, "mm"),
+  width = unit(65, "mm"),
+  cell_fun = function(j, i, x, y, width, height, fill) {
+    val <- loso_mat[i, j]
+    norm_val <- loso_colval_mat[i, j]
+    grid.rect(x, y, width = width, height = height,
+              gp = gpar(fill = palette_fun(norm_val), col = "#d9d9d9", lwd = 0.5))
+    grid.text(sprintf("%.3f", val), x, y, gp = gpar(fontsize = 10))
+  },
+  show_heatmap_legend = FALSE,
+  column_names_rot = 0,
+  column_names_centered = TRUE,
+  column_gap = unit(2, "mm")
+)
+
+loso_heatmap_plot <- ggplotify::as.ggplot(function() ComplexHeatmap::draw(ht_loso, padding = unit(c(10, 0, 10, 5), "mm"), #bottom, left, top and right.  
+  column_title = "LOSO: Overall Performance",
+  column_title_gp = gpar(fontsize = 13)))
+
+cv_heatmap_plot + loso_heatmap_plot
+```
+
+##  --Combined Performance Figure
+
+```{r}
+library(egg)
+
+figure1_egg <- ggarrange(
+  p1, p2,
+  cv_heatmap_plot, loso_heatmap_plot,
+  ncol = 2, nrow = 2,
+  labels = c('A', 'B', 'C', 'D'),
+  label.args = list(gp = gpar(fontface = "bold"))
+)
+figure1_egg
+ggsave('../writing/figures/figure1.png', figure1_egg, width = 9, height = 8*2/3)
+```
+
+
+# Per-Class Performance Analysis
+
+##  --Per-Class Metrics by Subtype
+
+```{r}
+# Global_Optimized is best
+fix_names <- function(x){
+  # Map verbose labels to concise AML names; preserves factor inputs by relabeling levels
+  mapping <- c(
+    "AML.with.inv.16..t.16.16..CBFB..MYH11" = "CBFB::MYH11",
+    "APL..t.15.17..PML..RARA" = "PML::RARA",
+    "AML.with.t.6.9..DEK..NUP214" = "DEK::NUP214",
+    "AML.with.mutated.NPM1" = "Mutated NPM1",
+    "AML.with.t.8.21..RUNX1..RUNX1T1" = "RUNX1::RUNX1T1",
+    "AML.with.in.frame.bZIP.CEBPA" = "CEBPA bZIP in-frame",
+    "ETV6..MNX1" = "ETV6::MNX1",
+    "KAT6A..CREBBP" = "KAT6A::CREBBP",
+    "RBM15..MRTF1" = "RBM15::MRTF1",
+    "MDS.r.and.MECOM" = "MDS-related and MECOM rearrangement",
+    "AML.with.t.9.11..MLLT3..KMT2A" = "MLLT3::KMT2A",
+    "FUS..ERG" = "FUS::ERG",
+    "NUP98..NSD1" = "NUP98::NSD1",
+    "other.KMT2A" = "Other KMT2A rearrangements",
+    "CBFA2T3..GLIS2" = "CBFA2T3::GLIS2",
+    "NUP98..KDM5A" = "NUP98::KDM5A"
+  )
+  if (is.factor(x)) {
+    new_levels <- vapply(levels(x), function(l) {
+      val <- unname(mapping[l])
+      if (is.na(val)) l else val
+    }, character(1))
+    levels(x) <- new_levels
+    return(x)
+  } else {
+    y <- vapply(as.character(x), function(l) {
+      val <- unname(mapping[l])
+      if (is.na(val)) l else val
+    }, character(1))
+    return(y)
+  }
+}
+
+make_cm_fig <- function(type){
+# All per class summaries
+per_class <- outer_cv_results$per_class_summaries[[type]]
+per_class <- per_class[per_class$Model == "Global_Optimized", ]
+rownames(per_class) <- gsub("Class: ", "", per_class$Class)
+
+
+
+order_AML <- c("PML::RARA",
+           "RUNX1::RUNX1T1",
+           "CBFB::MYH11",
+           "MLLT3::KMT2A",
+           "Other KMT2A rearrangements",
+           "DEK::NUP214",
+           "Mutated NPM1",
+           "CEBPA bZIP in-frame",
+           "NUP98::NSD1",
+           "ETV6::MNX1",
+           "CBFA2T3::GLIS2",
+           "NUP98::KDM5A",
+           "FUS::ERG",
+           "KAT6A::CREBBP",
+           "RBM15::MRTF1",
+           "MDS-related and MECOM rearrangement"
+           )
+
+# Apply pretty names to per-class row labels
+rownames(per_class) <- fix_names(rownames(per_class))
+
+per_class <- per_class[order_AML, c("Mean_F1",
+                           "Mean_Sensitivity",
+                           "Mean_Specificity",
+                           "Mean_Precision",
+                           "Mean_Recall")]
+colnames(per_class) <- gsub("Mean_", "", colnames(per_class))
+
+to_remove <- apply(per_class, 1, function(x) any(is.na(x)))
+per_class <- per_class[!to_remove,]
+print(per_class)
+normalise <- function(x) {
+  return((x - min(x)) / (max(x) - min(x)))
+}
+per_class_norm <- apply(per_class, 2, normalise)
+
+
+ht_per_class <- Heatmap(
+  per_class,
+  name = NULL,
+  row_names_side = "left",
+  column_names_side = "top",
+  row_names_gp = gpar(fontsize = 10),
+  column_names_gp = gpar(fontsize = 10),
+  cluster_rows = FALSE,
+  cluster_columns = FALSE,
+  rect_gp = gpar(col = "#d9d9d9", lwd = 0.5),
+  # height = unit(nrow(loso_mat) * 3, "mm"),
+  # width = unit(30, "mm"),
+  cell_fun = function(j, i, x, y, width, height, fill) {
+    val <- per_class[i, j]
+    norm_val <- per_class_norm[i, j]
+    grid.rect(
+      x,
+      y,
+      width = width,
+      height = height,
+      gp = gpar(
+        fill = palette_fun(norm_val),
+        col = "#d9d9d9",
+        lwd = 0.5
+      )
+    )
+    grid.text(sprintf("%.2f", val), x, y, gp = gpar(fontsize = 11))
+  },
+  show_heatmap_legend = FALSE,
+  column_names_rot = 45,
+  column_names_centered = F,
+  column_title = "Performance measure",
+  column_title_gp = gpar(fontface = "bold"),
+  row_title = "Reference class",
+  row_title_gp = gpar(fontface = "bold")
+)
+
+
+conf_table <- list() 
+
+for (fold in names(outer_cv_results$detailed_performance[[type]]$Global_Optimized)){
+ conf_table[[fold]] <- outer_cv_results$detailed_performance[[type]]$Global_Optimized[[fold]]$confusion_matrix$table
+}
+
+# Get all unique classes across all folds
+all_classes <- unique(unlist(lapply(conf_table, function(x) c(rownames(x), colnames(x)))))
+
+# Pad each confusion matrix to have the same dimensions
+conf_table_padded <- lapply(conf_table, function(mat) {
+  # Create a matrix with all classes, initialized with zeros
+  padded_mat <- matrix(0, nrow = length(all_classes), ncol = length(all_classes),
+                       dimnames = list(all_classes, all_classes))
+  # Fill in the values from the original matrix
+  padded_mat[rownames(mat), colnames(mat)] <- mat
+  return(padded_mat)
+})
+
+total_conf <- Reduce("+", conf_table_padded)
+total_conf <- t(total_conf)
+# Apply pretty names to confusion matrix axes and reorder to match per_class
+rownames(total_conf) <- fix_names(rownames(total_conf))
+colnames(total_conf) <- fix_names(colnames(total_conf))
+total_conf <- total_conf[rownames(per_class),rownames(per_class)]
+print(total_conf)
+total_conf_norm <- apply(total_conf, 2, normalise)
+# Palette applied to normalized [0,1] values
+total_conf_palette_fun <- circlize::colorRamp2(c(0, 1), c("white", "purple"))
+ht_table <- Heatmap(
+  total_conf,
+  name = NULL,
+  row_names_side = "left",
+  column_names_side = "top",
+  row_names_gp = gpar(fontsize = 10),
+  column_names_gp = gpar(fontsize = 10),
+  cluster_rows = FALSE,
+  cluster_columns = FALSE,
+  rect_gp = gpar(col = "#d9d9d9", lwd = 0.5),
+  # height = unit(nrow(loso_mat) * 3, "mm"),
+  # width = unit(30, "mm"),
+  cell_fun = function(j, i, x, y, width, height, fill) {
+    val <- total_conf[i, j]
+    norm_val <- total_conf_norm[i, j]
+    grid.rect(
+      x,
+      y,
+      width = width,
+      height = height,
+      gp = gpar(
+        fill = total_conf_palette_fun(norm_val),
+        col = "#d9d9d9",
+        lwd = 0.5
+      )
+    )
+    grid.text(sprintf("%.0f", val), x, y, gp = gpar(fontsize = 11))
+  },
+  show_heatmap_legend = FALSE,
+  column_names_rot = 45,
+  column_names_centered = F,
+  column_title = "Predicted class",
+  column_title_gp = gpar(fontface = "bold"),
+  row_title = "Reference class",
+  row_title_gp = gpar(fontface = "bold")
+)
+
+ht_comb <- ht_per_class + ht_table
+return(ht_comb)
+}
+
+cm_fig_cv <- make_cm_fig("cv")
+
+cm_fig_loso <- make_cm_fig("loso")
+
+# png("../writing/figures/per_class_cv.png", width = 1000, pointsize = 12)
+# ComplexHeatmap::draw(cm_fig_cv, padding = unit(c(5, 3, 5, 30), "mm"))
+# dev.off()
+
+cm_fig_cv_plot <- ggplotify::as.ggplot(function() ComplexHeatmap::draw(cm_fig_cv, padding = unit(c(5, 3, 5, 50), "mm"), #bottom, left, top and right.  
+  column_title = "CV: Class performance",
+  column_title_gp = gpar(fontsize = 12, fontface ="bold")))
+
+# png("../writing/figures/per_class_loso.png", width = 1000, pointsize = 12)
+# ComplexHeatmap::draw(cm_fig_loso, padding = unit(c(5, 3, 5, 30), "mm"))
+# dev.off()
+
+cm_fig_loso_plot <- ggplotify::as.ggplot(function() ComplexHeatmap::draw(cm_fig_loso, padding = unit(c(5, 3, 5, 50), "mm"), #bottom, left, top and right.  
+  column_title = "LOSO: Class performance",
+  column_title_gp = gpar(fontsize = 12, fontface ="bold", just = "center")))
+```
+```{r}
+# figure1_egg <- ggarrange(
+#   p1, p2, cm_fig_cv_plot,
+#   cv_heatmap_plot, loso_heatmap_plot, cm_fig_loso_plot
+#   ncol = 3, nrow = 2,
+#   labels = c('A', 'B', 'C', 'D', "E", "F"),
+#   label.args = list(gp = gpar(fontface = "bold"))
+# )
+
+figure2_egg <- ggarrange(
+  cm_fig_cv_plot, cm_fig_loso_plot,
+  ncol = 1, nrow = 2,
+  labels = c('A', 'B'),
+  label.args = list(gp = gpar(fontface = "bold", cex = 1))
+)
+ggsave('../writing/figures/figures_class_perf.png', figure2_egg, width = 300, height = 300,units = "mm")
+```
+
+## -- Faceted Confusion Matrices per Fold
+
+```{r}
+fix_names_local <- function(x){
+      mapping <- c(
+        "AML.with.inv.16..t.16.16..CBFB..MYH11" = "CBFB::MYH11",
+        "APL..t.15.17..PML..RARA" = "PML::RARA",
+        "AML.with.t.6.9..DEK..NUP214" = "DEK::NUP214",
+        "AML.with.mutated.NPM1" = "Mutated NPM1",
+        "AML.with.t.8.21..RUNX1..RUNX1T1" = "RUNX1::RUNX1T1",
+        "AML.with.in.frame.bZIP.CEBPA" = "CEBPA bZIP in-frame",
+        "ETV6..MNX1" = "ETV6::MNX1",
+        "KAT6A..CREBBP" = "KAT6A::CREBBP",
+        "RBM15..MRTF1" = "RBM15::MRTF1",
+        "MDS.r.and.MECOM" = "MDS-related and MECOM rearrangement",
+        "AML.with.t.9.11..MLLT3..KMT2A" = "MLLT3::KMT2A",
+        "FUS..ERG" = "FUS::ERG",
+        "NUP98..NSD1" = "NUP98::NSD1",
+        "other.KMT2A" = "Other KMT2A rearrangements",
+        "CBFA2T3..GLIS2" = "CBFA2T3::GLIS2",
+        "NUP98..KDM5A" = "NUP98::KDM5A"
+      )
+      if (is.factor(x)) {
+        new_levels <- vapply(levels(x), function(l) {
+          val <- unname(mapping[l])
+          if (is.na(val)) l else val
+        }, character(1))
+        levels(x) <- new_levels
+        return(x)
+      } else {
+        y <- vapply(as.character(x), function(l) {
+          val <- unname(mapping[l])
+          if (is.na(val)) l else val
+        }, character(1))
+        return(y)
+      }
+    }
+    
+    order_AML_local <- c("PML::RARA", "RUNX1::RUNX1T1", "CBFB::MYH11", "MLLT3::KMT2A",
+                        "Other KMT2A rearrangements", "DEK::NUP214", "Mutated NPM1",
+                        "CEBPA bZIP in-frame", "NUP98::NSD1", "ETV6::MNX1", "CBFA2T3::GLIS2",
+                        "NUP98::KDM5A", "FUS::ERG", "KAT6A::CREBBP", "RBM15::MRTF1",
+                        "MDS-related and MECOM rearrangement")
+```
+
+
+```{r}
+# Function to create faceted confusion matrices per fold
+make_faceted_cm <- function(type) {
+  # Get all folds for this type
+  folds <- names(outer_cv_results$detailed_performance[[type]]$Global_Optimized)
+  # Per class
+  per_class_list <- list()
+  # Collect confusion matrices for all folds
+  conf_matrices <- list()
+  for (fold in folds) {
+    per_class <- outer_cv_results$detailed_performance[[type]]$Global_Optimized[[fold]]$confusion_matrix$byClass
+    rownames(per_class) <- gsub("Class: ", "", rownames(per_class))
+    rownames(per_class) <- fix_names_local(rownames(per_class))
+    
+    cm <- outer_cv_results$detailed_performance[[type]]$Global_Optimized[[fold]]$confusion_matrix$table
+    cm <- t(cm)  # Transpose to match convention (rows = reference, cols = prediction)
+    
+    
+    # Apply pretty names
+    rownames(cm) <- fix_names_local(rownames(cm))
+    colnames(cm) <- fix_names_local(colnames(cm))
+    
+    # Reorder to match standard order
+    all_classes <- intersect(order_AML_local, unique(c(
+      rownames(per_class))))
+    per_class <- per_class[all_classes, c("F1", "Sensitivity", "Specificity", "Precision", "Recall")]
+    to_remove <- apply(per_class, 1, function(x)
+      any(is.na(x)))
+    per_class <- per_class[!to_remove, ]
+    cm <- cm[rownames(per_class), rownames(per_class), drop = FALSE]
+    
+    normalise <- function(x) {
+      return((x - min(x)) / (max(x) - min(x)))
+    }
+    per_class_norm <- apply(per_class, 2, normalise)
+    
+    # Normalize for color scale
+    cm_norm <- apply(cm, 2, function(x) {
+      if (max(x, na.rm = TRUE) > 0) {
+        (x - min(x, na.rm = TRUE)) / (max(x, na.rm = TRUE) - min(x, na.rm = TRUE))
+      } else {
+        x
+      }
+    })
+    
+    conf_matrices[[fold]] <- list(matrix = cm,
+                                  normalized = cm_norm,
+                                  per_class = per_class,
+                                  per_class_norm = per_class_norm,
+                                  fold_name = fold)
+  }
+  
+  # Define palette for confusion matrices (white to purple)
+  total_conf_palette_fun <- circlize::colorRamp2(c(0, 1), c("white", "purple"))
+  
+  # Create individual heatmaps for each fold
+  heatmaps <- list()
+  
+  for (fold in folds) {
+    cm_data <- conf_matrices[[fold]]
+    per_class <- cm_data$per_class
+    per_class_norm <- cm_data$per_class_norm
+    ht_per_class <- Heatmap(
+      per_class,
+      name = NULL,
+      row_names_side = "left",
+      column_names_side = "top",
+      row_names_gp = gpar(fontsize = 10),
+      column_names_gp = gpar(fontsize = 10),
+      cluster_rows = FALSE,
+      cluster_columns = FALSE,
+      rect_gp = gpar(col = "#d9d9d9", lwd = 0.5),
+      cell_fun = function(j, i, x, y, width, height, fill) {
+        val <- per_class[i, j]
+        norm_val <- per_class_norm[i, j]
+        grid.rect(
+          x,
+          y,
+          width = width,
+          height = height,
+          gp = gpar(
+            fill = palette_fun(norm_val),
+            col = "#d9d9d9",
+            lwd = 0.5
+          )
+        )
+        grid.text(sprintf("%.2f", val), x, y, gp = gpar(fontsize = 11))
+      },
+      show_heatmap_legend = FALSE,
+      column_names_rot = 45,
+      column_names_centered = F,
+      column_title = "Performance measure",
+      column_title_gp = gpar(fontface = "bold"),
+      row_title = "Reference class",
+      row_title_gp = gpar(fontface = "bold")
+    )
+    ht <- Heatmap(
+      cm_data$matrix,
+      name = NULL,
+      row_names_side = "left",
+      column_names_side = "top",
+      row_names_gp = gpar(fontsize = 8),
+      column_names_gp = gpar(fontsize = 8),
+      cluster_rows = FALSE,
+      cluster_columns = FALSE,
+      rect_gp = gpar(col = "#d9d9d9", lwd = 0.3),
+      cell_fun = function(j, i, x, y, width, height, fill) {
+        val <- cm_data$matrix[i, j]
+        norm_val <- cm_data$normalized[i, j]
+        grid.rect(
+          x,
+          y,
+          width = width,
+          height = height,
+          gp = gpar(
+            fill = total_conf_palette_fun(norm_val),
+            col = "#d9d9d9",
+            lwd = 0.3
+          )
+        )
+        if (val > 0) {
+          grid.text(sprintf("%.0f", val), x, y, gp = gpar(fontsize = 8))
+        }
+      },
+      show_heatmap_legend = FALSE,
+      column_names_rot = 45,
+      column_names_centered = FALSE,
+      column_title = paste0("Predicted class for fold: ", cm_data$fold_name),
+      column_title_gp = gpar(fontsize = 10, fontface = "bold"),
+      row_title = "Reference",
+      row_title_gp = gpar(fontsize = 9, fontface = "bold")
+    )
+    
+    heatmaps[[fold]] <- ht_per_class+ht
+  }
+  
+  return(heatmaps)
+}
+
+# Create faceted confusion matrices for CV
+cat("Creating faceted confusion matrices for CV...\n")
+cm_heatmaps_cv <- make_faceted_cm("cv")
+
+# Create faceted confusion matrices for LOSO
+cat("Creating faceted confusion matrices for LOSO...\n")
+cm_heatmaps_loso <- make_faceted_cm("loso")
+
+# Draw CV confusion matrices
+cat("Saving CV faceted confusion matrices...\n")
+png(
+  "../writing/figures/confusion_matrix_cv_faceted.png",
+  width = 900,
+  height = 400*5,
+  pointsize = 10,
+  res = 150
+)
+
+# Arrange CV heatmaps
+ncol_cv <- 1
+nrow_cv <- ceiling(length(cm_heatmaps_cv) / ncol_cv)
+
+# Create a layout using grid
+grid.newpage()
+pushViewport(viewport(layout = grid.layout(nrow_cv, ncol_cv)))
+
+for (i in 1:length(cm_heatmaps_cv)) {
+  row <- ((i - 1) %/% ncol_cv) + 1
+  col <- ((i - 1) %% ncol_cv) + 1
+  
+  pushViewport(viewport(layout.pos.row = row, layout.pos.col = col))
+  ComplexHeatmap::draw(cm_heatmaps_cv[[i]], newpage = FALSE)
+  popViewport()
+}
+
+popViewport()
+dev.off()
+
+# Draw LOSO confusion matrices
+cat("Saving LOSO faceted confusion matrices...\n")
+png(
+  "../writing/figures/confusion_matrix_loso_faceted.png",
+  width = 1300,
+  height = 700*7,
+  pointsize = 10,
+  res = 150
+)
+
+# Arrange LOSO heatmaps (7 folds)
+ncol_loso <- 1
+nrow_loso <- ceiling(length(cm_heatmaps_loso) / ncol_loso)
+
+grid.newpage()
+pushViewport(viewport(layout = grid.layout(nrow_loso, ncol_loso)))
+
+for (i in 1:length(cm_heatmaps_loso)) {
+  row <- ((i - 1) %/% ncol_loso) + 1
+  col <- ((i - 1) %% ncol_loso) + 1
+  
+  pushViewport(viewport(layout.pos.row = row, layout.pos.col = col))
+  ComplexHeatmap::draw(cm_heatmaps_loso[[i]], newpage = FALSE)
+  popViewport()
+}
+
+popViewport()
+dev.off()
+
+cat("Faceted confusion matrices saved!\n")
+```
+
+# Performance stratification
+##  --Performance by Fold
+
+```{r}
+p3 <- ggplot(results_per_fold[results_per_fold$type == "cv",] , aes(x = fold, y = kappa, color = model, group = model)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 3) +
+  theme_bw() + theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none") +
+  labs(
+    title = "CV: Performance across folds",
+    x = "Fold",
+    y = "Cohen's Kappa",
+    color = "Model"
+  ) + scale_color_manual(values = colours, breaks = rev(names(colours)), limits = rev(names(colours))) + ylim(0.75, 1)
+
+# Calculate mean kappa per fold for ordering
+results_ordered <- results_per_fold[results_per_fold$type == "loso",] %>%
+  group_by(fold) %>%
+  mutate(mean_fold_kappa = mean(kappa)) %>%
+  ungroup() %>%
+  mutate(fold = reorder(fold, mean_fold_kappa))
+
+p4 <- ggplot(results_ordered, aes(x = fold, y = kappa, color = model, group = model)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 3) +
+  theme_bw() + theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(
+    title = "LOSO: Performance across folds",
+    x = "Fold",
+    y = "Cohen's Kappa",
+    color = "Model"
+  )  + scale_color_manual(values = colours, breaks = rev(names(colours)), limits = rev(names(colours))) + ylim(0.75, 1)
+
+p3 + p4
+```
+## -- Cohort-Level Performance
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+# Extract LOSO performance per cohort for the best model (Global_Optimized)
+loso_performance <- outer_cv_results$detailed_performance$loso$Global_Optimized
+
+# Create dataframe with performance per cohort
+cohort_performance <- data.frame(
+  cohort = names(loso_performance),
+  kappa = sapply(loso_performance, function(x) x$kappa),
+  accuracy = sapply(loso_performance, function(x) x$accuracy),
+  n = sapply(loso_performance, function(x) length(x$predictions)),
+  stringsAsFactors = FALSE
+)
+
+# Calculate proportion of rare subtypes per cohort
+cohort_subtype_dist <- data.frame(
+  cohort = filtered_study_names,
+  subtype = filtered_leukemia_subtypes,
+  stringsAsFactors = FALSE
+)
+
+# Apply the class modifications
+cohort_subtype_dist$subtype_merged <- modify_classes(cohort_subtype_dist$subtype)
+
+# Map to display names
+cohort_subtype_dist$subtype_display <- fix_names(cohort_subtype_dist$subtype_merged)
+
+# Merge performance and rare subtype data
+cohort_analysis <- cohort_performance
+
+# Add pediatric/adult classification
+cohort_analysis$cohort_type <- ifelse(
+  cohort_analysis$cohort %in% c("AAML0531", "AAML1031", "AAML03P1"),
+  "Pediatric",
+  "Adult"
+)
+
+# Display the analysis table
+print(cohort_analysis)
+
+cohort_analysis %>% group_by(cohort_type) %>% summarise(mean = mean(kappa), sd = sd(kappa))
+```
+
+```{r}
+# Specify the two cohort labels
+A <- "Adult"
+B <- "Pediatric"
+
+xA <- cohort_analysis$kappa[cohort_analysis$cohort_type == A]
+xB <- cohort_analysis$kappa[cohort_analysis$cohort_type == B]
+
+mean(xA) - mean(xB)
+```
+
+
+```{r}
+# Boxplot comparison
+cohort_analysis_long <- cohort_analysis %>%
+  tidyr::pivot_longer(cols = c(kappa, accuracy), 
+                      names_to = "metric", 
+                      values_to = "value")
+
+p_ped_adult <- ggplot(cohort_analysis_long, 
+                      aes(x = cohort_type, y = value, fill = cohort_type)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+  geom_jitter(width = 0.2, size = 3, alpha = 0.6) +
+  facet_wrap(~metric, scales = "free_y", 
+             labeller = labeller(metric = c(kappa = "Cohen's Kappa", 
+                                            accuracy = "Accuracy"))) +
+  scale_fill_manual(values = c("Adult" = "#7eb0d5", "Pediatric" = "#fd7f6f")) +
+  theme_bw() +
+  labs(
+    title = "LOSO Performance: Pediatric vs Adult Cohorts",
+    x = "Cohort Type",
+    y = "Performance",
+    fill = "Cohort Type"
+  ) +
+  theme(legend.position = "none")
+
+print(p_ped_adult)
+ggsave("../writing/figures/pediatric_vs_adult_performance.png", p_ped_adult, 
+       width = 8, height = 5, dpi = 300)
+```
+
+## -- Bootstrap Analysis: Adult vs Pediatric Kappa Difference
+
+```{r}
+library(caret)
+
+# Extract all predictions and truth labels by cohort type
+pediatric_cohorts <- c("AAML0531", "AAML1031", "AAML03P1")
+adult_cohorts <- c("TCGA-LAML", "LEUCEGENE", "BEATAML1.0-COHORT", "100LUMC")
+
+# Initialize storage for predictions and truth
+adult_predictions <- c()
+adult_truth <- c()
+pediatric_predictions <- c()
+pediatric_truth <- c()
+
+# Extract sample-level predictions from LOSO results
+for (fold in names(loso_performance)) {
+  predictions <- loso_performance[[fold]]$predictions
+  truth <- loso_performance[[fold]]$truth
+  
+  if (fold %in% adult_cohorts) {
+    adult_predictions <- c(adult_predictions, predictions)
+    adult_truth <- c(adult_truth, truth)
+  } else if (fold %in% pediatric_cohorts) {
+    pediatric_predictions <- c(pediatric_predictions, predictions)
+    pediatric_truth <- c(pediatric_truth, truth)
+  }
+}
+
+# Apply class modifications to match the 16-class framework
+adult_predictions_mod <- modify_classes(adult_predictions)
+adult_truth_mod <- modify_classes(adult_truth)
+pediatric_predictions_mod <- modify_classes(pediatric_predictions)
+pediatric_truth_mod <- modify_classes(pediatric_truth)
+
+# Function to calculate Cohen's kappa
+calculate_kappa <- function(predictions, truth) {
+  # Get all unique classes
+  all_classes <- unique(c(predictions, truth))
+  
+  # Create confusion matrix
+  cm <- table(factor(predictions, levels = all_classes), 
+              factor(truth, levels = all_classes))
+  
+  # Calculate observed accuracy
+  n <- sum(cm)
+  observed_accuracy <- sum(diag(cm)) / n
+  
+  # Calculate expected accuracy
+  row_sums <- rowSums(cm)
+  col_sums <- colSums(cm)
+  expected_accuracy <- sum(row_sums * col_sums) / (n^2)
+  
+  # Calculate kappa
+  kappa <- (observed_accuracy - expected_accuracy) / (1 - expected_accuracy)
+  
+  return(kappa)
+}
+
+# Calculate observed kappa scores
+observed_adult_kappa <- calculate_kappa(adult_predictions_mod, adult_truth_mod)
+observed_pediatric_kappa <- calculate_kappa(pediatric_predictions_mod, pediatric_truth_mod)
+observed_diff <- observed_adult_kappa - observed_pediatric_kappa
+
+cat("Observed Sample-Level Performance:\n")
+cat("===================================\n")
+cat(sprintf("Adult samples: n=%d, Cohen's kappa=%.4f\n", length(adult_predictions), observed_adult_kappa))
+cat(sprintf("Pediatric samples: n=%d, Cohen's kappa=%.4f\n", length(pediatric_predictions), observed_pediatric_kappa))
+cat(sprintf("Observed difference (Adult - Pediatric): %.4f\n\n", observed_diff))
+
+# Bootstrap analysis for confidence intervals
+set.seed(42)  # For reproducibility
+n_bootstrap <- 1000
+
+boot_adult_kappa <- numeric(n_bootstrap)
+boot_ped_kappa <- numeric(n_bootstrap)
+bootstrap_diffs <- numeric(n_bootstrap)
+
+cat("Running bootstrap analysis with", n_bootstrap, "iterations...\n")
+
+for (i in 1:n_bootstrap) {
+  # Resample adult samples with replacement
+  adult_idx <- sample(1:length(adult_predictions_mod), replace = TRUE)
+  boot_adult_pred <- adult_predictions_mod[adult_idx]
+  boot_adult_truth <- adult_truth_mod[adult_idx]
+  
+  # Resample pediatric samples with replacement
+  ped_idx <- sample(1:length(pediatric_predictions_mod), replace = TRUE)
+  boot_ped_pred <- pediatric_predictions_mod[ped_idx]
+  boot_ped_truth <- pediatric_truth_mod[ped_idx]
+  
+  # Calculate kappa for this bootstrap sample
+  boot_adult_kappa[i] <- calculate_kappa(boot_adult_pred, boot_adult_truth)
+  boot_ped_kappa[i] <- calculate_kappa(boot_ped_pred, boot_ped_truth)
+  
+  # Store the difference
+  bootstrap_diffs[i] <- boot_adult_kappa[i] - boot_ped_kappa[i]
+}
+
+# Calculate confidence intervals
+ci_95 <- quantile(bootstrap_diffs, c(0.025, 0.975))
+ci_99 <- quantile(bootstrap_diffs, c(0.005, 0.995))
+
+cat("\nBootstrap Results (", n_bootstrap, " iterations):\n", sep = "")
+cat("===============================================\n")
+cat(sprintf("Mean bootstrap difference: %.4f\n", mean(bootstrap_diffs)))
+cat(sprintf("Bootstrap SE: %.4f\n", sd(bootstrap_diffs)))
+cat(sprintf("95%% CI: [%.4f, %.4f]\n", ci_95[1], ci_95[2]))
+cat(sprintf("99%% CI: [%.4f, %.4f]\n", ci_99[1], ci_99[2]))
+
+
+```
+
+```{r}
+# Visualization of bootstrap distribution 
+bootstrap_df <- data.frame(value = c(boot_adult_kappa, boot_ped_kappa), cohort_type = c(rep("Adult", n_bootstrap), rep("Pediatric", n_bootstrap)))
+ggplot(bootstrap_df, 
+                      aes(x = cohort_type, y = value, fill = cohort_type)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+  geom_jitter(width = 0.2, size = 3, alpha = 0.6) +
+  scale_fill_manual(values = c("Adult" = "#7eb0d5", "Pediatric" = "#fd7f6f")) +
+  theme_bw() +
+  labs(
+    title = "LOSO Performance: Pediatric vs Adult Cohorts",
+    x = "Cohort Type",
+    y = "Performance",
+    fill = "Cohort Type"
+  ) +
+  theme(legend.position = "none")
+```
+
+
+## -- Sample-Level Accuracy Analysis (needed for downstream analyses)
+
+```{r}
+# Build sample-level dataframe with predictions and metadata
+# We'll use LOSO predictions since we're interested in cross-cohort effects
+
+# Extract predictions from LOSO results
+loso_predictions_list <- list()
+loso_truth_list <- list()
+loso_fold_list <- list()
+loso_indices_list <- list()
+
+for (fold in names(outer_cv_results$detailed_performance$loso$Global_Optimized)) {
+  # Get sample indices for this fold
+  fold_prob_matrix <- outer_cv_results$ensemble_matrices$loso$global_ensemble[[fold]]
+  # Extract saved predictions and truth vectors
+  predictions <- apply(fold_prob_matrix[,!colnames(fold_prob_matrix) %in% c("y", "outer_fold", "sample_indices")], 1, which.max)
+  predictions <- colnames(fold_prob_matrix)[!colnames(fold_prob_matrix) %in% c("y", "outer_fold", "sample_indices")][predictions]
+  truth <- as.character(fold_prob_matrix$y)
+  sample_indices <- fold_prob_matrix$sample_indices
+  
+  loso_predictions_list[[fold]] <- predictions
+  loso_truth_list[[fold]] <- truth
+  loso_fold_list[[fold]] <- rep(fold, length(predictions))
+  loso_indices_list[[fold]] <- sample_indices
+}
+
+# Combine all predictions
+all_loso_predictions <- unlist(loso_predictions_list)
+all_loso_truth <- unlist(loso_truth_list)
+all_loso_folds <- unlist(loso_fold_list)
+all_loso_indices <- unlist(loso_indices_list)
+
+# Create sample-level analysis dataframe
+sample_level_df <- data.frame(
+  prediction = all_loso_predictions,
+  truth = all_loso_truth,
+  cohort = all_loso_folds,
+  sample_index = all_loso_indices,
+  correct = all_loso_predictions == all_loso_truth,
+  stringsAsFactors = FALSE
+)
+
+# Add age information from filtered meta
+# Note: sample_index refers to the filtered dataset (after applying inclusion criteria)
+
+sample_level_df$age_days <- meta$age_days[sample_level_df$sample_index + 1]
+sample_level_df$age_years <- sample_level_df$age_days / 365.25
+
+# Apply modifications and fix names to BOTH truth and prediction labels
+sample_level_df$truth_merged <- modify_classes(sample_level_df$truth)
+sample_level_df$truth_display <- fix_names(sample_level_df$truth_merged)
+
+sample_level_df$prediction_merged <- modify_classes(sample_level_df$prediction)
+sample_level_df$prediction_display <- fix_names(sample_level_df$prediction_merged)
+
+# Add metadata
+sample_level_df$is_pediatric <- sample_level_df$cohort %in% c("AAML0531", "AAML1031", "AAML03P1")
+
+# Define rare subtypes based on sample count threshold
+subtype_counts <- table(sample_level_df$truth_display)
+rare_subtypes <- names(subtype_counts[subtype_counts < 50])  # Subtypes with < 30 samples are considered rare
+sample_level_df$is_rare <- sample_level_df$truth_display %in% rare_subtypes
+
+cat("\n\nSubtype Classification:\n")
+cat("======================\n")
+cat(sprintf("Rare subtypes (< 50 samples): %d\n", length(rare_subtypes)))
+if (length(rare_subtypes) > 0) {
+  cat("Rare subtype list:\n")
+  for (subtype in rare_subtypes) {
+    cat(sprintf("  - %s: %d samples\n", subtype, subtype_counts[subtype]))
+  }
+}
+cat(sprintf("\nCommon subtypes (>= 50 samples): %d\n", 
+            sum(subtype_counts >= 50)))
+cat(sprintf("Total rare samples: %d (%.1f%%)\n", 
+            sum(sample_level_df$is_rare),
+            100 * mean(sample_level_df$is_rare)))
+
+# Summary statistics
+cat("Sample-Level Summary:\n")
+cat("=====================\n")
+cat(sprintf("Total samples: %d\n", nrow(sample_level_df)))
+cat(sprintf("Pediatric cohort samples: %d (%.1f%%)\n", 
+            sum(sample_level_df$is_pediatric), 
+            100 * mean(sample_level_df$is_pediatric)))
+cat(sprintf("\nOverall accuracy: %.3f\n", mean(sample_level_df$correct)))
+```
+## -- Age Analysis: Continuous Age Effect
+
+```{r}
+# Remove samples with missing age
+sample_level_age <- sample_level_df[!is.na(sample_level_df$age_years), ]
+
+cat("\n\nAge Analysis:\n")
+cat("=============\n")
+cat(sprintf("Samples with age data: %d / %d (%.1f%%)\n", 
+            nrow(sample_level_age), nrow(sample_level_df),
+            100 * nrow(sample_level_age) / nrow(sample_level_df)))
+cat(sprintf("Age range: %.1f - %.1f years\n", 
+            min(sample_level_age$age_years, na.rm = TRUE),
+            max(sample_level_age$age_years, na.rm = TRUE)))
+cat(sprintf("Median age: %.1f years (IQR: %.1f - %.1f)\n",
+            median(sample_level_age$age_years, na.rm = TRUE),
+            quantile(sample_level_age$age_years, 0.25, na.rm = TRUE),
+            quantile(sample_level_age$age_years, 0.75, na.rm = TRUE)))
+
+# Test correlation between age and prediction correctness
+# Use logistic regression for binary outcome
+age_logit <- glm(correct ~ age_years, 
+                 data = sample_level_age, 
+                 family = binomial(link = "logit"))
+age_logit_summary <- summary(age_logit)
+
+cat("\nLogistic Regression: Prediction Correctness ~ Age\n")
+cat("==================================================\n")
+print(age_logit_summary$coefficients)
+
+# Calculate odds ratio
+age_or <- exp(coef(age_logit)["age_years"])
+age_or_ci <- exp(confint(age_logit)["age_years", ])
+
+cat(sprintf("\nOdds Ratio per year increase in age: %.3f (95%% CI: %.3f - %.3f)\n",
+            age_or, age_or_ci[1], age_or_ci[2]))
+
+# Calculate accuracy by age groups
+sample_level_age$age_group <- cut(sample_level_age$age_years,
+                                   breaks = c(0, 18, 40, 60, 100),
+                                   labels = c("Pediatric (<18y)", 
+                                             "Young Adult (18-40y)",
+                                             "Middle Age (40-60y)",
+                                             "Older Adult (>60y)"),
+                                   include.lowest = TRUE)
+
+age_group_accuracy <- sample_level_age %>%
+  group_by(age_group) %>%
+  summarise(
+    n = n(),
+    accuracy = mean(correct),
+    .groups = "drop"
+  )
+
+cat("\n\nAccuracy by Age Group:\n")
+print(age_group_accuracy)
+```
+
+## -- Visualization: Age Effect on Performance
+
+```{r}
+# Binned kappa and accuracy by age
+age_bins <- seq(0, 90, by = 5)
+age_performance <- data.frame()
+
+for (i in 1:(length(age_bins)-1)) {
+  age_min <- age_bins[i]
+  age_max <- age_bins[i+1]
+  
+  subset_data <- sample_level_age[sample_level_age$age_years >= age_min & 
+                                   sample_level_age$age_years < age_max, ]
+  
+  if (nrow(subset_data) >= 10) {  # Need reasonable sample size for kappa
+    # Calculate kappa for this age bin
+    cm <- caret::confusionMatrix(
+      factor(subset_data$prediction_display, levels = unique(c(subset_data$truth_display, subset_data$prediction_display))),
+      factor(subset_data$truth_display, levels = unique(c(subset_data$truth_display, subset_data$prediction_display)))
+    )
+    
+    kappa <- as.numeric(cm$overall["Kappa"])
+    accuracy <- mean(subset_data$correct)
+    
+    age_performance <- rbind(age_performance, data.frame(
+      age_mid = (age_min + age_max) / 2,
+      age_label = sprintf("%d-%d", age_min, age_max),
+      n = nrow(subset_data),
+      accuracy = accuracy,
+      kappa = kappa,
+      se_accuracy = sd(subset_data$correct) / sqrt(nrow(subset_data))
+    ))
+  }
+}
+
+# Plot kappa by age with accuracy overlay
+p_age_kappa <- ggplot(age_performance, aes(x = age_mid, y = kappa)) +
+  geom_point(aes(size = n), alpha = 0.7, color = "#7eb0d5") +
+  geom_smooth(method = "loess", se = TRUE, color = "#7eb0d5", fill = "#7eb0d5", 
+              alpha = 0.2, formula = y ~ x) +
+  geom_vline(xintercept = 18, linetype = "dashed", color = "gray40", alpha = 0.5) +
+  annotate("text", x = 18, y = min(age_performance$kappa) - 0.02, 
+           label = "Pediatric/Adult\nBoundary", vjust = 1, size = 3, color = "gray40") +
+  scale_size_continuous(range = c(3, 12), name = "Sample Size") +
+  theme_bw() +
+  labs(
+    title = "Prediction Performance by Patient Age",
+    subtitle = sprintf("Based on LOSO validation (n=%d patients)", nrow(sample_level_age)),
+    x = "Age (years)",
+    y = "Cohen's Kappa"
+  ) +
+  ylim(min(age_performance$kappa) - 0.1, 1) +
+  theme(text = element_text(size = 12))
+
+print(p_age_kappa)
+ggsave("../writing/figures/age_effect_on_performance.png", p_age_kappa, 
+       width = 10, height = 6, dpi = 300)
+```
+
+## -- Per-Subtype F1 by Age Analysis
+
+```{r}
+# Calculate F1 scores per subtype and age bin
+# Use same 5-year bins as the kappa visualization (0 to 90 in steps of 5)
+age_bins_5yr <- seq(0, 90, by = 10)
+
+# Ensure prediction_display exists (apply same transformations as truth_display)
+if (!"prediction_display" %in% colnames(sample_level_age)) {
+  sample_level_age$prediction_merged <- modify_classes(sample_level_age$prediction)
+  sample_level_age$prediction_display <- fix_names(sample_level_age$prediction_merged)
+}
+
+cat(sprintf("Checking data: truth_display present: %s, prediction_display present: %s\n",
+            "truth_display" %in% colnames(sample_level_age),
+            "prediction_display" %in% colnames(sample_level_age)))
+
+# Calculate F1 score per subtype per age bin
+subtypes_unique <- unique(sample_level_age$truth_display)
+f1_by_age_subtype <- data.frame()
+
+for (i in 1:(length(age_bins_5yr)-1)) {
+  age_min <- age_bins_5yr[i]
+  age_max <- age_bins_5yr[i+1]
+  age_mid <- (age_min + age_max) / 2
+  age_label <- sprintf("%d-%d", age_min, age_max)
+  
+  # Get all samples in this age bin
+  age_bin_data <- sample_level_age[sample_level_age$age_years >= age_min & 
+                                     sample_level_age$age_years < age_max, ]
+  
+  if (nrow(age_bin_data) == 0) next
+  
+  for (subtype_i in subtypes_unique) {
+    # For this subtype in this age bin:
+    # TP: samples of this subtype correctly predicted as this subtype
+    # FP: samples of OTHER subtypes incorrectly predicted as this subtype
+    # FN: samples of this subtype incorrectly predicted as something else
+    
+    tp <- sum(age_bin_data$truth_display == subtype_i & 
+              age_bin_data$prediction_display == subtype_i)
+    fp <- sum(age_bin_data$truth_display != subtype_i & 
+              age_bin_data$prediction_display == subtype_i)
+    fn <- sum(age_bin_data$truth_display == subtype_i & 
+              age_bin_data$prediction_display != subtype_i)
+    
+    n_true <- sum(age_bin_data$truth_display == subtype_i)
+    
+    # Only include if we have at least 3 samples of this subtype (lowered threshold for 5-year bins)
+    if (n_true >= 5) {
+      precision <- ifelse(tp + fp > 0, tp / (tp + fp), NA)
+      recall <- ifelse(tp + fn > 0, tp / (tp + fn), NA)
+      f1_score <- ifelse(!is.na(precision) & !is.na(recall) & (precision + recall) > 0,
+                         2 * precision * recall / (precision + recall), NA)
+      
+      f1_by_age_subtype <- rbind(f1_by_age_subtype, data.frame(
+        age_bin = age_label,
+        age_min = age_min,
+        age_max = age_max,
+        age_mid = age_mid,
+        truth_display = subtype_i,
+        n = n_true,
+        tp = tp,
+        fp = fp,
+        fn = fn,
+        precision = precision,
+        recall = recall,
+        f1_score = f1_score
+      ))
+    }
+  }
+}
+
+# Show summary
+cat("\n\nF1 Scores by Age Bin and Subtype:\n")
+cat("==================================\n")
+cat("(Only showing subtype-age combinations with n≥3)\n\n")
+cat(sprintf("Total combinations: %d\n", nrow(f1_by_age_subtype)))
+print(head(f1_by_age_subtype[, c("age_bin", "truth_display", "n", "f1_score", "precision", "recall")], 20))
+
+# Identify subtypes with sufficient data across age ranges
+subtypes_multi_age <- f1_by_age_subtype %>%
+  group_by(truth_display) %>%
+  summarise(n_age_bins = n(), .groups = "drop") %>%
+  filter(n_age_bins >= 2)  # At least 2 age bins
+
+cat(sprintf("\n\nSubtypes with data across multiple age bins: %d\n", nrow(subtypes_multi_age)))
+print(subtypes_multi_age)
+```
+
+## -- Visualization: Subtype F1 by Age
+
+```{r}
+# Filter to subtypes with data across age ranges
+f1_by_age_plot <- f1_by_age_subtype %>%
+  filter(truth_display %in% subtypes_multi_age$truth_display)
+
+# Create color palette for subtypes
+n_subtypes <- length(unique(f1_by_age_plot$truth_display))
+subtype_colors <- scales::hue_pal()(n_subtypes)
+names(subtype_colors) <- unique(f1_by_age_plot$truth_display)
+
+# Plot F1 by age for each subtype - FACETED
+p_f1_age_subtype_facet <- ggplot(f1_by_age_plot, 
+                                  aes(x = age_mid, y = f1_score)) +
+  geom_line(linewidth = 1, color = "#7eb0d5", alpha = 0.8) +
+  geom_point(aes(size = n), color = "#7eb0d5", alpha = 0.7) +
+  geom_vline(xintercept = 18, linetype = "dashed", color = "gray40", alpha = 0.4, linewidth = 0.5) +
+  facet_wrap(~truth_display, ncol = 4, scales = "free_y") +
+  scale_size_continuous(range = c(2, 6), name = "Sample Size (n)",
+                         breaks = c(10, 25, 50),
+                         labels = c("n=10", "n=25", "n=50")) +
+  theme_bw() +
+  labs(
+    title = "Per-Subtype F1 Score by Patient Age",
+    subtitle = "Dashed line marks pediatric/adult boundary (18 years)",
+    x = "Age (years)",
+    y = "F1 Score"
+  ) +
+  theme(strip.background = element_rect(fill = "gray95"),
+        strip.text = element_text(size = 9, face = "bold"),
+        panel.grid.minor = element_blank(),
+        legend.position = "bottom") +ylim(0.4,1)
+
+print(p_f1_age_subtype_facet)
+ggsave("../writing/figures/f1_by_age_and_subtype_faceted.png", p_f1_age_subtype_facet, 
+       width = 14, height = 10, dpi = 300)
+```
+
+
+## -- Logistic Regression: Predictors of Misclassification
+
+```{r}
+# Fit logistic regression model
+# DV: correct prediction (1 = correct, 0 = incorrect)
+# IVs: is_rare, is_pediatric, and their interaction
+
+logit_model <- glm(correct ~ age_years, 
+                   data = sample_level_df, 
+                   family = binomial(link = "logit"))
+
+logit_summary <- summary(logit_model)
+
+# Calculate odds ratios and confidence intervals
+or_results <- exp(cbind(OR = coef(logit_model), confint(logit_model)))
+
+cat("\nLogistic Regression Results:\n")
+cat("=============================\n")
+cat("Predicting correct classification (1 = correct, 0 = incorrect)\n\n")
+print(logit_summary$coefficients)
+
+cat("\n\nOdds Ratios (95% CI):\n")
+cat("=====================\n")
+print(round(or_results, 3))
+
+```
+
+## -- Stratified Accuracy by Group
+
+```{r}
+# Calculate accuracy for each combination
+accuracy_by_group <- sample_level_df %>%
+  group_by(is_rare, is_pediatric) %>%
+  summarise(
+    n_samples = n(),
+    n_correct = sum(correct),
+    accuracy = mean(correct),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    group_label = case_when(
+      !is_rare & !is_pediatric ~ "Common, Adult",
+      !is_rare & is_pediatric ~ "Common, Pediatric",
+      is_rare & !is_pediatric ~ "Rare, Adult",
+      is_rare & is_pediatric ~ "Rare, Pediatric"
+    )
+  )
+
+cat("\nAccuracy by Sample Group:\n")
+cat("=========================\n")
+print(accuracy_by_group[, c("group_label", "n_samples", "accuracy")])
+```
+
+## -- Visualization: Sample-Level Accuracy
+
+```{r}
+# Bar plot of accuracy by group
+p_sample_accuracy <- ggplot(accuracy_by_group, 
+                            aes(x = group_label, y = accuracy, fill = is_pediatric)) +
+  geom_col(alpha = 0.8) +
+  geom_text(aes(label = sprintf("%.3f\n(n=%d)", accuracy, n_samples)), 
+            vjust = -0.5, size = 3.5) +
+  scale_fill_manual(values = c("FALSE" = "#7eb0d5", "TRUE" = "#fd7f6f"),
+                    labels = c("Adult", "Pediatric")) +
+  theme_bw() +
+  labs(
+    title = "Sample-Level Prediction Accuracy by Subtype Rarity and Cohort Type",
+    subtitle = "LOSO Cross-Validation Results",
+    x = "Sample Group",
+    y = "Accuracy",
+    fill = "Cohort Type"
+  ) +
+  ylim(0, 1) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+print(p_sample_accuracy)
+ggsave("../writing/figures/sample_level_accuracy.png", p_sample_accuracy, 
+       width = 8, height = 6, dpi = 300)
+```
+
+## -- Alternative Analysis: Stratified Performance on Common Subtypes Only
+
+```{r}
+# Filter to common subtypes only
+common_subtypes_df <- sample_level_df %>% filter(!is_rare)
+
+# Compare pediatric vs adult on common subtypes
+common_ped <- common_subtypes_df %>% filter(is_pediatric)
+common_adult <- common_subtypes_df %>% filter(!is_pediatric)
+
+# Convert correct to numeric for wilcox test
+wilcox_common <- wilcox.test(as.numeric(common_ped$correct), as.numeric(common_adult$correct))
+
+cat("\n\nStratified Analysis: Common Subtypes Only\n")
+cat("==========================================\n")
+cat(sprintf("Pediatric accuracy on common subtypes: %.3f (n=%d)\n", 
+            mean(common_ped$correct), nrow(common_ped)))
+cat(sprintf("Adult accuracy on common subtypes: %.3f (n=%d)\n", 
+            mean(common_adult$correct), nrow(common_adult)))
+cat(sprintf("Mann-Whitney U test: W = %.1f, p = %.3f\n", 
+            wilcox_common$statistic, wilcox_common$p.value))
+
+if (wilcox_common$p.value < 0.05) {
+  cat("\n→ INTERPRETATION: Even on common subtypes, performance differs between\n")
+  cat("  pediatric and adult cohorts, suggesting factors beyond rare subtypes.\n")
+} else {
+  cat("\n→ INTERPRETATION: No significant difference on common subtypes, suggesting\n")
+  cat("  that rare subtypes explain the pediatric vs adult performance difference.\n")
+}
+```
+
+
+
+
+
+
+
+## -- Statistical Test: Age Effect per Subtype
+
+```{r}
+# Test if age affects F1 for each subtype
+cat("\n\nAge Effect on F1 per Subtype:\n")
+cat("==============================\n")
+
+for (subtype in subtypes_multi_age$truth_display) {
+  subtype_data <- f1_by_age_plot[f1_by_age_plot$truth_display == subtype, ]
+  
+  if (nrow(subtype_data) >= 3) {  # Need at least 3 points for correlation
+    cor_test <- cor.test(subtype_data$age_mid, subtype_data$f1_score, method = "spearman")
+    
+    cat(sprintf("\n%s:\n", subtype))
+    cat(sprintf("  Age bins: %d, Total samples: %d\n", 
+                nrow(subtype_data), sum(subtype_data$n)))
+    cat(sprintf("  Spearman rho = %.3f, p = %.3f %s\n", 
+                cor_test$estimate, cor_test$p.value,
+                ifelse(cor_test$p.value < 0.05, "***", "")))
+    
+    if (cor_test$p.value < 0.05) {
+      if (cor_test$estimate > 0) {
+        cat("  → Performance IMPROVES with age\n")
+      } else {
+        cat("  → Performance DECREASES with age\n")
+      }
+    }
+  }
+}
+```
+
+## -- Age vs Cohort Type: Disentangling Effects
+
+```{r}
+# Multiple logistic regression: correct ~ age + rare + cohort_type
+# Note: is_rare is already defined in sample_level_df (inherited by sample_level_age)
+# Redefine is_pediatric based on age for this analysis (using age threshold instead of cohort)
+sample_level_age$is_pediatric <- sample_level_age$age_years < 18
+
+# Model 1: Age only
+age_model1 <- glm(correct ~ age_years, 
+                  data = sample_level_age, 
+                  family = binomial(link = "logit"))
+
+# Model 2: Age + rare subtypes
+age_model2 <- glm(correct ~ age_years + is_rare, 
+                  data = sample_level_age, 
+                  family = binomial(link = "logit"))
+
+# Model 3: Age + rare + pediatric binary
+age_model3 <- glm(correct ~ age_years + is_rare + is_pediatric, 
+                  data = sample_level_age, 
+                  family = binomial(link = "logit"))
+
+cat("\n\nComparing Age Models:\n")
+cat("=====================\n")
+cat("\nModel 1: Correct ~ Age\n")
+cat("AIC:", AIC(age_model1), "\n")
+
+cat("\nModel 2: Correct ~ Age + Rare_Subtype\n")
+cat("AIC:", AIC(age_model2), "\n")
+
+cat("\nModel 3: Correct ~ Age + Rare_Subtype + Is_Pediatric\n")
+cat("AIC:", AIC(age_model3), "\n")
+cat("(Note: Age and Is_Pediatric are highly correlated)\n")
+
+# ANOVA to compare models
+cat("\n\nLikelihood Ratio Tests:\n")
+anova_12 <- anova(age_model1, age_model2, test = "Chisq")
+cat("\nModel 1 vs Model 2 (adding Rare_Subtype):\n")
+print(anova_12)
+
+anova_23 <- anova(age_model2, age_model3, test = "Chisq")
+cat("\nModel 2 vs Model 3 (adding Is_Pediatric given Age):\n")
+print(anova_23)
+
+# Show final model coefficients
+cat("\n\nFinal Model (Age + Rare):\n")
+cat("=========================\n")
+print(summary(age_model2)$coefficients)
+
+age2_or <- exp(coef(age_model2))
+age2_or_ci <- exp(confint(age_model2))
+
+cat("\n\nOdds Ratios (95% CI):\n")
+cat(sprintf("Age (per year): OR = %.3f (%.3f - %.3f)\n",
+            age2_or["age_years"], 
+            age2_or_ci["age_years", 1], 
+            age2_or_ci["age_years", 2]))
+cat(sprintf("Rare Subtype: OR = %.3f (%.3f - %.3f)\n",
+            age2_or["is_rareTRUE"], 
+            age2_or_ci["is_rareTRUE", 1], 
+            age2_or_ci["is_rareTRUE", 2]))
+```
+
+## -- Cohort-Level Age Analysis
+
+```{r}
+# Calculate mean age per cohort
+cohort_age_stats <- sample_level_age %>%
+  group_by(cohort) %>%
+  summarise(
+    n = n(),
+    mean_age = mean(age_years, na.rm = TRUE),
+    median_age = median(age_years, na.rm = TRUE),
+    sd_age = sd(age_years, na.rm = TRUE),
+    accuracy = mean(correct),
+    .groups = "drop"
+  )
+
+# Merge with cohort_analysis
+cohort_analysis_age <- merge(cohort_analysis, cohort_age_stats[, c("cohort", "mean_age", "median_age")],
+                              by = "cohort", all.x = TRUE)
+
+# Test correlation between mean age and cohort performance
+cor_age_kappa <- cor.test(cohort_analysis_age$mean_age, 
+                           cohort_analysis_age$kappa, 
+                           method = "spearman")
+
+cat("\n\nCohort-Level Age Analysis:\n")
+cat("==========================\n")
+cat("Mean Age per Cohort:\n")
+print(cohort_age_stats[, c("cohort", "mean_age", "median_age", "accuracy")])
+
+cat(sprintf("\n\nCorrelation (Cohort Mean Age vs Kappa): rho = %.3f, p = %.3f\n",
+            cor_age_kappa$estimate, cor_age_kappa$p.value))
+
+# Scatter plot
+p_cohort_age <- ggplot(cohort_analysis_age, 
+                       aes(x = mean_age, y = kappa, label = cohort, color = cohort_type)) +
+  geom_point(size = 4, alpha = 0.8) +
+  geom_smooth(method = "lm", se = TRUE, color = "gray30", linetype = "dashed",
+              formula = y ~ x) +
+  geom_text(hjust = -0.1, vjust = 0.5, size = 3, show.legend = FALSE) +
+  scale_color_manual(values = c("Adult" = "#7eb0d5", "Pediatric" = "#fd7f6f")) +
+  theme_bw() +
+  labs(
+    title = "Cohort Performance vs Mean Age",
+    subtitle = sprintf("Spearman rho = %.3f, p = %.3f", 
+                       cor_age_kappa$estimate, cor_age_kappa$p.value),
+    x = "Mean Age of Cohort (years)",
+    y = "Cohen's Kappa",
+    color = "Cohort Type"
+  ) +
+  theme(legend.position = "bottom") +
+  xlim(0, max(cohort_analysis_age$mean_age, na.rm = TRUE) * 1.15)
+
+print(p_cohort_age)
+ggsave("../writing/figures/cohort_age_correlation.png", p_cohort_age, 
+       width = 8, height = 6, dpi = 300)
+```
+
+## -- Subtype Enrichment Analysis: Pediatric vs Adult
+
+```{r}
+# Get F1 scores per subtype from the per-class summaries
+per_class_f1 <- outer_cv_results$per_class_summaries$cv %>%
+  filter(Model == "Global_Optimized") %>%
+  select(Class, Mean_F1)
+
+# Clean class names
+per_class_f1$Class <- gsub("Class: ", "", per_class_f1$Class)
+per_class_f1$Class <- fix_names(per_class_f1$Class)
+per_class_f1$Class[grepl("MDS", per_class_f1$Class)] <- "MDS.r/MECOM"
+
+# Analyze subtype distribution in pediatric vs adult samples
+subtype_enrichment <- sample_level_age %>%
+  group_by(truth_display, is_pediatric) %>%
+  summarise(
+    n = n(),
+    accuracy = mean(correct),
+    .groups = "drop"
+  ) %>%
+  tidyr::pivot_wider(
+    names_from = is_pediatric,
+    values_from = c(n, accuracy),
+    values_fill = list(n = 0, accuracy = NA)
+  ) %>%
+  rename(
+    n_adult = `n_FALSE`,
+    n_pediatric = `n_TRUE`,
+    accuracy_adult = `accuracy_FALSE`,
+    accuracy_pediatric = `accuracy_TRUE`
+  )
+
+# Merge with F1 scores
+subtype_enrichment <- merge(subtype_enrichment, per_class_f1, 
+                            by.x = "truth_display", by.y = "Class", 
+                            all.x = TRUE)
+
+# Calculate proportions and enrichment
+total_adult <- sum(subtype_enrichment$n_adult)
+total_pediatric <- sum(subtype_enrichment$n_pediatric)
+
+subtype_enrichment$prop_adult <- subtype_enrichment$n_adult / total_adult
+subtype_enrichment$prop_pediatric <- subtype_enrichment$n_pediatric / total_pediatric
+
+# Enrichment ratio (>1 means enriched in pediatric)
+subtype_enrichment$enrichment_ratio <- (subtype_enrichment$prop_pediatric + 0.001) / 
+                                       (subtype_enrichment$prop_adult + 0.001)
+
+# Calculate overall accuracy per subtype (for reference)
+subtype_enrichment$overall_accuracy <- 
+  (subtype_enrichment$n_adult * subtype_enrichment$accuracy_adult + 
+   subtype_enrichment$n_pediatric * subtype_enrichment$accuracy_pediatric) /
+  (subtype_enrichment$n_adult + subtype_enrichment$n_pediatric)
+
+# Chi-square tests for each subtype
+subtype_enrichment$chi_sq_p <- NA
+
+for (i in 1:nrow(subtype_enrichment)) {
+  subtype_name <- subtype_enrichment$truth_display[i]
+  n_subtype_ped <- subtype_enrichment$n_pediatric[i]
+  n_subtype_adult <- subtype_enrichment$n_adult[i]
+  n_other_ped <- total_pediatric - n_subtype_ped
+  n_other_adult <- total_adult - n_subtype_adult
+  
+  # Create contingency table
+  cont_table <- matrix(c(n_subtype_ped, n_other_ped,
+                         n_subtype_adult, n_other_adult),
+                       nrow = 2, byrow = TRUE)
+  
+  # Fisher's exact test (better for small counts)
+  if (min(cont_table) < 5) {
+    test_result <- fisher.test(cont_table)
+  } else {
+    test_result <- chisq.test(cont_table)
+  }
+  
+  subtype_enrichment$chi_sq_p[i] <- test_result$p.value
+}
+
+# Adjust for multiple testing
+subtype_enrichment$chi_sq_p_adj <- p.adjust(subtype_enrichment$chi_sq_p, method = "BH")
+
+# Classify subtypes
+subtype_enrichment$enrichment_class <- ifelse(
+  subtype_enrichment$chi_sq_p_adj < 0.05,
+  ifelse(subtype_enrichment$enrichment_ratio > 1.5, "Pediatric-enriched",
+         ifelse(subtype_enrichment$enrichment_ratio < 0.67, "Adult-enriched", "Similar")),
+  "Similar"
+)
+
+cat("\n\nSubtype Enrichment in Pediatric vs Adult:\n")
+cat("==========================================\n")
+cat(sprintf("Total Adult samples: %d\n", total_adult))
+cat(sprintf("Total Pediatric samples: %d\n", total_pediatric))
+
+cat("\n\nSubtypes significantly enriched in PEDIATRIC cohorts:\n")
+ped_enriched <- subtype_enrichment %>%
+  filter(enrichment_class == "Pediatric-enriched") %>%
+  arrange(desc(enrichment_ratio))
+print(ped_enriched[, c("truth_display", "n_pediatric", "n_adult", "enrichment_ratio", 
+                       "Mean_F1", "overall_accuracy", "chi_sq_p_adj")])
+
+cat("\n\nSubtypes significantly enriched in ADULT cohorts:\n")
+adult_enriched <- subtype_enrichment %>%
+  filter(enrichment_class == "Adult-enriched") %>%
+  arrange(enrichment_ratio)
+print(adult_enriched[, c("truth_display", "n_pediatric", "n_adult", "enrichment_ratio", 
+                         "Mean_F1", "overall_accuracy", "chi_sq_p_adj")])
+```
+
+## -- Test: Do Pediatric-Enriched Subtypes Have Lower Accuracy?
+
+```{r}
+# Compare accuracy of pediatric-enriched vs other subtypes
+ped_enriched_subtypes <- subtype_enrichment$truth_display[
+  subtype_enrichment$enrichment_class == "Pediatric-enriched"
+]
+
+adult_enriched_subtypes <- subtype_enrichment$truth_display[
+  subtype_enrichment$enrichment_class == "Adult-enriched"
+]
+
+similar_subtypes <- subtype_enrichment$truth_display[
+  subtype_enrichment$enrichment_class == "Similar"
+]
+
+# Calculate mean F1 and accuracy per group
+performance_by_enrichment <- subtype_enrichment %>%
+  group_by(enrichment_class) %>%
+  summarise(
+    n_subtypes = n(),
+    mean_F1 = mean(Mean_F1, na.rm = TRUE),
+    sd_F1 = sd(Mean_F1, na.rm = TRUE),
+    median_F1 = median(Mean_F1, na.rm = TRUE),
+    mean_accuracy = mean(overall_accuracy, na.rm = TRUE),
+    sd_accuracy = sd(overall_accuracy, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+cat("\n\nPerformance by Subtype Enrichment Class:\n")
+cat("========================================\n")
+print(performance_by_enrichment)
+
+# Statistical test using F1 scores
+if (nrow(ped_enriched) > 0 && (nrow(adult_enriched) + length(similar_subtypes)) > 0) {
+  f1_ped_enriched <- subtype_enrichment$Mean_F1[
+    subtype_enrichment$enrichment_class == "Pediatric-enriched"
+  ]
+  f1_not_ped_enriched <- subtype_enrichment$Mean_F1[
+    subtype_enrichment$enrichment_class != "Pediatric-enriched"
+  ]
+  
+  # Remove NAs
+  f1_ped_enriched <- f1_ped_enriched[!is.na(f1_ped_enriched)]
+  f1_not_ped_enriched <- f1_not_ped_enriched[!is.na(f1_not_ped_enriched)]
+  
+  if (length(f1_ped_enriched) > 0 && length(f1_not_ped_enriched) > 0) {
+    wilcox_enrichment <- wilcox.test(f1_ped_enriched, f1_not_ped_enriched)
+    
+    cat(sprintf("\n\nMann-Whitney U test on F1 scores (Pediatric-enriched vs Others):\n"))
+    cat(sprintf("W = %.1f, p = %.3f\n", wilcox_enrichment$statistic, wilcox_enrichment$p.value))
+    cat(sprintf("Pediatric-enriched mean F1: %.3f\n", mean(f1_ped_enriched)))
+    cat(sprintf("Other subtypes mean F1: %.3f\n", mean(f1_not_ped_enriched)))
+  }
+}
+```
+
+## -- Sample-Level Analysis: Controlling for Subtype
+
+```{r}
+# Label each sample by its subtype enrichment class
+sample_level_age$subtype_enrichment <- NA
+
+for (i in 1:nrow(sample_level_age)) {
+  subtype <- sample_level_age$truth_display[i]
+  enrich_class <- subtype_enrichment$enrichment_class[
+    subtype_enrichment$truth_display == subtype
+  ]
+  if (length(enrich_class) > 0) {
+    sample_level_age$subtype_enrichment[i] <- enrich_class
+  }
+}
+
+# Calculate accuracy by pediatric status AND subtype enrichment
+accuracy_by_ped_and_enrichment <- sample_level_age %>%
+  filter(!is.na(subtype_enrichment)) %>%
+  group_by(is_pediatric, subtype_enrichment) %>%
+  summarise(
+    n = n(),
+    accuracy = mean(correct),
+    .groups = "drop"
+  )
+
+cat("\n\nAccuracy by Pediatric Status and Subtype Enrichment:\n")
+cat("====================================================\n")
+print(accuracy_by_ped_and_enrichment)
+
+# Test if pediatric effect persists within each subtype enrichment class
+cat("\n\nWithin-Enrichment-Class Comparisons:\n")
+cat("====================================\n")
+
+for (enrich_class in unique(sample_level_age$subtype_enrichment)) {
+  if (is.na(enrich_class)) next
+  
+  subset_data <- sample_level_age[sample_level_age$subtype_enrichment == enrich_class & 
+                                   !is.na(sample_level_age$subtype_enrichment), ]
+  
+  ped_data <- subset_data[subset_data$is_pediatric == TRUE, ]
+  adult_data <- subset_data[subset_data$is_pediatric == FALSE, ]
+  
+  if (nrow(ped_data) > 0 && nrow(adult_data) > 0) {
+    wilcox_within <- wilcox.test(
+      as.numeric(ped_data$correct), 
+      as.numeric(adult_data$correct)
+    )
+    
+    cat(sprintf("\n%s subtypes:\n", enrich_class))
+    cat(sprintf("  Pediatric: n=%d, accuracy=%.3f\n", nrow(ped_data), mean(ped_data$correct)))
+    cat(sprintf("  Adult: n=%d, accuracy=%.3f\n", nrow(adult_data), mean(adult_data$correct)))
+    cat(sprintf("  Mann-Whitney U: W=%.1f, p=%.3f\n", 
+                wilcox_within$statistic, wilcox_within$p.value))
+  }
+}
+```
+
+## -- Kappa by Pediatric Status and Subtype Enrichment
+
+```{r}
+# Calculate kappa by pediatric status AND subtype enrichment
+library(caret)
+
+# Create list to store results
+kappa_by_ped_and_enrichment_list <- list()
+
+# Get unique combinations of is_pediatric and subtype_enrichment
+combinations <- sample_level_age %>%
+  filter(!is.na(subtype_enrichment)) %>%
+  distinct(is_pediatric, subtype_enrichment)
+
+for (i in 1:nrow(combinations)) {
+  is_ped <- combinations$is_pediatric[i]
+  enrich <- combinations$subtype_enrichment[i]
+  
+  # Get subset
+  subset_data <- sample_level_age %>%
+    filter(is_pediatric == is_ped, subtype_enrichment == enrich, !is.na(subtype_enrichment))
+  
+  if (nrow(subset_data) >= 10) {  # Minimum samples for meaningful kappa
+    # Get all possible levels from both predictions and truth
+    all_levels <- unique(c(subset_data$truth_display, subset_data$prediction_display))
+    
+    # Create confusion matrix
+    cm <- confusionMatrix(
+      factor(subset_data$prediction_display, levels = all_levels),
+      factor(subset_data$truth_display, levels = all_levels)
+    )
+    
+    kappa_by_ped_and_enrichment_list[[length(kappa_by_ped_and_enrichment_list) + 1]] <- data.frame(
+      is_pediatric = is_ped,
+      subtype_enrichment = enrich,
+      n = nrow(subset_data),
+      kappa = as.numeric(cm$overall["Kappa"]),
+      accuracy = as.numeric(cm$overall["Accuracy"])
+    )
+  }
+}
+
+# Combine into dataframe
+kappa_by_ped_and_enrichment <- do.call(rbind, kappa_by_ped_and_enrichment_list)
+
+cat("\n\nKappa by Pediatric Status and Subtype Enrichment:\n")
+cat("=================================================\n")
+print(kappa_by_ped_and_enrichment)
+```
+
+## -- Visualization: Kappa by Enrichment and Cohort Type
+
+```{r}
+# Create labels for better plotting
+kappa_by_ped_and_enrichment$cohort_type <- ifelse(
+  kappa_by_ped_and_enrichment$is_pediatric, 
+  "Pediatric Cohort", 
+  "Adult Cohort"
+)
+kappa_by_ped_and_enrichment <- kappa_by_ped_and_enrichment[kappa_by_ped_and_enrichment$subtype_enrichment != "Similar",]
+# Create bar plot
+p_kappa_enrichment <- ggplot(kappa_by_ped_and_enrichment, 
+                             aes(x = subtype_enrichment, y = kappa, 
+                                 fill = cohort_type)) +
+  geom_col(position = "dodge", alpha = 0.8) +
+  geom_text(aes(label = sprintf("κ=%.2f\n(n=%d)", kappa, n)), 
+            position = position_dodge(width = 0.9),
+            vjust = -0.5, size = 3) +
+  scale_fill_manual(
+    values = c("Pediatric Cohort" = "#fd7f6f", "Adult Cohort" = "#7eb0d5"),
+    name = "Cohort Type"
+  ) +
+  theme_bw() +
+  labs(
+    title = "Performance (Cohen's Kappa) by Subtype Enrichment and Cohort Type",
+    subtitle = "LOSO Cross-Validation: How well does the model perform on different subtype-cohort combinations?",
+    x = "Subtype Enrichment Class",
+    y = "Cohen's Kappa"
+  ) +
+  ylim(0, 1) +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title = element_text(size = 12, face = "bold"),
+    plot.subtitle = element_text(size = 10)
+  )
+
+print(p_kappa_enrichment)
+ggsave("../writing/figures/kappa_by_enrichment_cohort.png", p_kappa_enrichment, 
+       width = 10, height = 7, dpi = 300)
+```
+
+## -- Statistical Tests: Kappa Differences
+
+```{r}
+# Test if kappa differs between pediatric and adult cohorts within each enrichment class
+cat("\n\nKappa Differences Between Cohort Types:\n")
+cat("========================================\n")
+
+for (enrich_class in unique(kappa_by_ped_and_enrichment$subtype_enrichment)) {
+  subset_kappa <- kappa_by_ped_and_enrichment[
+    kappa_by_ped_and_enrichment$subtype_enrichment == enrich_class, 
+  ]
+  
+  if (nrow(subset_kappa) == 2) {  # Both pediatric and adult present
+    ped_kappa <- subset_kappa$kappa[subset_kappa$is_pediatric == TRUE]
+    adult_kappa <- subset_kappa$kappa[subset_kappa$is_pediatric == FALSE]
+    kappa_diff <- ped_kappa - adult_kappa
+    
+    cat(sprintf("\n%s subtypes:\n", enrich_class))
+    cat(sprintf("  Pediatric cohort: κ = %.3f\n", ped_kappa))
+    cat(sprintf("  Adult cohort: κ = %.3f\n", adult_kappa))
+    cat(sprintf("  Difference (Ped - Adult): %.3f\n", kappa_diff))
+    
+    if (kappa_diff < 0) {
+      cat("  → Model performs BETTER on adult cohorts for these subtypes\n")
+    } else {
+      cat("  → Model performs BETTER on pediatric cohorts for these subtypes\n")
+    }
+  }
+}
+```
+
+## -- Per-Class F1: Comparing Individual Subtypes by Cohort Type and Enrichment
+
+```{r}
+# Calculate per-class F1 scores separately for pediatric and adult cohorts
+f1_per_class_cohort_list <- list()
+
+# Function to calculate F1 for a specific subtype and cohort subset
+calc_f1_for_subset <- function(data_subset, subtype_name, all_data) {
+  if (nrow(data_subset) < 5) {  # Minimum samples
+    return(NULL)
+  }
+  
+  # Calculate per-class metrics
+  n_total <- nrow(data_subset)
+  n_correct <- sum(data_subset$prediction_display == data_subset$truth_display)
+  sensitivity <- n_correct / n_total  # Recall: TP / (TP + FN)
+  
+  # Get precision: TP / (TP + FP) calculated from the same cohort subset
+  n_predicted_as_this <- sum(all_data$prediction_display == subtype_name)
+  if (n_predicted_as_this > 0) {
+    n_correct_total <- sum(all_data$prediction_display == subtype_name & 
+                           all_data$truth_display == subtype_name)
+    precision <- n_correct_total / n_predicted_as_this
+    # F1 score
+    if (precision + sensitivity > 0) {
+      f1 <- 2 * (precision * sensitivity) / (precision + sensitivity)
+    } else {
+      f1 <- 0
+    }
+  } else {
+    precision <- 0
+    f1 <- 0
+  }
+  
+  return(list(
+    n = n_total,
+    sensitivity = sensitivity,
+    precision = precision,
+    f1 = f1,
+    n_correct = n_correct
+  ))
+}
+
+# Loop through each subtype
+for (subtype in unique(sample_level_age$truth_display)) {
+  # Get all samples of this subtype
+  subset_all <- sample_level_age[sample_level_age$truth_display == subtype, ]
+  
+  if (nrow(subset_all) >= 10) {  # Only analyze if enough total samples
+    # Split by pediatric/adult
+    subset_ped <- subset_all[subset_all$is_pediatric == TRUE, ]
+    subset_adult <- subset_all[subset_all$is_pediatric == FALSE, ]
+    
+    # Get corresponding cohort data for precision calculation
+    all_ped <- sample_level_age[sample_level_age$is_pediatric == TRUE, ]
+    all_adult <- sample_level_age[sample_level_age$is_pediatric == FALSE, ]
+    
+    # Calculate for pediatric cohort
+    if (nrow(subset_ped) >= 5) {
+      metrics_ped <- calc_f1_for_subset(subset_ped, subtype, all_ped)
+      if (!is.null(metrics_ped)) {
+        f1_per_class_cohort_list[[length(f1_per_class_cohort_list) + 1]] <- data.frame(
+          subtype = subtype,
+          is_pediatric = TRUE,
+          cohort_type = "Pediatric",
+          n = metrics_ped$n,
+          sensitivity = metrics_ped$sensitivity,
+          precision = metrics_ped$precision,
+          f1 = metrics_ped$f1,
+          n_correct = metrics_ped$n_correct
+        )
+      }
+    }
+    
+    # Calculate for adult cohort
+    if (nrow(subset_adult) >= 5) {
+      metrics_adult <- calc_f1_for_subset(subset_adult, subtype, all_adult)
+      if (!is.null(metrics_adult)) {
+        f1_per_class_cohort_list[[length(f1_per_class_cohort_list) + 1]] <- data.frame(
+          subtype = subtype,
+          is_pediatric = FALSE,
+          cohort_type = "Adult",
+          n = metrics_adult$n,
+          sensitivity = metrics_adult$sensitivity,
+          precision = metrics_adult$precision,
+          f1 = metrics_adult$f1,
+          n_correct = metrics_adult$n_correct
+        )
+      }
+    }
+  }
+}
+
+# Combine into dataframe
+f1_per_class_cohort <- do.call(rbind, f1_per_class_cohort_list)
+
+# Merge with enrichment classification
+f1_per_class_cohort <- merge(
+  f1_per_class_cohort,
+  subtype_enrichment[, c("truth_display", "enrichment_class", "n_pediatric", "n_adult")],
+  by.x = "subtype",
+  by.y = "truth_display",
+  all.x = TRUE
+)
+
+# Filter to only adult-enriched and pediatric-enriched classes
+f1_per_class_enriched <- f1_per_class_cohort[
+  f1_per_class_cohort$enrichment_class %in% c("Adult-enriched", "Pediatric-enriched"),
+]
+
+# Calculate average F1 per subtype for sorting
+f1_avg <- f1_per_class_enriched %>%
+  group_by(subtype) %>%
+  summarise(avg_f1 = mean(f1, na.rm = TRUE), .groups = "drop")
+
+f1_per_class_enriched <- merge(f1_per_class_enriched, f1_avg, by = "subtype")
+f1_per_class_enriched <- f1_per_class_enriched[order(f1_per_class_enriched$avg_f1), ]
+f1_per_class_enriched$subtype <- factor(f1_per_class_enriched$subtype, 
+                                        levels = unique(f1_per_class_enriched$subtype))
+
+cat("\n\nPer-Class F1 Score for Enriched Subtypes by Cohort:\n")
+cat("====================================================\n")
+print(f1_per_class_enriched[, c("subtype", "enrichment_class", "cohort_type", "n", "f1")])
+```
+
+## -- Visualization: Per-Class F1 Score by Cohort Type and Enrichment Status
+
+```{r}
+# Create grouped bar plot: F1 per class, grouped by cohort, faceted by enrichment
+# Order subtypes by mean F1 to improve interpretability
+f1_plot_data <- f1_per_class_enriched %>%
+  group_by(subtype) %>%
+  mutate(mean_f1 = mean(f1)) %>%
+  ungroup() %>%
+  mutate(subtype = reorder(subtype, mean_f1))
+
+p_f1_per_class <- ggplot(
+  f1_plot_data,
+  aes(x = subtype, y = f1, fill = cohort_type)
+) +
+  geom_col(
+    position = position_dodge(width = 0.65),
+    width = 0.65,
+    alpha = 0.85
+  ) +
+  geom_text(
+    aes(label = sprintf("%.2f", f1)),
+    position = position_dodge(width = 0.65),
+    hjust = 1.05,
+    size = 2.6,
+    color = "black"
+  ) +
+  coord_flip() +
+
+  scale_fill_manual(
+    values = c("Pediatric" = "#e67e62", "Adult" = "#5a9acb"),
+    name = "Cohort type"
+  ) +
+
+  facet_wrap(
+    ~ enrichment_class,
+    ncol = 1,
+    scales = "free_y",
+    strip.position = "top"
+  ) +
+
+  scale_y_continuous(
+    limits = c(0, 1),
+    expand = expansion(mult = c(0, 0.05))
+  ) +
+  facet_wrap(~ enrichment_class, scales = "free_y", ncol = 1) +
+  theme_bw() +
+  labs(
+    title = "LOSO performance per AML subtype",
+    subtitle = "F1 score grouped by cohort type, faceted by enrichment class",
+    x = "Subtype",
+    y = "F1 score"
+  ) +
+  ylim(0, 1) +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(size = 12, face = "bold"),
+    plot.subtitle = element_text(size = 9),
+    axis.text.y = element_text(size = 8),
+    strip.text = element_text(size = 10, face = "bold")
+  )
+
+print(p_f1_per_class)
+ggsave("../writing/figures/f1_per_class_by_cohort_enriched.png", p_f1_per_class, 
+       width = 10, height = 10, dpi = 300)
+```
+```{r}
+library(dplyr)
+library(ggplot2)
+library(patchwork)
+
+# Split data by enrichment
+dat_top    <- f1_per_class_enriched %>% filter(enrichment_class == "Adult-enriched")
+dat_bottom <- f1_per_class_enriched %>% filter(enrichment_class != "Adult-enriched")
+
+# ---- Plot 1: Top enrichment ----
+p_top <- ggplot(dat_top,
+                aes(x = subtype, y = f1, fill = cohort_type)) +
+  geom_col(position = position_dodge(width = 0.85),
+           width = 0.75, alpha = 0.85) +
+  geom_text(aes(label = sprintf("%.2f", f1)),
+            position = position_dodge(width = 0.85),
+            hjust = 1.05, size = 2.7, color = "black") +
+  coord_flip() +
+  scale_fill_manual(values = c("Pediatric"="#e67e62","Adult"="#5a9acb"),
+                    name="Cohort type") +
+  scale_y_continuous(limits = c(0,1), expand = expansion(mult=c(0,0.05))) +
+  labs(title = "LOSO performance per AML subtype",
+       subtitle = "Adult enriched classes",
+       x = "Subtype", y = "F1 score") +
+  theme_bw() +
+  theme(
+    legend.position = "none",
+    axis.text.y = element_text(size = 8),
+    axis.text.x = element_text(size = 8),
+    panel.grid.major.y = element_blank(),
+    panel.grid.major.x = element_line(size = 0.3, color = "grey80")
+  )
+
+# ---- Plot 2: Bottom enrichment ----
+p_bottom <- ggplot(dat_bottom,
+                   aes(x = subtype, y = f1, fill = cohort_type)) +
+  geom_col(position = position_dodge(width = 0.85),
+           width = 0.75, alpha = 0.85) +
+  geom_text(aes(label = sprintf("%.2f", f1)),
+            position = position_dodge(width = 0.85),
+            hjust = 1.05, size = 2.7, color = "black") +
+  coord_flip() +
+  scale_fill_manual(values = c("Pediatric"="#e67e62","Adult"="#5a9acb"),
+                    name="Cohort type") +
+  scale_y_continuous(limits = c(0,1), expand = expansion(mult=c(0,0.05))) +
+  labs(subtitle = "Pediatric enriched classes",
+       x = "Subtype", y = "F1 score") +
+  theme_bw() +
+  theme(
+    legend.position = "bottom",
+    axis.text.y = element_text(size = 8),
+    axis.text.x = element_text(size = 8),
+    panel.grid.major.y = element_blank(),
+    panel.grid.major.x = element_line(size = 0.3, color = "grey80")
+  )
+
+# ---- Combine with patchwork ----
+p_final <- p_top / p_bottom +
+  plot_layout(heights = c(3, 8))   # adjust bottom panel height if needed
+
+p_final
+
+```
+```{r}
+library(dplyr)
+library(ggplot2)
+
+# Summarise mean F1 by (cohort_type × enrichment_class)
+summary_df <- f1_per_class_enriched %>%
+  group_by(cohort_type, enrichment_class) %>%
+  summarise(mean_f1 = mean(f1, na.rm = TRUE), .groups = "drop")
+
+# Simple comparison barplot
+p_summary <- ggplot(summary_df,
+                    aes(x = enrichment_class,
+                        y = mean_f1,
+                        fill = cohort_type)) +
+  geom_col(position = "dodge", width = 0.6, alpha = 0.9) +
+  geom_text(aes(label = sprintf("%.2f", mean_f1)),
+            position = position_dodge(width = 0.6),
+            vjust = -0.4,
+            size = 3,
+            color = "black") +
+  scale_fill_manual(values = c("Pediatric" = "#e67e62",
+                               "Adult" = "#5a9acb"),
+                    name = "Cohort type") +
+  scale_y_continuous(limits = c(0, 1),
+                     expand = expansion(mult = c(0, 0.1))) +
+  labs(title = "Mean F1 score: pediatric vs adult cohorts",
+       subtitle = "Across pediatric-enriched vs adult-enriched AML subtypes",
+       x = "Enrichment class",
+       y = "Mean F1 score") +
+  theme_bw() +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(size = 12, face = "bold"),
+    axis.text.x = element_text(size = 9)
+  )
+
+p_summary
+
+```
+
+## -- Summary: Performance Patterns by Enrichment and Cohort
+
+```{r}
+# Summarize F1 score by enrichment class and cohort type
+f1_summary <- f1_per_class_enriched %>%
+  group_by(enrichment_class, cohort_type) %>%
+  summarise(
+    n_classes = n(),
+    mean_f1 = mean(f1, na.rm = TRUE),
+    sd_f1 = sd(f1, na.rm = TRUE),
+    median_f1 = median(f1, na.rm = TRUE),
+    min_f1 = min(f1, na.rm = TRUE),
+    max_f1 = max(f1, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+cat("\n\nF1 Score Summary by Enrichment Class and Cohort Type:\n")
+cat("=====================================================\n")
+print(f1_summary)
+
+# Test 1: Within adult-enriched subtypes, do pediatric vs adult cohorts differ?
+cat("\n\n1. ADULT-ENRICHED SUBTYPES: Pediatric vs Adult Cohorts\n")
+cat("======================================================\n")
+adult_enriched <- f1_per_class_enriched[f1_per_class_enriched$enrichment_class == "Adult-enriched", ]
+if (nrow(adult_enriched) > 0) {
+  adult_enr_ped <- adult_enriched$f1[adult_enriched$cohort_type == "Pediatric"]
+  adult_enr_adult <- adult_enriched$f1[adult_enriched$cohort_type == "Adult"]
+  
+  if (length(adult_enr_ped) > 0 && length(adult_enr_adult) > 0) {
+    wilcox_adult_enr <- wilcox.test(adult_enr_ped, adult_enr_adult, paired = FALSE)
+    
+    cat(sprintf("Pediatric cohorts: median F1 = %.3f (n = %d)\n", 
+                median(adult_enr_ped), length(adult_enr_ped)))
+    cat(sprintf("Adult cohorts: median F1 = %.3f (n = %d)\n", 
+                median(adult_enr_adult), length(adult_enr_adult)))
+    cat(sprintf("Mann-Whitney U: W = %.1f, p = %.4f\n", 
+                wilcox_adult_enr$statistic, wilcox_adult_enr$p.value))
+    
+    if (wilcox_adult_enr$p.value < 0.05) {
+      if (median(adult_enr_ped) > median(adult_enr_adult)) {
+        cat("→ Model performs BETTER in pediatric cohorts on adult-enriched subtypes\n")
+      } else {
+        cat("→ Model performs BETTER in adult cohorts on adult-enriched subtypes\n")
+      }
+    } else {
+      cat("→ No significant difference between cohorts\n")
+    }
+  }
+}
+
+# Test 2: Within pediatric-enriched subtypes, do pediatric vs adult cohorts differ?
+cat("\n\n2. PEDIATRIC-ENRICHED SUBTYPES: Pediatric vs Adult Cohorts\n")
+cat("==========================================================\n")
+ped_enriched <- f1_per_class_enriched[f1_per_class_enriched$enrichment_class == "Pediatric-enriched", ]
+if (nrow(ped_enriched) > 0) {
+  ped_enr_ped <- ped_enriched$f1[ped_enriched$cohort_type == "Pediatric"]
+  ped_enr_adult <- ped_enriched$f1[ped_enriched$cohort_type == "Adult"]
+  
+  if (length(ped_enr_ped) > 0 && length(ped_enr_adult) > 0) {
+    wilcox_ped_enr <- wilcox.test(ped_enr_ped, ped_enr_adult, paired = FALSE)
+    
+    cat(sprintf("Pediatric cohorts: median F1 = %.3f (n = %d)\n", 
+                median(ped_enr_ped), length(ped_enr_ped)))
+    cat(sprintf("Adult cohorts: median F1 = %.3f (n = %d)\n", 
+                median(ped_enr_adult), length(ped_enr_adult)))
+    cat(sprintf("Mann-Whitney U: W = %.1f, p = %.4f\n", 
+                wilcox_ped_enr$statistic, wilcox_ped_enr$p.value))
+    
+    if (wilcox_ped_enr$p.value < 0.05) {
+      if (median(ped_enr_ped) > median(ped_enr_adult)) {
+        cat("→ Model performs BETTER in pediatric cohorts on pediatric-enriched subtypes\n")
+      } else {
+        cat("→ Model performs BETTER in adult cohorts on pediatric-enriched subtypes\n")
+      }
+    } else {
+      cat("→ No significant difference between cohorts\n")
+    }
+  }
+}
+
+# Test 3: Overall effect - interaction between enrichment and cohort type
+cat("\n\n3. INTERACTION EFFECT: Does cohort performance depend on enrichment?\n")
+cat("====================================================================\n")
+cat("For adult-enriched subtypes, is the pediatric-adult difference\n")
+cat("different from the pediatric-adult difference in pediatric-enriched?\n\n")
+
+# Calculate F1 differences (pediatric - adult) for each enrichment class
+if (exists("adult_enr_ped") && exists("adult_enr_adult") && 
+    length(adult_enr_ped) > 0 && length(adult_enr_adult) > 0) {
+  adult_enr_diff <- mean(adult_enr_ped) - mean(adult_enr_adult)
+  cat(sprintf("Adult-enriched: Ped-Adult difference = %.3f\n", adult_enr_diff))
+}
+
+if (exists("ped_enr_ped") && exists("ped_enr_adult") && 
+    length(ped_enr_ped) > 0 && length(ped_enr_adult) > 0) {
+  ped_enr_diff <- mean(ped_enr_ped) - mean(ped_enr_adult)
+  cat(sprintf("Pediatric-enriched: Ped-Adult difference = %.3f\n", ped_enr_diff))
+}
+```
+
+
+
+## -- Visualization: Subtype Enrichment and Performance
+
+```{r}
+# Scatter plot: enrichment ratio vs F1 score
+p_enrichment <- ggplot(subtype_enrichment, 
+                       aes(x = log2(enrichment_ratio), y = Mean_F1, 
+                           color = enrichment_class, 
+                           size = n_pediatric + n_adult)) +
+  geom_point(alpha = 0.7) +
+  geom_text(aes(label = truth_display), hjust = -0.1, vjust = 0.5, 
+            size = 3, show.legend = FALSE) +
+  geom_vline(xintercept = 0, linetype = "dashed", alpha = 0.5) +
+  scale_color_manual(
+    values = c("Pediatric-enriched" = "#fd7f6f", 
+               "Adult-enriched" = "#7eb0d5",
+               "Similar" = "gray60"),
+    name = "Enrichment"
+  ) +
+  scale_size_continuous(range = c(2, 10), name = "Total Samples") +
+  theme_bw() +
+  labs(
+    title = "Subtype Performance (F1) vs Pediatric/Adult Enrichment",
+    subtitle = "Negative log2 ratio = Adult-enriched, Positive = Pediatric-enriched",
+    x = "Log2(Pediatric/Adult Enrichment Ratio)",
+    y = "F1 Score"
+  ) +
+  theme(legend.position = "bottom") +
+  xlim(min(log2(subtype_enrichment$enrichment_ratio)) * 1.3,
+       max(log2(subtype_enrichment$enrichment_ratio)) * 1.3) +
+  ylim(0.75, 1)
+
+print(p_enrichment)
+ggsave("../writing/figures/subtype_enrichment_performance.png", p_enrichment, 
+       width = 10, height = 8, dpi = 300)
+```
+
+## -- Performance Difference: Adult vs Pediatric Cohorts by Enrichment
+
+```{r}
+# Calculate performance difference (Adult - Pediatric) for each subtype
+# Use accuracy data from subtype_enrichment which has accuracy by pediatric status
+
+# Also merge with F1 data from f1_per_class_cohort if available
+performance_diff_data <- subtype_enrichment %>%
+  mutate(
+    # Accuracy difference: Adult - Pediatric
+    accuracy_diff = accuracy_adult - accuracy_pediatric
+  ) %>%
+  filter(!is.na(accuracy_diff))  # Remove subtypes without both pediatric and adult data
+
+# Add F1 difference if we have the f1_per_class_cohort data
+if (exists("f1_per_class_cohort")) {
+  # Pivot to get pediatric and adult F1 side by side
+  f1_wide <- f1_per_class_cohort %>%
+    select(subtype, cohort_type, f1) %>%
+    tidyr::pivot_wider(
+      names_from = cohort_type,
+      values_from = f1,
+      names_prefix = "f1_"
+    ) %>%
+    mutate(
+      f1_diff = f1_Adult - f1_Pediatric,
+      f1_ratio = f1_Adult/f1_Pediatric
+    )
+  
+  # Merge with performance_diff_data
+  performance_diff_data <- merge(
+    performance_diff_data,
+    f1_wide[, c("subtype", "f1_Adult", "f1_Pediatric", "f1_diff", "f1_ratio")],
+    by.x = "truth_display",
+    by.y = "subtype",
+    all.x = TRUE
+  )
+}
+
+
+```
+
+## -- Visualization: Enrichment vs Performance Gap
+
+```{r}
+# Scatter plot: enrichment ratio vs performance difference
+p_enrichment_diff <- ggplot(performance_diff_data, 
+                            aes(x = log2(enrichment_ratio), y = log(f1_ratio), 
+                                color = enrichment_class, 
+                                size = n_pediatric + n_adult)) +
+  geom_point(alpha = 0.7) +
+  geom_text(aes(label = truth_display), hjust = -0.1, vjust = 0.5, 
+            size = 3, show.legend = FALSE) +
+  geom_hline(yintercept = 0, linetype = "dashed", alpha = 0.5, color = "black") +
+  geom_vline(xintercept = 0, linetype = "dashed", alpha = 0.5, color = "black") +
+  scale_color_manual(
+    values = c("Pediatric-enriched" = "#fd7f6f", 
+               "Adult-enriched" = "#7eb0d5",
+               "Similar" = "gray60"),
+    name = "Enrichment"
+  ) +
+  scale_size_continuous(range = c(2, 10), name = "Total Samples") +
+  theme_bw() +
+  labs(
+    title = "Subtype Enrichment vs Performance Gap (Adult - Pediatric Cohorts)",
+    subtitle = "Does the model perform better on adult cohorts for adult-enriched subtypes?",
+    x = "Log2(Pediatric/Adult Enrichment Ratio)\n← Adult-enriched | Pediatric-enriched →",
+    y = "Log2(F1 Adult/Pediatric Ratio)\n← Pediatric performance higher | Adult performance higher →"
+  ) +
+  theme(legend.position = "bottom",
+        plot.title = element_text(size = 12, face = "bold"),
+        plot.subtitle = element_text(size = 9)) +
+  xlim(-2,
+       3)
+
+print(p_enrichment_diff)
+ggsave("../writing/figures/enrichment_vs_performance_gap.png", p_enrichment_diff, 
+       width = 11, height = 8, dpi = 300)
+```
+
+# Ensemble Weights Analysis
+
+##  --CV Weights Visualization
+
+```{r}
+# Read global and OvR ensemble weights
+df_global <- read.csv("../data/out/inner_cv/ensemble_weights/ensemble_weights/cv/global_ensemble_weights_used.csv")
+
+# Select weight columns and fold info from global weights
+df_global_weights <- df_global %>%
+  dplyr::select(fold, svm_weight, xgb_weight, nn_weight) %>%
+  tidyr::pivot_longer(
+    cols = c(svm_weight, xgb_weight, nn_weight),
+    names_to = "model",
+    values_to = "weight"
+  )
+
+# Combine both datasets
+df_long <- df_global_weights
+
+# Tidy model names
+df_long$model <- gsub("_weight", "", df_long$model)
+df_long$model <- gsub("xgb", "XGBoost", df_long$model, ignore.case = TRUE)
+df_long$model <- gsub("svm", "SVM", df_long$model, ignore.case = TRUE)
+df_long$model <- gsub("nn", "DNN", df_long$model, ignore.case = TRUE)
+
+# Convert fold to factor
+df_long$fold <- factor(paste0("Fold ", df_long$fold))
+df_long$weight <- as.numeric(df_long$weight)
+
+# Create boxplot with individual points
+p_weights_cv <- ggplot(df_long, aes(x = model, y = weight)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+  geom_jitter(aes(color = fold), width = 0.2, size = 2, alpha = 0.6) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(
+    title = "CV: Global ensemble weights distribution (Global + OvR)",
+    x = "Model",
+    y = "Weight",
+    color = "Fold"
+  ) +
+  ylim(0, 1)
+
+p_weights_cv
+ggsave('../writing/figures/weights_per_fold_cv.png', p_weights_cv, width = 10, height = 6, dpi = 300)
+```
+
+##  --LOSO Weights visualisation
+
+```{r}
+# Read global and OvR ensemble weights
+df_global <- read.csv("../data/out/inner_cv/ensemble_weights/ensemble_weights/loso/global_ensemble_weights_used.csv")
+
+# Select weight columns and fold info from global weights
+df_global_weights <- df_global %>%
+  dplyr::select(fold, svm_weight, xgb_weight, nn_weight) %>%
+  tidyr::pivot_longer(
+    cols = c(svm_weight, xgb_weight, nn_weight),
+    names_to = "model",
+    values_to = "weight"
+  )
+
+# Combine both datasets
+df_long <- df_global_weights
+
+# Tidy model names
+df_long$model <- gsub("_weight", "", df_long$model)
+df_long$model <- gsub("xgb", "XGBoost", df_long$model, ignore.case = TRUE)
+df_long$model <- gsub("svm", "SVM", df_long$model, ignore.case = TRUE)
+df_long$model <- gsub("nn", "DNN", df_long$model, ignore.case = TRUE)
+
+# Convert fold to factor
+df_long$fold <- factor(paste0("Fold ", df_long$fold))
+df_long$weight <- as.numeric(df_long$weight)
+
+# Create boxplot with individual points
+p_weights_loso <- ggplot(df_long, aes(x = model, y = weight)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+  geom_jitter(aes(color = fold), width = 0.2, size = 2, alpha = 0.6) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(
+    title = "LOSO: Global ensemble weights distribution",
+    x = "Model",
+    y = "Weight",
+    color = "Fold"
+  ) +
+  ylim(0, 1)
+
+p_weights_loso
+ggsave('../writing/figures/weights_per_fold_loso.png', p_weights_loso, width = 10, height = 6, dpi = 300)
+```
+
+# Probability Cutoffs Analysis
+
+###  --CV Rejection Summary
+
+```{r}
+outer_cv_results$rejection_summary$cv$summary_stats
+
+outer_cv_results$rejection_summary$loso$summary_stats
+```
+
+###  --Cutoff Visualization
+
+```{r}
+df_rej <- outer_cv_results$rejection_summary$cv$detailed_results
+
+p_rej <- ggplot(df_rej) +
+  geom_boxplot(aes(x = model, y = prob_cutoff)) +
+  #geom_line(linewidth = 1, aes(x = model, y = weight, color = fold, group = fold)) +
+  geom_point(size = 3, aes(x = model, y = prob_cutoff, color = fold, group = fold)) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(
+    title = "CV: Probability cutoffs across models and folds",
+    x = "Model",
+    y = "Probability cutoff",
+    color = "Fold"
+  ) 
+p_rej
+```
+
+# Validation Cohort Analysis (MLL Lab)
+
+##  --Load and Process MLL Lab Data
+
+```{r}
+MLL_lab <- read.csv("../data/MLL_lab/20231017_SampleMetadata.csv", sep = ";")
+MLL_lab_truth <- MLL_lab$ICC_2022
+MLL_lab_pred_df <- read.csv("../data/MLL_lab/STAR_AML_MLLlab_predictions/STAR_AML_MLLlab_Global_Ensemble_probability_matrix.csv")
+
+map_truth_to_canonical <- function(truth_labels) {
+  mapping <- c(
+    "AML-MR_cyto" = "AML with MDS-related cytogenetic abnormalities",
+    "AML-MR_mut" = "AML with MDS-related gene mutations",
+    "AML-CEBPA" = "AML with in-frame bZIP CEBPA",
+    "AML-CBFB::MYH11" = "AML with inv(16)/t(16;16)/CBFB::MYH11",
+    "AML-NPM1" = "AML with mutated NPM1",
+    "AML-TP53" = "AML with mutated TP53",
+    "AML-DEK::NUP214" = "AML with t(6;9)/DEK::NUP214",
+    "AML-RUNX1::RUNX1T1" = "AML with t(8;21)/RUNX1::RUNX1T1",
+    "AML-KMT2A::MLLT3" = "AML with t(9;11)/MLLT3::KMT2A",
+    "APL-PML::RARA" = "APL, t(15;17)/PML::RARA",
+    "AML-GATA2::MECOM" = "MECOM rearrangements",
+    "AML-otherMECOM" = "MECOM rearrangements"
+  )
+  
+  sapply(truth_labels, function(x) {
+    if (x %in% names(mapping)) {
+      return(mapping[x])
+    } else {
+      return(x)  # Return NA for unmapped labels
+    }
+  }, USE.NAMES = FALSE)
+}
+MLL_lab_truth <- map_truth_to_canonical(MLL_lab_truth)
+MLL_lab_truth[grepl("MDS|MECOM|TP53", MLL_lab_truth)] <- "AML MDS or MECOM"
+MLL_lab_truth[grepl("KMT2A",MLL_lab_truth) & !grepl("MLLT3", MLL_lab_truth)] <- "Other KMT2A"
+MLL_lab_truth <- make.names(MLL_lab_truth)
+MLL_lab_truth <- factor(MLL_lab_truth, levels = unique(MLL_lab_truth))
+
+MLL_lab_predictions <- colnames(MLL_lab_pred_df[,-1])[apply(MLL_lab_pred_df[,-1], 1, which.max)]
+MLL_lab_predictions[grepl("MDS|MECOM|TP53", MLL_lab_predictions)]<- "AML MDS or MECOM"
+MLL_lab_predictions[grepl("KMT2A",MLL_lab_predictions) & !grepl("MLLT3", MLL_lab_predictions)] <- "Other KMT2A"
+MLL_lab_predictions[grepl("KAT6A|ETV6|NUP98", MLL_lab_predictions)]<- "AML-other rare transloc"
+MLL_lab_predictions <- make.names(MLL_lab_predictions)
+MLL_lab_predictions <- gsub("_", ".", MLL_lab_predictions)
+MLL_lab_predictions <- factor(MLL_lab_predictions, levels = unique(MLL_lab_truth))
+```
+
+##  --Table 2: MLL Lab Cohort Distribution
+
+```{r results='asis'}
+# Create Table 2 for MLL lab data - matching format of Table 1
+library(dplyr)
+library(knitr)
+library(kableExtra)
+
+# Create data frame for MLL lab subtypes
+MLL_lab_df <- data.frame(
+  Subtype = MLL_lab_truth,
+  Cohort = "MLL Munich",
+  stringsAsFactors = FALSE
+)
+
+# Count samples per subtype
+MLL_lab_counts <- as.data.frame(table(MLL_lab_df$Subtype))
+colnames(MLL_lab_counts) <- c("Subtype", "MLL Munich")
+
+# Sort by count (high to low)
+MLL_lab_counts <- MLL_lab_counts[order(-MLL_lab_counts$`MLL Munich`), ]
+
+# Clean up subtype names for display
+MLL_lab_counts$Subtype <- as.character(MLL_lab_counts$Subtype)
+MLL_lab_counts$Subtype <- gsub("\\.", " ", MLL_lab_counts$Subtype)
+MLL_lab_counts$Subtype <- gsub("AML with inv 16  t 16 16  CBFB  MYH11", "CBFB::MYH11", MLL_lab_counts$Subtype)
+MLL_lab_counts$Subtype <- gsub("APL  t 15 17  PML  RARA", "PML::RARA", MLL_lab_counts$Subtype)
+MLL_lab_counts$Subtype <- gsub("AML with t 6 9  DEK  NUP214", "DEK::NUP214", MLL_lab_counts$Subtype)
+MLL_lab_counts$Subtype <- gsub("AML with mutated NPM1", "Mutated NPM1", MLL_lab_counts$Subtype)
+MLL_lab_counts$Subtype <- gsub("AML with t 8 21  RUNX1  RUNX1T1", "RUNX1::RUNX1T1", MLL_lab_counts$Subtype)
+MLL_lab_counts$Subtype <- gsub("AML with in frame bZIP CEBPA", "CEBPA bZIP in-frame", MLL_lab_counts$Subtype)
+MLL_lab_counts$Subtype <- gsub("AML with t 9 11  MLLT3  KMT2A", "MLLT3::KMT2A", MLL_lab_counts$Subtype)
+MLL_lab_counts$Subtype <- gsub("AML MDS or MECOM", "MDS-related and MECOM rearrangement", MLL_lab_counts$Subtype)
+
+# Add total row
+total_row <- data.frame(
+  Subtype = "Total",
+  `MLL Munich` = sum(MLL_lab_counts$`MLL Munich`),
+  stringsAsFactors = FALSE
+)
+colnames(total_row) <- c("Subtype", "MLL Munich")
+MLL_lab_counts_with_total <- rbind(MLL_lab_counts, total_row)
+
+# Create formatted table matching Table 1 style
+mll_table <- kable(MLL_lab_counts_with_total, 
+      format = "html",
+      caption = "Table 2: Distribution of Leukemia Subtypes in MLL Lab Cohort",
+      row.names = FALSE, 
+      escape = FALSE) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "condensed"),
+    full_width = FALSE,
+    position = "left"
+  ) %>%
+  row_spec(nrow(MLL_lab_counts_with_total), bold = TRUE, background = "#e6f2ff") # %>%
+  #add_header_above(c(" " = 1, "Adult Cohort" = 1))
+
+mll_table
+save_kable(mll_table, "../writing/tables/table2.png", zoom = 2)
+```
+
+##  --MLL Lab Performance Metrics
+
+###  --Overall Performance (No Cutoff)
+
+```{r}
+res_MLL <- caret::confusionMatrix(MLL_lab_predictions[MLL_lab_truth != "AML..NOS"], MLL_lab_truth[MLL_lab_truth != "AML..NOS"])
+n <- length(MLL_lab_truth[MLL_lab_truth != "AML..NOS"])
+n
+round(res_MLL$overall, 3)
+```
+
+###  --Performance with Probability Cutoff (0.38)
+
+```{r}
+cutoff <- read.csv("../data/out/final_train_test/cutoffs/train_test_cutoffs.csv")
+MLL_lab_predictions_passes <- apply(MLL_lab_pred_df[,-1], 1, function(x) max(x) > cutoff$prob_cutoff[cutoff$model == "Global_Optimized" & cutoff$source == "cv"])
+
+res_MLL_cutoff <- caret::confusionMatrix(MLL_lab_predictions[MLL_lab_truth != "AML..NOS" & MLL_lab_predictions_passes], MLL_lab_truth[MLL_lab_truth != "AML..NOS" & MLL_lab_predictions_passes])
+
+perc_rej <- 100 - sum(MLL_lab_predictions_passes & MLL_lab_truth != "AML..NOS") / n * 100 
+round(perc_rej, 3)
+round(res_MLL_cutoff$overall, 3)
+```
+

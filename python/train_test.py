@@ -1453,6 +1453,279 @@ def run_outer_cv_loso(
     df_parallel_results = pd.DataFrame(all_results)
     return df_parallel_results
 
+###################################################################################
+# Pipeline management functions                                                   #
+###################################################################################
+
+def get_or_create_pipeline(X, study_labels, pipe, n_genes, pipelines_dir):
+    """
+    Get an existing fitted pipeline or create and save a new one.
+    Pipeline caching is based only on n_genes since preprocessing is identical
+    across different models, fold types, and multiclass strategies.
+    
+    Args:
+        X: Feature matrix
+        study_labels: Study labels for each sample
+        pipe: Base pipeline to clone and fit
+        n_genes: Number of genes for feature selection
+        pipelines_dir: Directory to save/load pipelines
+        
+    Returns:
+        Fitted pipeline and processed data
+    """
+    import os
+    import joblib
+    from pathlib import Path
+    
+    # Create pipelines directory if it doesn't exist
+    os.makedirs(pipelines_dir, exist_ok=True)
+    
+    # Create pipeline filename based only on n_genes
+    pipeline_filename = f"pipeline_ngenes_{n_genes}.pkl"
+    pipeline_path = os.path.join(pipelines_dir, pipeline_filename)
+    
+    # Check if pipeline already exists
+    if os.path.exists(pipeline_path):
+        print(f"  Loading existing pipeline for n_genes={n_genes}: {pipeline_path}")
+        fitted_pipeline = joblib.load(pipeline_path)
+        X_processed = fitted_pipeline.transform(X).astype(np.float32)
+    else:
+        print(f"  Creating new pipeline for n_genes={n_genes}: {pipeline_path}")
+        # Clone and fit new pipeline
+        fitted_pipeline = clone(pipe)
+        X_processed = fitted_pipeline.fit_transform(
+            X,
+            feature_selection__study_per_patient=study_labels,
+            feature_selection__n_genes=n_genes,
+        ).astype(np.float32)
+        
+        # Save the fitted pipeline
+        joblib.dump(fitted_pipeline, pipeline_path)
+        print(f"  Saved pipeline: {pipeline_path}")
+    
+    return fitted_pipeline, X_processed
+
+def get_pipeline_cache_dir():
+    """
+    Get the directory for caching fitted pipelines.
+    Pipelines are cached by n_genes only, making them reusable across
+    different models, fold types, and multiclass strategies.
+    
+    Returns:
+        Path to pipeline cache directory (data/out/final_models/pipelines)
+    """
+    from pathlib import Path
+    # Get the project root directory (parent of python directory)
+    project_root = Path(__file__).resolve().parent.parent
+    return os.path.join(project_root, "data", "out", "final_models", "pipelines")
+
+###################################################################################
+# Final model training functions                                                  #
+###################################################################################
+
+def train_final_model_standard(X, y, study_labels, model, pipe, best_params, model_type="any", pipelines_dir=None):
+    """
+    Train a final model using standard multiclass classification.
+    
+    Args:
+        X: Feature matrix
+        y: Target labels
+        study_labels: Study labels for each sample
+        model: Model class to use
+        pipe: Preprocessing pipeline
+        best_params: Best parameters from train/test analysis
+        model_type: Type of model being trained
+        pipelines_dir: Directory for caching fitted pipelines (optional)
+        
+    Returns:
+        List of tuples (model_info, trained_model)
+    """
+    print("Training final standard multiclass model...")
+    
+    # Get the best parameters (should be one row for standard classification)
+    if len(best_params) != 1:
+        print(f"Warning: Expected 1 parameter set for standard classification, got {len(best_params)}. Using first one.")
+    
+    params = best_params.iloc[0]["params"]
+    params = ast.literal_eval(params) if isinstance(params, str) else params
+    
+    # Extract n_genes and prepare data
+    n_genes = params.pop("n_genes")
+    
+    # Use cached pipeline if available
+    if pipelines_dir is not None:
+        print(f"  Using pipeline cache directory: {pipelines_dir}")
+        pipe_clone, X_processed = get_or_create_pipeline(
+            X, study_labels, pipe, n_genes, pipelines_dir
+        )
+    else:
+        # Fallback to original method if no cache directory provided
+        print(f"  Fitting new pipeline for n_genes={n_genes}")
+        pipe_clone = clone(pipe)
+        X_processed = pipe_clone.fit_transform(
+            X,
+            feature_selection__study_per_patient=study_labels,
+            feature_selection__n_genes=n_genes,
+        ).astype(np.float32)
+    
+    # Create label encoder to map labels to consecutive integers
+    label_encoder = LabelEncoder()
+    y_encoded = label_encoder.fit_transform(y)
+    
+    # Create and train the model
+    clf = model(**params)
+    
+    if model_type == "NN":
+        # For neural networks, use a portion of data for validation monitoring
+        from sklearn.model_selection import train_test_split
+        X_train, X_val, y_train, y_val = train_test_split(
+            X_processed, y_encoded, test_size=0.2, random_state=42, stratify=y_encoded
+        )
+        
+        best_epoch = params.get("best_epoch", None)
+        if best_epoch is None:
+            print("Warning: No best_epoch found in parameters. Training with default epochs.")
+            clf.fit(X_train, y_train, validation_data=(X_val, y_val))
+        else:
+            clf.fit(X_train, y_train, validation_data=(X_val, y_val), epochs=best_epoch)
+        
+        # Retrain on full data with best epoch
+        clf_final = model(**params)
+        clf_final.fit(X_processed, y_encoded, epochs=best_epoch)
+        clf = clf_final
+    else:
+        clf.fit(X_processed, y_encoded)
+    
+    # Store model info
+    model_info = {
+        "params": params,
+        "n_genes": n_genes,
+        "classes": label_encoder.classes_.tolist(),
+        "preprocessing_pipeline": pipe_clone,
+        "label_encoder": label_encoder
+    }
+    
+    return [(model_info, clf)]
+
+def train_final_model_ovr(X, y, study_labels, model, pipe, best_params, model_type="any", pipelines_dir=None):
+    """
+    Train final models using One-vs-Rest classification.
+    
+    Args:
+        X: Feature matrix
+        y: Target labels  
+        study_labels: Study labels for each sample
+        model: Model class to use
+        pipe: Preprocessing pipeline
+        best_params: Best parameters from train/test analysis
+        model_type: Type of model being trained
+        pipelines_dir: Directory for caching fitted pipelines (optional)
+        
+    Returns:
+        List of tuples (model_info, trained_model)
+    """
+    print("Training final One-vs-Rest models...")
+    
+    trained_models = []
+    classes = np.unique(y)
+    
+    # Get unique n_genes values to prepare pipelines
+    n_genes_values = set()
+    for class_val in classes:
+        class_params = best_params[best_params["class"] == class_val]
+        if len(class_params) > 0:
+            params = class_params.iloc[0]["params"]
+            params = ast.literal_eval(params) if isinstance(params, str) else params
+            n_genes_values.add(params["n_genes"])
+    
+    # Prepare pipelines for all unique n_genes values
+    pipelines_cache = {}
+    processed_data_cache = {}
+    
+    if pipelines_dir is not None:
+        print(f"  Using pipeline cache directory: {pipelines_dir}")
+        for n_genes in n_genes_values:
+            fitted_pipeline, X_processed = get_or_create_pipeline(
+                X, study_labels, pipe, n_genes, pipelines_dir
+            )
+            pipelines_cache[n_genes] = fitted_pipeline
+            processed_data_cache[n_genes] = X_processed
+    
+    for class_val in classes:
+        print(f"  Training model for class {class_val}...")
+        
+        # Find best parameters for this class
+        class_params = best_params[best_params["class"] == class_val]
+        if len(class_params) == 0:
+            print(f"    Warning: No parameters found for class {class_val}, skipping...")
+            continue
+        
+        params = class_params.iloc[0]["params"]
+        params = ast.literal_eval(params) if isinstance(params, str) else params
+        
+        # Extract n_genes and prepare data
+        n_genes = params.pop("n_genes")
+        
+        # Use cached pipeline and processed data if available
+        if pipelines_dir is not None and n_genes in processed_data_cache:
+            print(f"    Using cached pipeline for n_genes={n_genes}")
+            fitted_pipeline = pipelines_cache[n_genes]
+            X_processed = processed_data_cache[n_genes]
+        else:
+            # Fallback to original method if no cache directory provided
+            print(f"    Fitting new pipeline for n_genes={n_genes}")
+            fitted_pipeline = clone(pipe)
+            X_processed = fitted_pipeline.fit_transform(
+                X,
+                feature_selection__study_per_patient=study_labels,
+                feature_selection__n_genes=n_genes,
+            ).astype(np.float32)
+        
+        # Create binary labels (1 for target class, 0 for others)
+        y_binary = (y == class_val).astype(np.int32)
+        
+        # Create and train the model
+        clf = model(**params)
+        clf.fit(X_processed, y_binary)
+        
+        # Store model info
+        model_info = {
+            "class": class_val,
+            "params": params,
+            "n_genes": n_genes,
+            "preprocessing_pipeline": fitted_pipeline
+        }
+        
+        trained_models.append((model_info, clf))
+    
+    return trained_models
+
+def train_final_models(X, y, study_labels, model, pipe, best_params, multi_type="standard", model_type="any", pipelines_dir=None):
+    """
+    Train final models based on the multiclass strategy.
+    
+    Args:
+        X: Feature matrix
+        y: Target labels
+        study_labels: Study labels for each sample
+        model: Model class to use
+        pipe: Preprocessing pipeline
+        best_params: Best parameters from train/test analysis
+        multi_type: Multiclass strategy ("standard", "OvR", "OvO")
+        model_type: Type of model being trained
+        pipelines_dir: Directory for caching fitted pipelines (optional)
+        
+    Returns:
+        List of tuples (model_info, trained_model)
+    """
+    # Dispatch table for training functions
+    if multi_type == "standard":
+        return train_final_model_standard(X, y, study_labels, model, pipe, best_params, model_type, pipelines_dir)
+    elif multi_type == "OvR":
+        return train_final_model_ovr(X, y, study_labels, model, pipe, best_params, model_type, pipelines_dir)
+    else:
+        raise ValueError(f"Unsupported multiclass strategy: {multi_type}")
+
 # old
 """
 from sklearn.model_selection import cross_validate
