@@ -1,9 +1,9 @@
 # =============================================================================
 # Outer Cross-Validation Analysis for Machine Learning Models
 # =============================================================================
-# This script analyzes outer cross-validation results for SVM, XGBoost, and 
+# This script analyzes outer cross-validation results for SVM, XGBoost, and
 # Neural Network models, generates final prediction probability matrices,
-# performs ensemble analysis using optimized weights from inner CV, and 
+# performs ensemble analysis using optimized weights from inner CV, and
 # evaluates final model performance.
 # =============================================================================
 
@@ -16,7 +16,7 @@ OUTER_MODEL_CONFIGS <- list(
   svm = list(
     classification_type = "OvR",
     file_paths = list(
-      cv = "../data/out/outer_cv/SVM_n10/SVM_outer_cv_CV_OvR_20250821_0926.csv",
+      cv = "../data/out/outer_cv/SVM_n10//SVM_outer_cv_CV_OvR_20250821_0926.csv",
       loso = "../data/out/outer_cv/SVM_n10/SVM_outer_cv_loso_OvR_20250821_0929.csv"
     )
   ),
@@ -51,16 +51,16 @@ DATA_FILTERS <- list(
   )
 )
 # Base directory for ensemble weights
-WEIGHTS_BASE_DIR <- "inner_cv_best_params_n10/ensemble_weights_20aug/ensemble_weights"
+WEIGHTS_BASE_DIR <- "../data/out/inner_cv/ensemble_weights/ensemble_weights"
 
 # Base directory for rejection cut offs
-REJECTION_BASE_DIR <- "inner_cv_best_params_n10/cutoffs_20aug"
+REJECTION_BASE_DIR <- "../data/out/inner_cv/cutoffs"
 
 # =============================================================================
 # Source Utility Functions
 # =============================================================================
 
-source("R/utility_functions.R")
+source("utility_functions.R")
 
 # =============================================================================
 # Class Modification Functions
@@ -85,19 +85,19 @@ modify_classes <- function(vector) {
 #' @return Data frame with outer CV results
 load_outer_cv_results <- function(file_path, classification_type) {
   cat(sprintf("Loading outer CV results from: %s\n", file_path))
-  
+
   if (!file.exists(file_path)) {
     warning(sprintf("File does not exist: %s", file_path))
     return(NULL)
   }
-  
+
   results <- safe_read_file(file_path, function(f) data.frame(data.table::fread(f, sep = ","), row.names = 1))
-  
+
   if (is.null(results)) {
     warning(sprintf("Failed to load file: %s", file_path))
     return(NULL)
   }
-  
+
   # For One-vs-Rest, add class labels if not present
   if (classification_type == "OvR" && !"class_label" %in% colnames(results)) {
     # Load label mapping to add class labels
@@ -106,70 +106,135 @@ load_outer_cv_results <- function(file_path, classification_type) {
       results$class_label <- label_mapping$Label[results$class + 1]
     }
   }
-  
+
   cat(sprintf("  Loaded %d rows of outer CV results\n", nrow(results)))
   return(results)
+}
+
+#' Filter samples to only include those with classes present in training
+#' @param prob_matrix Probability matrix with y, outer_fold, and sample_indices columns
+#' @param training_classes Vector of class labels that were in the training set
+#' @param fold_id Current fold identifier for logging
+#' @return Filtered probability matrix and statistics
+filter_samples_by_training_classes <- function(prob_matrix, training_classes, fold_id) {
+  if (is.null(prob_matrix) || nrow(prob_matrix) == 0) {
+    return(list(filtered_matrix = prob_matrix, stats = NULL))
+  }
+
+  # Get true labels
+  true_labels <- prob_matrix$y
+
+  # Clean class names for comparison (make.names is applied to both)
+  training_classes_clean <- make.names(training_classes)
+
+  # Create mask for samples with classes in training
+  valid_mask <- true_labels %in% training_classes_clean
+
+  # Calculate statistics
+  n_total <- nrow(prob_matrix)
+  n_filtered <- sum(!valid_mask)
+  n_kept <- sum(valid_mask)
+
+  # Get classes that were in test but not in training
+  unseen_classes <- unique(true_labels[!valid_mask])
+
+  # Log filtering information
+  if (n_filtered > 0) {
+    cat(sprintf("    Fold %s: Filtered %d/%d samples (%.1f%%) with classes not in training\n",
+                fold_id, n_filtered, n_total, 100 * n_filtered / n_total))
+    cat(sprintf("      Classes in test but not in training: %s\n",
+                paste(unseen_classes, collapse = ", ")))
+  } else {
+    cat(sprintf("    Fold %s: All %d samples have classes present in training\n",
+                fold_id, n_total))
+  }
+
+  # Filter the matrix
+  filtered_matrix <- prob_matrix[valid_mask, , drop = FALSE]
+
+  # Return filtered matrix and statistics
+  stats <- data.frame(
+    fold = fold_id,
+    n_total = n_total,
+    n_kept = n_kept,
+    n_filtered = n_filtered,
+    pct_filtered = 100 * n_filtered / n_total,
+    unseen_classes = paste(unseen_classes, collapse = "; "),
+    stringsAsFactors = FALSE
+  )
+
+  return(list(
+    filtered_matrix = filtered_matrix,
+    stats = stats
+  ))
 }
 
 #' Generate outer CV probability matrices for One-vs-Rest classification
 #' @param outer_cv_results Outer CV results data frame
 #' @param label_mapping Label mapping data frame
-#' @return List of probability matrices organized by outer fold
-generate_outer_ovr_probability_matrices <- function(outer_cv_results, label_mapping) {
+#' @param filter_unseen_classes Whether to filter samples with classes not in training (default: TRUE)
+#' @return List of probability matrices organized by outer fold (and filtering statistics if filtered)
+generate_outer_ovr_probability_matrices <- function(outer_cv_results, label_mapping, filter_unseen_classes = TRUE) {
   cat("Generating outer One-vs-Rest probability matrices...\n")
-  
+
+  if (filter_unseen_classes) {
+    cat("  Filtering samples with classes not present in training set...\n")
+  }
+
   outer_fold_ids <- unique(outer_cv_results$outer_fold)
   probability_matrices <- list()
-  
+  filtering_stats <- list()
+
   for (outer_fold_id in outer_fold_ids) {
     cat(sprintf("  Processing outer fold %s...\n", as.character(outer_fold_id)))
-    
+
     outer_fold_data <- outer_cv_results[outer_cv_results$outer_fold == outer_fold_id, ]
+    # class_labels contains the classes that were in the training set (OvR only creates models for training classes)
     class_labels <- unique(outer_fold_data$class_label)
-    
+
     # Skip if no data
     if (nrow(outer_fold_data) == 0) {
       next
     }
-    
+
     # Get the number of samples from the first row
     first_row <- outer_fold_data[1, ]
     num_samples <- length(parse_numeric_string(first_row$preds_prob))
-    
+
     if (num_samples == 0) {
       warning(sprintf("No valid predictions for outer fold", outer_fold_id))
       next
     }
-    
+
     # Initialize probability matrix
     probability_matrix <- matrix(NA, nrow = num_samples, ncol = length(class_labels))
     colnames(probability_matrix) <- class_labels
     true_labels_vector <- rep(NA, num_samples)
-    
+
     # Fill probability matrix for each class
     for (j in seq_along(class_labels)) {
       current_class_label <- class_labels[j]
       class_row <- outer_fold_data[outer_fold_data$class_label == current_class_label, ]
-      
+
       if (nrow(class_row) == 0) next
-      
+
       # Extract probabilities for this class
       probs <- parse_numeric_string(class_row$preds_prob)
       if (length(probs) == num_samples) {
         probability_matrix[, j] <- probs
       }
-      
+
       # Extract true labels (1 = this class, 0 = not this class)
       target_values <- parse_numeric_string(class_row$y_val)
       true_labels_vector[target_values == 1] <- current_class_label
     }
-    
+
     # Skip if no true labels found
     if (all(is.na(true_labels_vector))) {
       warning(sprintf("No true labels found for outer fold %d", outer_fold_id))
       next
     }
-    
+
     # Normalize probabilities to sum to 1 for each sample
     probability_matrix <- t(apply(probability_matrix, 1, function(row) {
       if (sum(row, na.rm = TRUE) > 0) {
@@ -178,89 +243,133 @@ generate_outer_ovr_probability_matrices <- function(outer_cv_results, label_mapp
         row
       }
     }))
-    
+
     # Convert to data frame and ensure all required columns exist
     probability_matrix <- data.frame(probability_matrix)
     probability_matrix <- ensure_all_class_columns(probability_matrix, label_mapping)
-    
+
     # Add true labels and fold information
     probability_matrix$y <- make.names(true_labels_vector)
     probability_matrix$outer_fold <- outer_fold_id
-    
+
     # Store sample indices for reference
     sample_indices <- parse_numeric_string(first_row$sample_indices)
     if (length(sample_indices) == num_samples) {
       probability_matrix$sample_indices <- sample_indices
     }
-    
+
+    # Apply filtering if requested
+    if (filter_unseen_classes) {
+      filter_result <- filter_samples_by_training_classes(
+        probability_matrix,
+        class_labels,  # class_labels are the training classes for OvR
+        outer_fold_id
+      )
+      probability_matrix <- filter_result$filtered_matrix
+      if (!is.null(filter_result$stats)) {
+        filtering_stats[[as.character(outer_fold_id)]] <- filter_result$stats
+      }
+    }
+
     probability_matrices[[as.character(outer_fold_id)]] <- probability_matrix
   }
-  
-  return(probability_matrices)
+
+  # Return both matrices and filtering statistics
+  result <- list(matrices = probability_matrices)
+  if (filter_unseen_classes && length(filtering_stats) > 0) {
+    result$filtering_stats <- do.call(rbind, filtering_stats)
+  }
+
+  return(result)
 }
 
 #' Generate outer CV probability matrices for standard multiclass classification
 #' @param outer_cv_results Outer CV results data frame
 #' @param label_mapping Label mapping data frame
 #' @param filtered_subtypes Filtered leukemia subtypes
-#' @return List of probability matrices organized by outer fold
-generate_outer_standard_probability_matrices <- function(outer_cv_results, label_mapping, filtered_subtypes) {
+#' @param filter_unseen_classes Whether to filter samples with classes not in training (default: TRUE)
+#' @return List of probability matrices organized by outer fold (and filtering statistics if filtered)
+generate_outer_standard_probability_matrices <- function(outer_cv_results, label_mapping, filtered_subtypes, filter_unseen_classes = TRUE) {
   cat("Generating outer CV standard probability matrices...\n")
-  
+
+  if (filter_unseen_classes) {
+    cat("  Filtering samples with classes not present in training set...\n")
+  }
+
   outer_fold_ids <- unique(outer_cv_results$outer_fold)
   probability_matrices <- list()
-  
+  filtering_stats <- list()
+
   for (outer_fold_id in outer_fold_ids) {
     cat(sprintf("  Processing outer fold %s...\n", as.character(outer_fold_id)))
-    
+
     fold_data <- outer_cv_results[outer_cv_results$outer_fold == outer_fold_id, ]
-    
+
     if (nrow(fold_data) == 0) {
       warning(sprintf("No data for outer fold", outer_fold_id))
       next
     }
-    
+
     # Take the first (and typically only) row for this fold
     fold_row <- fold_data[1, ]
-    
-    # Extract class information
+
+    # Extract class information (these are the training classes)
     class_indices <- parse_numeric_string(fold_row$classes)
     class_labels <- label_mapping$Label[class_indices + 1]
-    
+
     # Extract sample information
     sample_indices <- parse_numeric_string(fold_row$sample_indices)
     num_samples <- length(sample_indices)
-    
+
     if (num_samples == 0) {
       warning(sprintf("No samples for outer fold %d", outer_fold_id))
       next
     }
-    
+
     # Extract prediction probabilities
     probs <- parse_numeric_string(fold_row$preds_prob)
-    
+
     if (length(probs) != num_samples * length(class_labels)) {
       warning(sprintf("Probability dimensions don't match for outer fold %d", outer_fold_id))
       next
     }
-    
+
     # Reshape probabilities into matrix (samples x classes)
     probability_matrix <- t(matrix(probs, ncol = num_samples, nrow = length(class_labels)))
     colnames(probability_matrix) <- make.names(class_labels)
-    
+
     # Convert to data frame and ensure all required columns exist
     probability_matrix <- data.frame(probability_matrix)
     probability_matrix <- ensure_all_class_columns(probability_matrix, label_mapping)
-    
+
     # Add true labels using sample indices
     probability_matrix$y <- make.names(filtered_subtypes[sample_indices + 1])
     probability_matrix$outer_fold <- outer_fold_id
     probability_matrix$sample_indices <- sample_indices
-    
+
+    # Apply filtering if requested
+    if (filter_unseen_classes) {
+      filter_result <- filter_samples_by_training_classes(
+        probability_matrix,
+        class_labels,  # class_labels are the training classes
+        outer_fold_id
+      )
+      probability_matrix <- filter_result$filtered_matrix
+      if (!is.null(filter_result$stats)) {
+        filtering_stats[[as.character(outer_fold_id)]] <- filter_result$stats
+      }
+    }
+
     probability_matrices[[as.character(outer_fold_id)]] <- probability_matrix
   }
-  
-  return(probability_matrices)
+
+  # Return both matrices and filtering statistics
+  result <- list(matrices = probability_matrices)
+  if (filter_unseen_classes && length(filtering_stats) > 0) {
+    result$filtering_stats <- do.call(rbind, filtering_stats)
+  }
+
+  return(result)
 }
 
 #' Apply ensemble weights from inner CV to outer CV probability matrices
@@ -271,65 +380,107 @@ generate_outer_standard_probability_matrices <- function(outer_cv_results, label
 #' @return List of ensemble probability matrices
 apply_ensemble_weights_to_outer_cv <- function(outer_prob_matrices, ensemble_weights_data, type = "cv", ensemble_method = "ovr") {
   cat(sprintf("Applying %s ensemble weights to outer CV results...\n", ensemble_method))
-  
+
   # Get the appropriate weights
   weights_to_use <- if (ensemble_method == "ovr") {
     ensemble_weights_data$ovr_weights
   } else {
     ensemble_weights_data$global_weights
   }
-  
+
   if (is.null(weights_to_use)) {
     warning(sprintf("No %s weights available for %s analysis", ensemble_method, type))
     return(NULL)
   }
-  
+
   # Get common folds across all models
   common_folds <- Reduce(intersect, lapply(outer_prob_matrices, function(x) names(x[[type]])))
   ensemble_matrices <- list()
-  
+
   for (fold_name in common_folds) {
     cat(sprintf("  Processing fold %s...\n", fold_name))
-    
+
     # Extract probability matrices for this fold
     svm_matrix <- outer_prob_matrices$svm[[type]][[fold_name]]
     xgb_matrix <- outer_prob_matrices$xgboost[[type]][[fold_name]]
     nn_matrix <- outer_prob_matrices$neural_net[[type]][[fold_name]]
-    
+
     # Check if all matrices exist
     if (is.null(svm_matrix) || is.null(xgb_matrix) || is.null(nn_matrix)) {
       warning(sprintf("Missing probability matrix for fold %s", fold_name))
       next
     }
-    
+
+    # Align samples across all three models (critical after filtering)
+    # Find common sample indices to ensure all models have the same samples
+    if ("sample_indices" %in% colnames(svm_matrix) &&
+        "sample_indices" %in% colnames(xgb_matrix) &&
+        "sample_indices" %in% colnames(nn_matrix)) {
+
+      svm_samples <- svm_matrix$sample_indices
+      xgb_samples <- xgb_matrix$sample_indices
+      nn_samples <- nn_matrix$sample_indices
+
+      # Find common samples
+      common_samples <- Reduce(intersect, list(svm_samples, xgb_samples, nn_samples))
+
+      if (length(common_samples) == 0) {
+        warning(sprintf("No common samples across models for fold %s, skipping", fold_name))
+        next
+      }
+
+      # Filter to common samples
+      svm_matrix <- svm_matrix[svm_matrix$sample_indices %in% common_samples, ]
+      xgb_matrix <- xgb_matrix[xgb_matrix$sample_indices %in% common_samples, ]
+      nn_matrix <- nn_matrix[nn_matrix$sample_indices %in% common_samples, ]
+
+      # Sort by sample indices to ensure alignment
+      svm_matrix <- svm_matrix[order(svm_matrix$sample_indices), ]
+      xgb_matrix <- xgb_matrix[order(xgb_matrix$sample_indices), ]
+      nn_matrix <- nn_matrix[order(nn_matrix$sample_indices), ]
+
+      # Log if samples were dropped
+      n_dropped <- length(svm_samples) - length(common_samples)
+      if (n_dropped > 0) {
+        cat(sprintf("    Aligned samples: dropped %d samples to match across models\n", n_dropped))
+      }
+    } else {
+      # If no sample_indices column, check row counts match
+      if (nrow(svm_matrix) != nrow(xgb_matrix) || nrow(svm_matrix) != nrow(nn_matrix)) {
+        warning(sprintf("Sample counts don't match for fold %s (SVM: %d, XGB: %d, NN: %d), skipping ensemble",
+                       fold_name, nrow(svm_matrix), nrow(xgb_matrix), nrow(nn_matrix)))
+        next
+      }
+    }
+
     # Manual alignment since the function expects a different structure
     truth <- svm_matrix$y
-    
+
     # Remove non-probability columns
     svm_probs <- svm_matrix[, !colnames(svm_matrix) %in% c("y", "outer_fold", "sample_indices"), drop = FALSE]
     xgb_probs <- xgb_matrix[, !colnames(xgb_matrix) %in% c("y", "outer_fold", "sample_indices"), drop = FALSE]
     nn_probs <- nn_matrix[, !colnames(nn_matrix) %in% c("y", "outer_fold", "sample_indices"), drop = FALSE]
-    
+
     # Ensure all probability columns are numeric
     svm_probs <- data.frame(lapply(svm_probs, function(x) as.numeric(as.character(x))))
     xgb_probs <- data.frame(lapply(xgb_probs, function(x) as.numeric(as.character(x))))
     nn_probs <- data.frame(lapply(nn_probs, function(x) as.numeric(as.character(x))))
-    
+
     # Get all class names
     all_classes <- unique(c(colnames(svm_probs), colnames(xgb_probs), colnames(nn_probs)))
-    
+
     # Ensure all matrices have the same columns
     for (class_name in all_classes) {
       if (!class_name %in% colnames(svm_probs)) svm_probs[[class_name]] <- 0
       if (!class_name %in% colnames(xgb_probs)) xgb_probs[[class_name]] <- 0
       if (!class_name %in% colnames(nn_probs)) nn_probs[[class_name]] <- 0
     }
-    
+
     # Reorder columns
     svm_probs <- svm_probs[, all_classes, drop = FALSE]
     xgb_probs <- xgb_probs[, all_classes, drop = FALSE]
     nn_probs <- nn_probs[, all_classes, drop = FALSE]
-    
+
     # Apply ensemble weights
     if (ensemble_method == "ovr") {
       # Use class-specific weights
@@ -341,16 +492,16 @@ apply_ensemble_weights_to_outer_cv <- function(outer_prob_matrices, ensemble_wei
           fold_weights[[gsub("Class.", "", class_name)]] <- list(weights = list(SVM = 1, XGB = 0, NN = 0))
         }
       }
-      
+
       # Initialize ensemble matrix
       ensemble_matrix <- matrix(0, nrow = nrow(svm_probs), ncol = length(all_classes))
       colnames(ensemble_matrix) <- all_classes
-      
+
       # Apply class-specific weights
       for (class_name in all_classes) {
         clean_class_name <- gsub("Class.", "", class_name)
         clean_class_name_no_dots <- gsub("\\.", "", clean_class_name)
-        
+
         # Find weights for this class
         class_weights <- NULL
         if (clean_class_name %in% names(fold_weights)) {
@@ -361,19 +512,19 @@ apply_ensemble_weights_to_outer_cv <- function(outer_prob_matrices, ensemble_wei
           # Use equal weights as fallback
           class_weights <- list(SVM = 1, XGB = 0, NN = 0)
         }
-        
+
         # Calculate weighted ensemble for this class
         # Ensure weights are numeric and handle any NA values
         svm_weight <- ifelse(is.null(class_weights$SVM) || is.na(class_weights$SVM), 1, as.numeric(class_weights$SVM))
         xgb_weight <- ifelse(is.null(class_weights$XGB) || is.na(class_weights$XGB), 1, as.numeric(class_weights$XGB))
         nn_weight <- ifelse(is.null(class_weights$NN) || is.na(class_weights$NN), 1, as.numeric(class_weights$NN))
-        
-        ensemble_matrix[, class_name] <- 
+
+        ensemble_matrix[, class_name] <-
           svm_probs[[class_name]] * svm_weight +
           xgb_probs[[class_name]] * xgb_weight +
           nn_probs[[class_name]] * nn_weight
       }
-      
+
     } else {
       # Use global weights
       fold_weights <- weights_to_use[[fold_name]]
@@ -381,25 +532,25 @@ apply_ensemble_weights_to_outer_cv <- function(outer_prob_matrices, ensemble_wei
         warning(sprintf("No global weights for fold %s, using equal weights", fold_name))
         fold_weights <- list(weights = list(SVM = 1, XGB = 0, NN = 0))
       }
-      
+
       weights <- fold_weights$weights
-      
+
       # Ensure weights are numeric and handle any NA values
       svm_weight <- ifelse(is.null(weights$SVM) || is.na(weights$SVM), 1, as.numeric(weights$SVM))
       xgb_weight <- ifelse(is.null(weights$XGB) || is.na(weights$XGB), 1, as.numeric(weights$XGB))
       nn_weight <- ifelse(is.null(weights$NN) || is.na(weights$NN), 1, as.numeric(weights$NN))
-      
+
       # Calculate weighted ensemble
       ensemble_matrix <- svm_probs * svm_weight +
                         xgb_probs * xgb_weight +
                         nn_probs * nn_weight
     }
-    
+
     # Normalize probabilities
     ensemble_matrix <- t(apply(ensemble_matrix, 1, function(row) {
       # Replace any NA or infinite values with 0
       row[is.na(row) | is.infinite(row)] <- 0
-      
+
       if (sum(row, na.rm = TRUE) > 0) {
         row / sum(row, na.rm = TRUE)
       } else {
@@ -407,10 +558,10 @@ apply_ensemble_weights_to_outer_cv <- function(outer_prob_matrices, ensemble_wei
         rep(1/length(row), length(row))
       }
     }))
-    
+
     # Convert to data frame and add metadata
     ensemble_matrix <- data.frame(ensemble_matrix)
-    
+
     # Ensure all probability columns are numeric and replace any remaining NA values
     for (col in colnames(ensemble_matrix)) {
       if (col != "y" && col != "outer_fold") {
@@ -418,19 +569,24 @@ apply_ensemble_weights_to_outer_cv <- function(outer_prob_matrices, ensemble_wei
         ensemble_matrix[[col]][is.na(ensemble_matrix[[col]])] <- 0
       }
     }
-    
+
     ensemble_matrix$y <- truth
-    
+
     # Handle fold names properly - keep as character for LOSO, convert to numeric for CV when possible
     if (type == "cv" && !is.na(suppressWarnings(as.numeric(fold_name)))) {
       ensemble_matrix$outer_fold <- as.numeric(fold_name)
     } else {
       ensemble_matrix$outer_fold <- fold_name
     }
-    
+
+    # Preserve sample indices if available (important for tracking after filtering)
+    if ("sample_indices" %in% colnames(svm_matrix)) {
+      ensemble_matrix$sample_indices <- svm_matrix$sample_indices
+    }
+
     ensemble_matrices[[fold_name]] <- ensemble_matrix
   }
-  
+
   return(ensemble_matrices)
 }
 
@@ -440,42 +596,42 @@ apply_ensemble_weights_to_outer_cv <- function(outer_prob_matrices, ensemble_wei
 #' @return List of performance results
 calculate_outer_cv_performance <- function(probability_matrices, type = "cv") {
   cat(sprintf("Calculating outer CV performance for %s...\n", toupper(type)))
-  
+
   performance_results <- list()
-  
+
   for (model_name in names(probability_matrices)) {
     if (!type %in% names(probability_matrices[[model_name]])) {
       next
     }
-    
+
     cat(sprintf("  Analyzing %s...\n", toupper(model_name)))
     model_matrices <- probability_matrices[[model_name]][[type]]
     model_performance <- list()
-    
+
     for (fold_name in names(model_matrices)) {
       prob_matrix <- model_matrices[[fold_name]]
-      
+
       # Extract true labels and predictions
       truth <- prob_matrix$y
       prob_cols <- prob_matrix[, !colnames(prob_matrix) %in% c("y", "outer_fold", "sample_indices", "study"), drop = FALSE]
-      
+
       # Get predictions (class with highest probability)
       preds <- colnames(prob_cols)[apply(prob_cols, 1, which.max)]
-      
+
       # Clean class labels
       truth <- gsub("Class.", "", truth)
       preds <- gsub("Class.", "", preds)
       truth <- modify_classes(truth)
       preds <- modify_classes(preds)
-      
+
       # Ensure all classes are represented
       all_classes <- unique(c(truth, preds))
       truth <- factor(truth, levels = all_classes)
       preds <- factor(preds, levels = all_classes)
-      
+
       # Calculate confusion matrix and metrics
       cm <- caret::confusionMatrix(preds, truth)
-      
+
       # Extract per-class metrics
       per_class_metrics <- list()
       if (!is.null(cm$byClass) && nrow(cm$byClass) > 0) {
@@ -490,9 +646,11 @@ calculate_outer_cv_performance <- function(probability_matrices, type = "cv") {
           )
         }
       }
-      
+
       model_performance[[fold_name]] <- list(
         confusion_matrix = cm,
+        predictions = preds,  # Save raw predictions
+        truth = truth,        # Save raw truth values
         kappa = as.numeric(cm$overall["Kappa"]),
         accuracy = as.numeric(cm$overall["Accuracy"]),
         balanced_accuracy = mean(cm$byClass[, "Balanced Accuracy"], na.rm = TRUE),
@@ -502,10 +660,10 @@ calculate_outer_cv_performance <- function(probability_matrices, type = "cv") {
         per_class_metrics = per_class_metrics
       )
     }
-    
+
     performance_results[[model_name]] <- model_performance
   }
-  
+
   return(performance_results)
 }
 
@@ -514,20 +672,20 @@ calculate_outer_cv_performance <- function(probability_matrices, type = "cv") {
 #' @return Data frame with summary statistics
 summarize_outer_cv_performance <- function(performance_results) {
   cat("Summarizing outer CV performance...\n")
-  
+
   summary_data <- data.frame()
-  
+
   for (model_name in names(performance_results)) {
     model_perf <- performance_results[[model_name]]
-    
+
     if (length(model_perf) == 0) next
-    
+
     # Extract metrics across folds
     kappas <- sapply(model_perf, function(x) x$kappa)
     accuracies <- sapply(model_perf, function(x) x$accuracy)
     balanced_accuracies <- sapply(model_perf, function(x) x$balanced_accuracy)
     f1_macros <- sapply(model_perf, function(x) x$f1_macro)
-    
+
     # Calculate summary statistics
     summary_row <- data.frame(
       Model = model_name,
@@ -542,13 +700,13 @@ summarize_outer_cv_performance <- function(performance_results) {
       SD_F1_Macro = sd(f1_macros, na.rm = TRUE),
       stringsAsFactors = FALSE
     )
-    
+
     summary_data <- rbind(summary_data, summary_row)
   }
-  
+
   # Sort by mean kappa (descending)
   summary_data <- summary_data[order(summary_data$Mean_Kappa, decreasing = TRUE), ]
-  
+
   return(summary_data)
 }
 
@@ -557,17 +715,17 @@ summarize_outer_cv_performance <- function(performance_results) {
 #' @return Data frame with per-class summary statistics
 summarize_per_class_performance <- function(performance_results) {
   cat("Summarizing per-class performance metrics...\n")
-  
+
   per_class_summary <- data.frame()
-  
+
   for (model_name in names(performance_results)) {
     model_perf <- performance_results[[model_name]]
-    
+
     if (length(model_perf) == 0) next
-    
+
     # Get all unique classes across all folds
     all_classes <- unique(unlist(lapply(model_perf, function(x) names(x$per_class_metrics))))
-    
+
     for (class_name in all_classes) {
       # Extract metrics for this class across all folds
       sensitivities <- numeric(0)
@@ -576,7 +734,7 @@ summarize_per_class_performance <- function(performance_results) {
       recalls <- numeric(0)
       f1_scores <- numeric(0)
       balanced_accuracies <- numeric(0)
-      
+
       for (fold_name in names(model_perf)) {
         fold_perf <- model_perf[[fold_name]]
         if (!is.null(fold_perf$per_class_metrics) && class_name %in% names(fold_perf$per_class_metrics)) {
@@ -589,7 +747,7 @@ summarize_per_class_performance <- function(performance_results) {
           balanced_accuracies <- c(balanced_accuracies, class_metrics$Balanced_Accuracy)
         }
       }
-      
+
       # Calculate summary statistics for this class
       if (length(sensitivities) > 0) {
         class_summary <- data.frame(
@@ -610,15 +768,15 @@ summarize_per_class_performance <- function(performance_results) {
           SD_Balanced_Accuracy = sd(balanced_accuracies, na.rm = TRUE),
           stringsAsFactors = FALSE
         )
-        
+
         per_class_summary <- rbind(per_class_summary, class_summary)
       }
     }
   }
-  
+
   # Sort by model and then by mean F1 score (descending)
   per_class_summary <- per_class_summary[order(per_class_summary$Model, -per_class_summary$Mean_F1), ]
-  
+
   return(per_class_summary)
 }
 
@@ -632,51 +790,34 @@ summarize_per_class_performance <- function(performance_results) {
 #' @return List containing optimal cutoffs and summary statistics
 load_optimal_cutoffs <- function(rejection_base_dir, type = "cv") {
   cat(sprintf("Loading optimal cutoffs for %s analysis...\n", toupper(type)))
-  
+
   # Load cutoffs from the main directory
   optimal_cutoffs_file <- file.path(rejection_base_dir, "cutoffs.csv")
-  
+
   if (!file.exists(optimal_cutoffs_file)) {
     warning(sprintf("Cutoffs file not found: %s", optimal_cutoffs_file))
     return(NULL)
   }
-  
+
   # Load all cutoffs and filter by type
   all_cutoffs <- safe_read_file(optimal_cutoffs_file, read.csv)
   if (is.null(all_cutoffs)) {
     warning("Failed to load cutoffs file")
     return(NULL)
   }
-  
+
   # Filter cutoffs by type
-  optimal_cutoffs <- all_cutoffs[all_cutoffs$type == type, ]
-  
+  optimal_cutoffs <- all_cutoffs[all_cutoffs$source == type, ]
+
   if (nrow(optimal_cutoffs) == 0) {
     warning(sprintf("No cutoffs found for type: %s", type))
     return(NULL)
   }
-  
+
   cat(sprintf("  Loaded %d cutoffs for %s analysis from: %s\n", nrow(optimal_cutoffs), toupper(type), optimal_cutoffs_file))
-  
-  # Calculate summary statistics
-  summary_stats <- optimal_cutoffs %>%
-    group_by(model) %>%
-    summarise(
-      mean_cutoff = mean(prob_cutoff, na.rm = TRUE),
-      sd_cutoff = sd(prob_cutoff, na.rm = TRUE),
-      mean_kappa = mean(kappa, na.rm = TRUE),
-      sd_kappa = sd(kappa, na.rm = TRUE),
-      mean_accuracy = mean(accuracy, na.rm = TRUE),
-      sd_accuracy = sd(accuracy, na.rm = TRUE),
-      mean_perc_rejected = mean(perc_rejected, na.rm = TRUE),
-      sd_perc_rejected = sd(perc_rejected, na.rm = TRUE),
-      n_folds = n(),
-      .groups = "drop"
-    )
-  
+
   return(list(
-    optimal_cutoffs = optimal_cutoffs,
-    summary_stats = summary_stats
+    optimal_cutoffs = optimal_cutoffs
   ))
 }
 
@@ -687,44 +828,48 @@ load_optimal_cutoffs <- function(rejection_base_dir, type = "cv") {
 #' @return List of rejection analysis results
 apply_rejection_analysis_to_outer_cv <- function(probability_matrices, optimal_cutoffs, type = "cv") {
   cat(sprintf("Applying rejection analysis to outer CV results for %s...\n", toupper(type)))
-  
+
   if (is.null(optimal_cutoffs) || is.null(optimal_cutoffs$optimal_cutoffs)) {
     warning("No optimal cutoffs available for rejection analysis")
     return(NULL)
   }
-  
+
   rejection_results <- list()
-  
+
   # Get unique models from optimal cutoffs
   models_with_cutoffs <- unique(optimal_cutoffs$optimal_cutoffs$model)
-  
+
   for (model_name in models_with_cutoffs) {
     cat(sprintf("  Processing %s...\n", model_name))
-    
-    # Get cutoff for this model (use mean across folds)
-    model_cutoffs <- optimal_cutoffs$optimal_cutoffs[optimal_cutoffs$optimal_cutoffs$model == model_name, ]
-    if (nrow(model_cutoffs) == 0) {
-      cat(sprintf("    No cutoffs found for %s, skipping\n", model_name))
-      next
-    }
-    
+
     # Use mean cutoff across folds
-    mean_cutoff <- mean(model_cutoffs$prob_cutoff, na.rm = TRUE)
-    cat(sprintf("    Using cutoff %.3f for %s\n", mean_cutoff, model_name))
-    
+    # mean_cutoff <- mean(model_cutoffs$prob_cutoff, na.rm = TRUE)
+    # cat(sprintf("    Using cutoff %.3f for %s\n", mean_cutoff, model_name))
+
     # Find corresponding probability matrix
     if (model_name %in% names(probability_matrices) && type %in% names(probability_matrices[[model_name]])) {
       model_matrices <- probability_matrices[[model_name]][[type]]
-      
+
       for (fold_name in names(model_matrices)) {
         prob_matrix <- model_matrices[[fold_name]]
-        
+
+        # Get cutoff for this model (use mean across inner folds)
+        mean_cutoff <- optimal_cutoffs$optimal_cutoffs[
+          optimal_cutoffs$optimal_cutoffs$model == model_name &
+            optimal_cutoffs$optimal_cutoffs$source == type &
+            optimal_cutoffs$optimal_cutoffs$outer_fold == fold_name, "mean_cutoff"
+          ]
+        if (length(mean_cutoff) == 0) {
+          cat(sprintf("    No cutoffs found for %s, skipping\n", model_name))
+          next
+        }
+
         if (!is.null(prob_matrix) && nrow(prob_matrix) > 0) {
           # Apply rejection analysis
           rejection_result <- evaluate_single_matrix_with_rejection_and_cutoff(
             prob_matrix, fold_name, model_name, type, mean_cutoff
           )
-          
+
           if (!is.null(rejection_result)) {
             rejection_results[[paste(model_name, fold_name, sep = "_")]] <- rejection_result
           }
@@ -736,16 +881,20 @@ apply_rejection_analysis_to_outer_cv <- function(probability_matrices, optimal_c
       for (ensemble_type in c("OvR_Ensemble", "Global_Optimized")) {
         if (ensemble_type %in% names(probability_matrices) && type %in% names(probability_matrices[[ensemble_type]])) {
           ensemble_matrices <- probability_matrices[[ensemble_type]][[type]]
-          
+
           for (fold_name in names(ensemble_matrices)) {
             prob_matrix <- ensemble_matrices[[fold_name]]
-            
+            mean_cutoff <- optimal_cutoffs$optimal_cutoffs[
+              optimal_cutoffs$optimal_cutoffs$model == ensemble_type &
+                optimal_cutoffs$optimal_cutoffs$source == type &
+                optimal_cutoffs$optimal_cutoffs$outer_fold == fold_name, "mean_cutoff"
+            ]
             if (!is.null(prob_matrix) && nrow(prob_matrix) > 0) {
               # Apply rejection analysis
               rejection_result <- evaluate_single_matrix_with_rejection_and_cutoff(
                 prob_matrix, fold_name, model_name, type, mean_cutoff
               )
-              
+
               if (!is.null(rejection_result)) {
                 rejection_results[[paste(model_name, fold_name, sep = "_")]] <- rejection_result
               }
@@ -754,13 +903,13 @@ apply_rejection_analysis_to_outer_cv <- function(probability_matrices, optimal_c
           }
         }
       }
-      
+
       if (!ensemble_found) {
         cat(sprintf("    No probability matrices found for %s, skipping\n", model_name))
       }
     }
   }
-  
+
   return(rejection_results)
 }
 
@@ -775,43 +924,43 @@ evaluate_single_matrix_with_rejection_and_cutoff <- function(prob_matrix, fold_n
   # Extract true labels and remove from probability matrix
   truth <- prob_matrix$y
   prob_matrix_clean <- prob_matrix[, !colnames(prob_matrix) %in% c("y", "outer_fold", "sample_indices"), drop = FALSE]
-  
+
   # Clean class labels
   truth <- gsub("Class.", "", truth)
   truth <- modify_classes(truth)
-  
+
   # Get predictions (class with highest probability)
   pred_indices <- apply(prob_matrix_clean, 1, which.max)
   preds <- colnames(prob_matrix_clean)[pred_indices]
   preds <- gsub("Class.", "", preds)
   preds <- modify_classes(preds)
-  
+
   # Get max probabilities for each sample
   max_probs <- apply(prob_matrix_clean, 1, max)
-  
+
   # Ensure all classes are represented
   all_classes <- unique(c(truth, preds))
   truth <- factor(truth, levels = all_classes)
   preds <- factor(preds, levels = all_classes)
-  
+
   # Apply rejection using the specific cutoff
   rejected_indices <- which(max_probs < cutoff)
   accepted_indices <- which(max_probs >= cutoff)
-  
+
   # Calculate metrics for accepted samples only
   if (length(accepted_indices) == 0) {
     # If all samples are rejected, return NULL
     return(NULL)
   }
-  
+
   accepted_truth <- truth[accepted_indices]
   accepted_preds <- preds[accepted_indices]
-  
+
   # Calculate confusion matrix and metrics for accepted samples
   cm <- caret::confusionMatrix(accepted_preds, accepted_truth)
   kappa <- as.numeric(cm$overall["Kappa"])
   accuracy <- as.numeric(cm$overall["Accuracy"])
-  
+
   # Extract per-class metrics for accepted samples
   per_class_metrics <- list()
   if (!is.null(cm$byClass) && nrow(cm$byClass) > 0) {
@@ -826,7 +975,7 @@ evaluate_single_matrix_with_rejection_and_cutoff <- function(prob_matrix, fold_n
       )
     }
   }
-  
+
   # Calculate metrics for rejected samples (if any)
   rejected_accuracy <- NA
   if (length(rejected_indices) > 0) {
@@ -834,7 +983,7 @@ evaluate_single_matrix_with_rejection_and_cutoff <- function(prob_matrix, fold_n
     rejected_preds <- preds[rejected_indices]
     rejected_accuracy <- sum(rejected_truth == rejected_preds) / length(rejected_indices)
   }
-  
+
   # Return results as a list
   list(
     summary = data.frame(
@@ -861,19 +1010,19 @@ evaluate_single_matrix_with_rejection_and_cutoff <- function(prob_matrix, fold_n
 #' @return Data frame with summary statistics
 summarize_rejection_analysis <- function(rejection_results, type = "cv") {
   cat(sprintf("Summarizing rejection analysis for %s...\n", toupper(type)))
-  
+
   if (is.null(rejection_results) || length(rejection_results) == 0) {
     return(NULL)
   }
-  
+
   # Extract summary results
   all_summaries <- lapply(rejection_results, function(x) x$summary)
   all_results <- do.call(rbind, all_summaries)
-  
+
   if (nrow(all_results) == 0) {
     return(NULL)
   }
-  
+
   # Calculate summary statistics across folds for each model
   summary_stats <- all_results %>%
     group_by(model) %>%
@@ -891,16 +1040,16 @@ summarize_rejection_analysis <- function(rejection_results, type = "cv") {
       n_folds = n(),
       .groups = "drop"
     )
-  
+
   # Extract and summarize per-class metrics
   per_class_summary <- data.frame()
-  
+
   for (model_name in unique(all_results$model)) {
     model_results <- rejection_results[grepl(paste0("^", model_name, "_"), names(rejection_results))]
-    
+
     # Get all unique classes across all folds for this model
     all_classes <- unique(unlist(lapply(model_results, function(x) names(x$per_class_metrics))))
-    
+
     for (class_name in all_classes) {
       # Extract metrics for this class across all folds
       sensitivities <- numeric(0)
@@ -909,7 +1058,7 @@ summarize_rejection_analysis <- function(rejection_results, type = "cv") {
       recalls <- numeric(0)
       f1_scores <- numeric(0)
       balanced_accuracies <- numeric(0)
-      
+
       for (fold_result in model_results) {
         if (!is.null(fold_result$per_class_metrics) && class_name %in% names(fold_result$per_class_metrics)) {
           class_metrics <- fold_result$per_class_metrics[[class_name]]
@@ -921,7 +1070,7 @@ summarize_rejection_analysis <- function(rejection_results, type = "cv") {
           balanced_accuracies <- c(balanced_accuracies, class_metrics$Balanced_Accuracy)
         }
       }
-      
+
       # Calculate summary statistics for this class
       if (length(sensitivities) > 0) {
         class_summary <- data.frame(
@@ -943,17 +1092,17 @@ summarize_rejection_analysis <- function(rejection_results, type = "cv") {
           SD_Balanced_Accuracy = sd(balanced_accuracies, na.rm = TRUE),
           stringsAsFactors = FALSE
         )
-        
+
         per_class_summary <- rbind(per_class_summary, class_summary)
       }
     }
   }
-  
+
   # Sort by model and then by mean F1 score (descending)
   if (nrow(per_class_summary) > 0) {
     per_class_summary <- per_class_summary[order(per_class_summary$Model, -per_class_summary$Mean_F1), ]
   }
-  
+
   return(list(
     detailed_results = all_results,
     summary_stats = summary_stats,
@@ -969,32 +1118,32 @@ summarize_rejection_analysis <- function(rejection_results, type = "cv") {
 #' @return Data frame with performance comparison
 compare_performance_with_rejection <- function(detailed_performance, rejection_summary, type = "cv") {
   cat(sprintf("Comparing performance with and without rejection for %s...\n", toupper(type)))
-  
+
   if (is.null(rejection_summary) || is.null(detailed_performance)) {
     warning("Missing data for performance comparison")
     return(NULL)
   }
-  
+
   comparison_results <- data.frame()
-  
+
   # Get models that have both performance data and rejection analysis
   models_with_rejection <- unique(rejection_summary$detailed_results$model)
-  
+
   for (model_name in models_with_rejection) {
     # Get rejection performance for this model
     model_rejection <- rejection_summary$detailed_results[rejection_summary$detailed_results$model == model_name, ]
-    
+
     if (nrow(model_rejection) == 0) next
-    
+
     # Calculate mean rejection performance across folds
     mean_rejection_kappa <- mean(model_rejection$kappa, na.rm = TRUE)
     mean_rejection_accuracy <- mean(model_rejection$accuracy, na.rm = TRUE)
     mean_perc_rejected <- mean(model_rejection$perc_rejected, na.rm = TRUE)
-    
+
     # Get original performance for this model (if available)
     original_kappa <- NA
     original_accuracy <- NA
-    
+
     if (model_name %in% names(detailed_performance)) {
       model_perf <- detailed_performance[[model_name]]
       if (length(model_perf) > 0) {
@@ -1005,7 +1154,7 @@ compare_performance_with_rejection <- function(detailed_performance, rejection_s
         original_accuracy <- mean(accuracies, na.rm = TRUE)
       }
     }
-    
+
     # Create comparison row
     comparison_row <- data.frame(
       Model = model_name,
@@ -1019,15 +1168,15 @@ compare_performance_with_rejection <- function(detailed_performance, rejection_s
       Mean_Percent_Rejected = mean_perc_rejected * 100,
       stringsAsFactors = FALSE
     )
-    
+
     comparison_results <- rbind(comparison_results, comparison_row)
   }
-  
+
   # Sort by kappa improvement (descending)
   if (nrow(comparison_results) > 0) {
     comparison_results <- comparison_results[order(comparison_results$Rejection_Kappa, decreasing = TRUE), ]
   }
-  
+
   return(comparison_results)
 }
 
@@ -1045,84 +1194,99 @@ main_outer_cv <- function() {
   load_library_quietly("stringr")
   load_library_quietly("caret")
   load_library_quietly("data.table")
-  
+
   cat("=== Starting Outer Cross-Validation Analysis ===\n")
-  
+
   # Load label mapping and data
   cat("Loading label mapping and data...\n")
-  label_mapping <- safe_read_file("label_mapping_all.csv", read.csv)
+  label_mapping <- safe_read_file("../data/label_mapping_all.csv", read.csv)
   if (is.null(label_mapping)) {
     stop("Failed to load label mapping file")
   }
-  
+
   # Load leukemia subtype data
-  leukemia_subtypes <- safe_read_file("data/rgas_20aug25.csv", function(f) read.csv(f)$ICC_Subtype)
+  leukemia_subtypes <- safe_read_file("../data/rgas_20aug25.csv", function(f) read.csv(f)$ICC_Subtype)
   if (is.null(leukemia_subtypes)) {
     stop("Failed to load leukemia subtype data")
   }
-  
+
   # Load study metadata
-  study_names <- safe_read_file("data/meta_20aug25.csv", function(f) read.csv(f)$Studies)
+  study_names <- safe_read_file("../data/meta_20aug25.csv", function(f) read.csv(f)$Studies)
   if (is.null(study_names)) {
     stop("Failed to load study metadata")
   }
-  
+
   # Filter data based on criteria
   subtypes_with_sufficient_samples <- names(which(table(leukemia_subtypes) >= DATA_FILTERS$min_samples_per_subtype))
   filtered_leukemia_subtypes <- leukemia_subtypes[
-    leukemia_subtypes %in% subtypes_with_sufficient_samples & 
-    !leukemia_subtypes %in% DATA_FILTERS$excluded_subtypes & 
+    leukemia_subtypes %in% subtypes_with_sufficient_samples &
+    !leukemia_subtypes %in% DATA_FILTERS$excluded_subtypes &
     study_names %in% DATA_FILTERS$selected_studies
   ]
-  
+
   # Load outer CV results for all models
   cat("Loading outer CV results...\n")
   outer_cv_data <- list()
-  
+
   for (model_name in names(OUTER_MODEL_CONFIGS)) {
     config <- OUTER_MODEL_CONFIGS[[model_name]]
     cat(sprintf("Loading %s outer CV data...\n", toupper(model_name)))
-    
+
     outer_cv_data[[model_name]] <- list()
-    
+
     for (fold_type in names(config$file_paths)) {
       file_path <- config$file_paths[[fold_type]]
       results <- load_outer_cv_results(file_path, config$classification_type)
-      
+
       if (!is.null(results)) {
         outer_cv_data[[model_name]][[fold_type]] <- results
       }
     }
   }
-  
+
   # Generate probability matrices from outer CV results
   cat("Generating outer CV probability matrices...\n")
   outer_probability_matrices <- list()
-  
+  filtering_statistics <- list()  # Store filtering stats for reporting
+
   for (model_name in names(outer_cv_data)) {
     config <- OUTER_MODEL_CONFIGS[[model_name]]
     cat(sprintf("Processing %s probabilities...\n", toupper(model_name)))
-    
+
     outer_probability_matrices[[model_name]] <- list()
-    
+
     for (fold_type in names(outer_cv_data[[model_name]])) {
       results <- outer_cv_data[[model_name]][[fold_type]]
-      
+
       if (!is.null(results)) {
+        # Generate probability matrices (with filtering)
         if (config$classification_type == "OvR") {
-          probs <- generate_outer_ovr_probability_matrices(results, label_mapping)
+          result <- generate_outer_ovr_probability_matrices(results, label_mapping, filter_unseen_classes = T)
         } else {
-          probs <- generate_outer_standard_probability_matrices(results, label_mapping, filtered_leukemia_subtypes)
+          result <- generate_outer_standard_probability_matrices(results, label_mapping, filtered_leukemia_subtypes, filter_unseen_classes = T)
         }
+
+        # Extract matrices and filtering stats
+        probs <- result$matrices
+        if (!is.null(result$filtering_stats)) {
+          if (!model_name %in% names(filtering_statistics)) {
+            filtering_statistics[[model_name]] <- list()
+          }
+          result$filtering_stats$model <- model_name
+          result$filtering_stats$type <- fold_type
+          filtering_statistics[[model_name]][[fold_type]] <- result$filtering_stats
+        }
+
+        # Apply class grouping modifications
         probs <- lapply(probs, function(prob) {
           MDS_cols <- grepl("MDS|TP53|MECOM", colnames(prob))
           MDS <- rowSums(prob[,MDS_cols])
-          
+
           other_KMT2A_cols <- grepl("KMT2A", colnames(prob)) & !grepl("MLLT3", colnames(prob))
           other_KMT2A <- rowSums(prob[,other_KMT2A_cols])
-          
+
           prob <- prob[, !(MDS_cols | other_KMT2A_cols)]
-          
+
           prob$MDS.r <- MDS
           prob$other.KMT2A <- other_KMT2A
           prob$y <- modify_classes(prob$y)
@@ -1133,11 +1297,11 @@ main_outer_cv <- function() {
       }
     }
   }
-  
+
   # Load ensemble weights from inner CV analysis
   cat("Loading ensemble weights from inner CV analysis...\n")
   ensemble_weights <- list()
-  
+
   for (type in c("cv", "loso")) {
     weights_data <- tryCatch({
       load_ensemble_weights(WEIGHTS_BASE_DIR, type)
@@ -1145,25 +1309,25 @@ main_outer_cv <- function() {
       warning(sprintf("Failed to load ensemble weights for %s: %s", type, e$message))
       NULL
     })
-    
+
     if (!is.null(weights_data)) {
       ensemble_weights[[type]] <- weights_data
     }
   }
-  
+
   # Apply ensemble weights to generate ensemble predictions
   cat("Generating ensemble predictions...\n")
   ensemble_matrices <- list()
-  
+
   for (type in c("cv", "loso")) {
     if (!type %in% names(ensemble_weights)) {
       warning(sprintf("No ensemble weights available for %s", type))
       next
     }
-    
+
     cat(sprintf("Processing %s ensemble...\n", toupper(type)))
     ensemble_matrices[[type]] <- list()
-    
+
     # Generate OvR ensemble
     ovr_ensemble <- apply_ensemble_weights_to_outer_cv(
       outer_probability_matrices, ensemble_weights[[type]], type, "ovr"
@@ -1171,7 +1335,7 @@ main_outer_cv <- function() {
     if (!is.null(ovr_ensemble)) {
       ensemble_matrices[[type]][["ovr_ensemble"]] <- ovr_ensemble
     }
-    
+
     # Generate global ensemble
     global_ensemble <- apply_ensemble_weights_to_outer_cv(
       outer_probability_matrices, ensemble_weights[[type]], type, "global"
@@ -1180,17 +1344,17 @@ main_outer_cv <- function() {
       ensemble_matrices[[type]][["global_ensemble"]] <- global_ensemble
     }
   }
-  
+
   # Combine individual models and ensemble results for performance calculation
   cat("Combining results for performance analysis...\n")
   all_probability_matrices <- outer_probability_matrices
-  
+
   for (type in c("cv", "loso")) {
     if (type %in% names(ensemble_matrices)) {
       for (ensemble_name in names(ensemble_matrices[[type]])) {
         # Map ensemble names to match rejection analysis expectations
         mapped_name <- if (ensemble_name == "ovr_ensemble") "OvR_Ensemble" else "Global_Optimized"
-        
+
         if (!mapped_name %in% names(all_probability_matrices)) {
           all_probability_matrices[[mapped_name]] <- list()
         }
@@ -1198,94 +1362,108 @@ main_outer_cv <- function() {
       }
     }
   }
-  
+
   # Calculate performance for all models and ensembles
   cat("Calculating performance metrics...\n")
   detailed_performance <- list()
   performance_summaries <- list()
   per_class_summaries <- list()
-  
+
   for (type in c("cv", "loso")) {
-    cat(sprintf("Analyzing %s performance...\n", toupper(type)))
-    
+
     # Calculate detailed performance for all models and ensembles
     detailed_performance[[type]] <- calculate_outer_cv_performance(all_probability_matrices, type)
-    
+
     # Generate performance summary
     performance_summaries[[type]] <- summarize_outer_cv_performance(detailed_performance[[type]])
-    
+
     # Generate per-class performance summary
     per_class_summaries[[type]] <- summarize_per_class_performance(detailed_performance[[type]])
-    
-    cat(sprintf("\n=== %s Performance Summary ===\n", toupper(type)))
-    print(performance_summaries[[type]])
-    
-    cat(sprintf("\n=== %s Per-Class Performance Summary ===\n", toupper(type)))
-    print(per_class_summaries[[type]])
   }
-  
+
   # Load optimal cutoffs for rejection analysis
   cat("Loading optimal cutoffs for rejection analysis...\n")
   optimal_cutoffs_data <- list()
-  
+
   for (type in c("cv", "loso")) {
     optimal_cutoffs_data[[type]] <- load_optimal_cutoffs(REJECTION_BASE_DIR, type)
   }
-  
+
   # Apply rejection analysis to outer CV results
   cat("Applying rejection analysis to outer CV results...\n")
   rejection_results <- list()
-  
+
   for (type in c("cv", "loso")) {
     if (!type %in% names(optimal_cutoffs_data)) {
       warning(sprintf("No optimal cutoffs available for %s rejection analysis, skipping", type))
       next
     }
-    
+
     cat(sprintf("Processing %s rejection analysis...\n", toupper(type)))
     rejection_results[[type]] <- apply_rejection_analysis_to_outer_cv(
       all_probability_matrices, optimal_cutoffs_data[[type]], type
     )
   }
-  
+
   # Summarize rejection analysis
   cat("Summarizing rejection analysis...\n")
   rejection_summary <- list()
-  
+
   for (type in c("cv", "loso")) {
     if (!type %in% names(rejection_results)) {
       warning(sprintf("No rejection analysis results for %s, skipping", type))
       next
     }
-    
+
     rejection_summary[[type]] <- summarize_rejection_analysis(rejection_results[[type]], type)
-    
-    # Display per-class rejection analysis summary
-    if (!is.null(rejection_summary[[type]]$per_class_summary)) {
-      cat(sprintf("\n=== %s Rejection Analysis Per-Class Performance Summary ===\n", toupper(type)))
-      print(rejection_summary[[type]]$per_class_summary)
-    }
   }
-  
+
   # Compare performance with and without rejection
   cat("Comparing performance with and without rejection...\n")
   performance_comparison <- list()
-  
+
   for (type in c("cv", "loso")) {
     if (!type %in% names(rejection_summary)) {
       warning(sprintf("No rejection analysis results for %s, skipping performance comparison", type))
       next
     }
-    
+
     performance_comparison[[type]] <- compare_performance_with_rejection(
       detailed_performance[[type]], rejection_summary[[type]], type
     )
   }
-  
+
+  # Print summary of filtering statistics
+  cat("\n=== Sample Filtering Summary ===\n")
+  if (length(filtering_statistics) > 0) {
+    total_filtered <- 0
+    total_samples <- 0
+    for (model_name in names(filtering_statistics)) {
+      for (fold_type in names(filtering_statistics[[model_name]])) {
+        stats <- filtering_statistics[[model_name]][[fold_type]]
+        model_total_filtered <- sum(stats$n_filtered)
+        model_total_samples <- sum(stats$n_total)
+        total_filtered <- total_filtered + model_total_filtered
+        total_samples <- total_samples + model_total_samples
+        cat(sprintf("%s (%s): Filtered %d/%d samples (%.1f%%)\n",
+                    toupper(model_name), toupper(fold_type),
+                    model_total_filtered, model_total_samples,
+                    100 * model_total_filtered / model_total_samples))
+      }
+    }
+    cat(sprintf("OVERALL: Filtered %d/%d samples (%.1f%%)\n",
+                total_filtered, total_samples,
+                100 * total_filtered / total_samples))
+  } else {
+    cat("No samples were filtered (all test samples had classes in training)\n")
+  }
+  cat("================================\n\n")
+
   # Save all results
   outer_cv_results <- list(
     outer_cv_data = outer_cv_data,
     outer_probability_matrices = outer_probability_matrices,
+    filtering_statistics = filtering_statistics,  # Add filtering statistics
     ensemble_matrices = ensemble_matrices,
     detailed_performance = detailed_performance,
     performance_summaries = performance_summaries,
@@ -1296,11 +1474,27 @@ main_outer_cv <- function() {
     rejection_per_class_summaries = lapply(rejection_summary, function(x) x$per_class_summary),
     performance_comparison = performance_comparison
   )
-  saveRDS(inner_cv_results, "../data/out/inner_cv/inner_cv_results.rds")
+
+  saveRDS(outer_cv_results, "../data/out/outer_cv/outer_cv_results.rds")
+
+  # Save filtering statistics to CSV for easy inspection
+  if (length(filtering_statistics) > 0) {
+    all_filtering_stats <- do.call(rbind, lapply(names(filtering_statistics), function(model_name) {
+      do.call(rbind, lapply(names(filtering_statistics[[model_name]]), function(fold_type) {
+        stats <- filtering_statistics[[model_name]][[fold_type]]
+        stats$model <- model_name
+        stats$type <- fold_type
+        return(stats)
+      }))
+    }))
+    write.csv(all_filtering_stats, "../data/out/outer_cv/filtering_statistics.csv", row.names = FALSE)
+    cat("Filtering statistics saved to: ../data/out/outer_cv/filtering_statistics.csv\n")
+  }
+
   return(outer_cv_results)
 }
 
 # Run the analysis if this script is executed directly
 if (!exists("SKIP_OUTER_CV_EXECUTION")) {
   outer_cv_results <- main_outer_cv()
-} 
+}
