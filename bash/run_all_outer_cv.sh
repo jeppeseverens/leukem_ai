@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Set the working directory to the python folder
-cd /Users/jsevere2/Documents/AML_PhD/leukem_ai
+cd /Users/jsevere2/leukem_ai
 
 # Activate the Python virtual environment
 source .venv/bin/activate
@@ -20,7 +20,7 @@ run_outer_cv() {
     echo "Using best params from: $best_params_file"
     echo "----------------------------------------"
 
-    python python/run_outer_cv.py \
+    python -u python/run_outer_cv.py \
         --model_type "$model_type" \
         --multi_type "$multi_type" \
         --fold_type "$fold_type" \
@@ -32,17 +32,17 @@ run_outer_cv() {
 
 # SVM experiments
 # echo "Running SVM outer CV experiments..."
-run_outer_cv "SVM" "OvR" "CV" "/Users/jsevere2/Documents/AML_PhD/leukem_ai/inner_cv_best_params_n10/SVM_20aug25/SVM_best_param_cv.csv"
-run_outer_cv "SVM" "OvR" "loso" "/Users/jsevere2/Documents/AML_PhD/leukem_ai/inner_cv_best_params_n10/SVM_20aug25/SVM_best_param_loso.csv"
+run_outer_cv "SVM" "OvR" "CV" "data/out/inner_cv/inner_cv_best_params/SVM_30dec25/SVM_best_param_cv.csv"
+run_outer_cv "SVM" "OvR" "loso" "data/out/inner_cv/inner_cv_best_params/SVM_30dec25/SVM_best_param_loso.csv"
 
 # # XGBOOST experiments
 # echo "Running XGBOOST outer CV experiments..."
-run_outer_cv "XGBOOST" "OvR" "CV" "/Users/jsevere2/Documents/AML_PhD/leukem_ai/inner_cv_best_params_n10/XGBOOST_20aug25/XGBOOST_best_param_cv.csv"
-run_outer_cv "XGBOOST" "OvR" "loso" "/Users/jsevere2/Documents/AML_PhD/leukem_ai/inner_cv_best_params_n10/XGBOOST_20aug25/XGBOOST_best_param_loso.csv"
+run_outer_cv "XGBOOST" "OvR" "CV" "data/out/inner_cv/inner_cv_best_params/XGBOOST_30dec25/XGBOOST_best_param_cv.csv"
+run_outer_cv "XGBOOST" "OvR" "loso" "data/out/inner_cv/inner_cv_best_params/XGBOOST_30dec25/XGBOOST_best_param_loso.csv"
 
 echo "Running NN outer CV experiments..."
-run_outer_cv "NN" "standard" "CV" "/Users/jsevere2/Documents/AML_PhD/leukem_ai/inner_cv_best_params_n10/NN_20aug25/NEURAL_NET_best_param_cv.csv"
-run_outer_cv "NN" "standard" "loso" "/Users/jsevere2/Documents/AML_PhD/leukem_ai/inner_cv_best_params_n10/NN_20aug25/NEURAL_NET_best_param_loso.csv"
+run_outer_cv "NN" "standard" "CV" "data/out/inner_cv/inner_cv_best_params/NN_30dec25/NEURAL_NET_best_param_cv.csv"
+run_outer_cv "NN" "standard" "loso" "data/out/inner_cv/inner_cv_best_params/NN_30dec25/NEURAL_NET_best_param_loso.csv"
 
 echo "All outer CV experiments completed!"
 echo "=================================="

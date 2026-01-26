@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Set the working directory to the python folder
-cd /Users/jsevere2/Documents/AML_PhD/leukem_ai
+cd /Users/jsevere2/leukem_ai
 
 # Activate the Python virtual environment
 source .venv/bin/activate
@@ -32,16 +32,16 @@ run_final_model_train() {
 
 # SVM experiments
 # echo "Running SVM..."
-run_final_model_train "SVM" "OvR" "CV" "/Users/jsevere2/Documents/AML_PhD/leukem_ai/data/out/final_train_test/best_params/SVM/SVM_best_param_cv.csv"
+run_final_model_train "SVM" "OvR" "CV" "data/out/final_train_test/best_params/SVM/SVM_best_param_cv.csv"
 # run_final_model_train "SVM" "OvR" "loso" "/Users/jsevere2/Documents/AML_PhD/leukem_ai/data/out/final_train_test/best_params/SVM/SVM_best_param_loso.csv"
 
 # # XGBOOST experiments
 # echo "Running XGBOOST..."
-run_final_model_train "XGBOOST" "OvR" "CV" "/Users/jsevere2/Documents/AML_PhD/leukem_ai/data/out/final_train_test/best_params/XGBOOST/XGBOOST_best_param_cv.csv"
+run_final_model_train "XGBOOST" "OvR" "CV" "data/out/final_train_test/best_params/XGBOOST/XGBOOST_best_param_cv.csv"
 # run_final_model_train "XGBOOST" "OvR" "loso" "/Users/jsevere2/Documents/AML_PhD/leukem_ai/data/out/final_train_test/best_params/XGBOOST/XGBOOST_best_param_loso.csv"
 
 echo "Running NN..."
-run_final_model_train "NN" "standard" "CV" "/Users/jsevere2/Documents/AML_PhD/leukem_ai/data/out/final_train_test/best_params/NN/NEURAL_NET_best_param_cv.csv"
+run_final_model_train "NN" "standard" "CV" "data/out/final_train_test/best_params/NN/NEURAL_NET_best_param_cv.csv"
 # run_final_model_train "NN" "standard" "loso" "/Users/jsevere2/Documents/AML_PhD/leukem_ai/data/out/final_train_test/best_params/NN/NEURAL_NET_best_param_loso.csv"
 
 echo "All final model training experiments completed!"

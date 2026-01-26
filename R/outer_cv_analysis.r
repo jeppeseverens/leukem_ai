@@ -16,22 +16,22 @@ OUTER_MODEL_CONFIGS <- list(
   svm = list(
     classification_type = "OvR",
     file_paths = list(
-      cv = "../data/out/outer_cv/SVM_n10//SVM_outer_cv_CV_OvR_20250821_0926.csv",
-      loso = "../data/out/outer_cv/SVM_n10/SVM_outer_cv_loso_OvR_20250821_0929.csv"
+      cv = "../data/out/outer_cv/SVM_n10/SVM_outer_cv_CV_OvR_20260108_0934.csv",
+      loso = "../data/out/outer_cv/SVM_n10/SVM_outer_cv_loso_OvR_20260108_0938.csv"
     )
   ),
   xgboost = list(
     classification_type = "OvR",
     file_paths = list(
-      cv = "../data/out/outer_cv/XGBOOST_n10/XGBOOST_outer_cv_CV_OvR_20250821_0932.csv",
-      loso = "../data/out/outer_cv/XGBOOST_n10/XGBOOST_outer_cv_loso_OvR_20250821_0936.csv"
+      cv = "../data/out/outer_cv/XGBOOST_n10/XGBOOST_outer_cv_CV_OvR_20260108_0942.csv",
+      loso = "../data/out/outer_cv/XGBOOST_n10/XGBOOST_outer_cv_loso_OvR_20260108_0946.csv"
     )
   ),
   neural_net = list(
     classification_type = "standard",
     file_paths = list(
-      cv = "../data/out/outer_cv/NN_n10/NN_outer_cv_CV_standard_20250821_0940.csv",
-      loso = "../data/out/outer_cv/NN_n10/NN_outer_cv_loso_standard_20250821_0951.csv"
+      cv = "../data/out/outer_cv/NN_n10/NN_outer_cv_CV_standard_20260108_0951.csv",
+      loso = "../data/out/outer_cv/NN_n10/NN_outer_cv_loso_standard_20260108_1025.csv"
     )
   )
 )
@@ -50,30 +50,22 @@ DATA_FILTERS <- list(
     "100LUMC"
   )
 )
-# Base directory for ensemble weights
-WEIGHTS_BASE_DIR <- "../data/out/inner_cv/ensemble_weights/ensemble_weights"
+# Base directory for ensemble weights (will be updated based on merge_classes parameter)
+# Using maxprob suffix to distinguish from summed method
+WEIGHTS_BASE_DIR_UNMERGED <- "../data/out/inner_cv/ensemble_weights_unmerged_maxprob"
+WEIGHTS_BASE_DIR_MERGED <- "../data/out/inner_cv/ensemble_weights_merged_maxprob"
+WEIGHTS_BASE_DIR_MDS_ONLY <- "../data/out/inner_cv/ensemble_weights_mds_only_maxprob"
 
-# Base directory for rejection cut offs
-REJECTION_BASE_DIR <- "../data/out/inner_cv/cutoffs"
+# Base directory for rejection cut offs (will be updated based on merge_classes parameter)
+REJECTION_BASE_DIR_UNMERGED <- "../data/out/inner_cv/cutoffs_unmerged_maxprob"
+REJECTION_BASE_DIR_MERGED <- "../data/out/inner_cv/cutoffs_merged_maxprob"
+REJECTION_BASE_DIR_MDS_ONLY <- "../data/out/inner_cv/cutoffs_mds_only_maxprob"
 
 # =============================================================================
 # Source Utility Functions
 # =============================================================================
 
 source("utility_functions.R")
-
-# =============================================================================
-# Class Modification Functions
-# =============================================================================
-
-#' Modify class labels to group related subtypes
-#' @param vector Vector of class labels
-#' @return Modified vector with grouped classes
-modify_classes <- function(vector) {
-  vector[grepl("MDS|TP53|MECOM", vector)] <- "MDS.r.and.MECOM"
-  vector[!grepl("MLLT3", vector) & grepl("KMT2A", vector)] <- "other.KMT2A"
-  vector
-}
 
 # =============================================================================
 # Outer CV Specific Functions
@@ -111,70 +103,12 @@ load_outer_cv_results <- function(file_path, classification_type) {
   return(results)
 }
 
-#' Filter samples to only include those with classes present in training
-#' @param prob_matrix Probability matrix with y, outer_fold, and sample_indices columns
-#' @param training_classes Vector of class labels that were in the training set
-#' @param fold_id Current fold identifier for logging
-#' @return Filtered probability matrix and statistics
-filter_samples_by_training_classes <- function(prob_matrix, training_classes, fold_id) {
-  if (is.null(prob_matrix) || nrow(prob_matrix) == 0) {
-    return(list(filtered_matrix = prob_matrix, stats = NULL))
-  }
-
-  # Get true labels
-  true_labels <- prob_matrix$y
-
-  # Clean class names for comparison (make.names is applied to both)
-  training_classes_clean <- make.names(training_classes)
-
-  # Create mask for samples with classes in training
-  valid_mask <- true_labels %in% training_classes_clean
-
-  # Calculate statistics
-  n_total <- nrow(prob_matrix)
-  n_filtered <- sum(!valid_mask)
-  n_kept <- sum(valid_mask)
-
-  # Get classes that were in test but not in training
-  unseen_classes <- unique(true_labels[!valid_mask])
-
-  # Log filtering information
-  if (n_filtered > 0) {
-    cat(sprintf("    Fold %s: Filtered %d/%d samples (%.1f%%) with classes not in training\n",
-                fold_id, n_filtered, n_total, 100 * n_filtered / n_total))
-    cat(sprintf("      Classes in test but not in training: %s\n",
-                paste(unseen_classes, collapse = ", ")))
-  } else {
-    cat(sprintf("    Fold %s: All %d samples have classes present in training\n",
-                fold_id, n_total))
-  }
-
-  # Filter the matrix
-  filtered_matrix <- prob_matrix[valid_mask, , drop = FALSE]
-
-  # Return filtered matrix and statistics
-  stats <- data.frame(
-    fold = fold_id,
-    n_total = n_total,
-    n_kept = n_kept,
-    n_filtered = n_filtered,
-    pct_filtered = 100 * n_filtered / n_total,
-    unseen_classes = paste(unseen_classes, collapse = "; "),
-    stringsAsFactors = FALSE
-  )
-
-  return(list(
-    filtered_matrix = filtered_matrix,
-    stats = stats
-  ))
-}
-
 #' Generate outer CV probability matrices for One-vs-Rest classification
 #' @param outer_cv_results Outer CV results data frame
 #' @param label_mapping Label mapping data frame
 #' @param filter_unseen_classes Whether to filter samples with classes not in training (default: TRUE)
 #' @return List of probability matrices organized by outer fold (and filtering statistics if filtered)
-generate_outer_ovr_probability_matrices <- function(outer_cv_results, label_mapping, filter_unseen_classes = TRUE) {
+generate_outer_ovr_probability_matrices <- function(outer_cv_results, label_mapping, filter_unseen_classes = TRUE, merge_classes = FALSE, merge_mds_only = FALSE) {
   cat("Generating outer One-vs-Rest probability matrices...\n")
 
   if (filter_unseen_classes) {
@@ -258,12 +192,21 @@ generate_outer_ovr_probability_matrices <- function(outer_cv_results, label_mapp
       probability_matrix$sample_indices <- sample_indices
     }
 
+    # Apply class merging if requested (before filtering)
+    if (merge_classes) {
+      probability_matrix <- merge_classes_in_matrix(probability_matrix, merge_mds_only = merge_mds_only)
+      # Update class_labels after merging for filtering
+      class_labels <- colnames(probability_matrix)[!colnames(probability_matrix) %in%
+                                                    c("y", "outer_fold", "sample_indices")]
+    }
+
     # Apply filtering if requested
     if (filter_unseen_classes) {
       filter_result <- filter_samples_by_training_classes(
         probability_matrix,
-        class_labels,  # class_labels are the training classes for OvR
-        outer_fold_id
+        class_labels,  # class_labels are the training classes for OvR (may be merged)
+        outer_fold_id,
+        handle_na_labels = FALSE  # Outer CV doesn't have NA labels
       )
       probability_matrix <- filter_result$filtered_matrix
       if (!is.null(filter_result$stats)) {
@@ -289,7 +232,7 @@ generate_outer_ovr_probability_matrices <- function(outer_cv_results, label_mapp
 #' @param filtered_subtypes Filtered leukemia subtypes
 #' @param filter_unseen_classes Whether to filter samples with classes not in training (default: TRUE)
 #' @return List of probability matrices organized by outer fold (and filtering statistics if filtered)
-generate_outer_standard_probability_matrices <- function(outer_cv_results, label_mapping, filtered_subtypes, filter_unseen_classes = TRUE) {
+generate_outer_standard_probability_matrices <- function(outer_cv_results, label_mapping, filtered_subtypes, filter_unseen_classes = TRUE, merge_classes = FALSE, merge_mds_only = FALSE) {
   cat("Generating outer CV standard probability matrices...\n")
 
   if (filter_unseen_classes) {
@@ -347,12 +290,21 @@ generate_outer_standard_probability_matrices <- function(outer_cv_results, label
     probability_matrix$outer_fold <- outer_fold_id
     probability_matrix$sample_indices <- sample_indices
 
+    # Apply class merging if requested (before filtering)
+    if (merge_classes) {
+      probability_matrix <- merge_classes_in_matrix(probability_matrix, merge_mds_only = merge_mds_only)
+      # Update class_labels after merging for filtering
+      class_labels <- colnames(probability_matrix)[!colnames(probability_matrix) %in%
+                                                    c("y", "outer_fold", "sample_indices")]
+    }
+
     # Apply filtering if requested
     if (filter_unseen_classes) {
       filter_result <- filter_samples_by_training_classes(
         probability_matrix,
-        class_labels,  # class_labels are the training classes
-        outer_fold_id
+        class_labels,  # class_labels are the training classes (may be merged)
+        outer_fold_id,
+        handle_na_labels = FALSE  # Outer CV doesn't have NA labels
       )
       probability_matrix <- filter_result$filtered_matrix
       if (!is.null(filter_result$stats)) {
@@ -621,8 +573,6 @@ calculate_outer_cv_performance <- function(probability_matrices, type = "cv") {
       # Clean class labels
       truth <- gsub("Class.", "", truth)
       preds <- gsub("Class.", "", preds)
-      truth <- modify_classes(truth)
-      preds <- modify_classes(preds)
 
       # Ensure all classes are represented
       all_classes <- unique(c(truth, preds))
@@ -927,13 +877,11 @@ evaluate_single_matrix_with_rejection_and_cutoff <- function(prob_matrix, fold_n
 
   # Clean class labels
   truth <- gsub("Class.", "", truth)
-  truth <- modify_classes(truth)
 
   # Get predictions (class with highest probability)
   pred_indices <- apply(prob_matrix_clean, 1, which.max)
   preds <- colnames(prob_matrix_clean)[pred_indices]
   preds <- gsub("Class.", "", preds)
-  preds <- modify_classes(preds)
 
   # Get max probabilities for each sample
   max_probs <- apply(prob_matrix_clean, 1, max)
@@ -1187,7 +1135,8 @@ compare_performance_with_rejection <- function(detailed_performance, rejection_s
 # =============================================================================
 
 #' Main function to run outer CV analysis
-main_outer_cv <- function() {
+#' @param merge_classes Whether to merge classes (MDS/TP53 -> MDS.r, other KMT2A -> other.KMT2A)
+main_outer_cv <- function(merge_classes = FALSE, merge_mds_only = FALSE) {
   # Load required libraries
   load_library_quietly("plyr")
   load_library_quietly("dplyr")
@@ -1205,7 +1154,7 @@ main_outer_cv <- function() {
   }
 
   # Load leukemia subtype data
-  leukemia_subtypes <- safe_read_file("../data/rgas_20aug25.csv", function(f) read.csv(f)$ICC_Subtype)
+  leukemia_subtypes <- safe_read_file("../data/rgas_18dec25.csv", function(f) read.csv(f)$ICC_Subtype)
   if (is.null(leukemia_subtypes)) {
     stop("Failed to load leukemia subtype data")
   }
@@ -1259,11 +1208,11 @@ main_outer_cv <- function() {
       results <- outer_cv_data[[model_name]][[fold_type]]
 
       if (!is.null(results)) {
-        # Generate probability matrices (with filtering)
+        # Generate probability matrices (with filtering and optional merging)
         if (config$classification_type == "OvR") {
-          result <- generate_outer_ovr_probability_matrices(results, label_mapping, filter_unseen_classes = T)
+          result <- generate_outer_ovr_probability_matrices(results, label_mapping, filter_unseen_classes = T, merge_classes = merge_classes, merge_mds_only = merge_mds_only)
         } else {
-          result <- generate_outer_standard_probability_matrices(results, label_mapping, filtered_leukemia_subtypes, filter_unseen_classes = T)
+          result <- generate_outer_standard_probability_matrices(results, label_mapping, filtered_leukemia_subtypes, filter_unseen_classes = T, merge_classes = merge_classes, merge_mds_only = merge_mds_only)
         }
 
         # Extract matrices and filtering stats
@@ -1277,34 +1226,29 @@ main_outer_cv <- function() {
           filtering_statistics[[model_name]][[fold_type]] <- result$filtering_stats
         }
 
-        # Apply class grouping modifications
-        probs <- lapply(probs, function(prob) {
-          MDS_cols <- grepl("MDS|TP53|MECOM", colnames(prob))
-          MDS <- rowSums(prob[,MDS_cols])
-
-          other_KMT2A_cols <- grepl("KMT2A", colnames(prob)) & !grepl("MLLT3", colnames(prob))
-          other_KMT2A <- rowSums(prob[,other_KMT2A_cols])
-
-          prob <- prob[, !(MDS_cols | other_KMT2A_cols)]
-
-          prob$MDS.r <- MDS
-          prob$other.KMT2A <- other_KMT2A
-          prob$y <- modify_classes(prob$y)
-          colnames(prob) <- modify_classes(colnames(prob))
-          return(prob)
-        })
+        # No class grouping - keep original classes
+        # probs remain unchanged
         outer_probability_matrices[[model_name]][[fold_type]] <- probs
       }
     }
   }
 
-  # Load ensemble weights from inner CV analysis
+  # Load ensemble weights from inner CV analysis (use correct directory based on merge_classes)
   cat("Loading ensemble weights from inner CV analysis...\n")
+  if (merge_mds_only) {
+    weights_base_dir <- WEIGHTS_BASE_DIR_MDS_ONLY
+  } else if (merge_classes) {
+    weights_base_dir <- WEIGHTS_BASE_DIR_MERGED
+  } else {
+    weights_base_dir <- WEIGHTS_BASE_DIR_UNMERGED
+  }
+  cat(sprintf("Using weights directory: %s\n", weights_base_dir))
+
   ensemble_weights <- list()
 
   for (type in c("cv", "loso")) {
     weights_data <- tryCatch({
-      load_ensemble_weights(WEIGHTS_BASE_DIR, type)
+      load_ensemble_weights(weights_base_dir, type)
     }, error = function(e) {
       warning(sprintf("Failed to load ensemble weights for %s: %s", type, e$message))
       NULL
@@ -1381,12 +1325,21 @@ main_outer_cv <- function() {
     per_class_summaries[[type]] <- summarize_per_class_performance(detailed_performance[[type]])
   }
 
-  # Load optimal cutoffs for rejection analysis
+  # Load optimal cutoffs for rejection analysis (use correct directory based on merge_classes)
   cat("Loading optimal cutoffs for rejection analysis...\n")
+  if (merge_mds_only) {
+    rejection_base_dir <- REJECTION_BASE_DIR_MDS_ONLY
+  } else if (merge_classes) {
+    rejection_base_dir <- REJECTION_BASE_DIR_MERGED
+  } else {
+    rejection_base_dir <- REJECTION_BASE_DIR_UNMERGED
+  }
+  cat(sprintf("Using cutoffs directory: %s\n", rejection_base_dir))
+
   optimal_cutoffs_data <- list()
 
   for (type in c("cv", "loso")) {
-    optimal_cutoffs_data[[type]] <- load_optimal_cutoffs(REJECTION_BASE_DIR, type)
+    optimal_cutoffs_data[[type]] <- load_optimal_cutoffs(rejection_base_dir, type)
   }
 
   # Apply rejection analysis to outer CV results
@@ -1475,26 +1428,29 @@ main_outer_cv <- function() {
     performance_comparison = performance_comparison
   )
 
-  saveRDS(outer_cv_results, "../data/out/outer_cv/outer_cv_results.rds")
-
-  # Save filtering statistics to CSV for easy inspection
-  if (length(filtering_statistics) > 0) {
-    all_filtering_stats <- do.call(rbind, lapply(names(filtering_statistics), function(model_name) {
-      do.call(rbind, lapply(names(filtering_statistics[[model_name]]), function(fold_type) {
-        stats <- filtering_statistics[[model_name]][[fold_type]]
-        stats$model <- model_name
-        stats$type <- fold_type
-        return(stats)
-      }))
-    }))
-    write.csv(all_filtering_stats, "../data/out/outer_cv/filtering_statistics.csv", row.names = FALSE)
-    cat("Filtering statistics saved to: ../data/out/outer_cv/filtering_statistics.csv\n")
+  # Determine suffix for file paths (maxprob method - uses max probability instead of summing)
+  if (!merge_classes) {
+    merge_suffix <- "_unmerged_maxprob"
+  } else if (merge_mds_only) {
+    merge_suffix <- "_mds_only_maxprob"
+  } else {
+    merge_suffix <- "_merged_maxprob"
   }
+  outer_cv_results$merge_classes <- merge_classes  # Store merge status in results
+  outer_cv_results$merge_mds_only <- merge_mds_only  # Store merge_mds_only status in results
+
+  saveRDS(outer_cv_results, paste0("../data/out/outer_cv/outer_cv_results_5jan2025", merge_suffix, ".rds"))
+
 
   return(outer_cv_results)
 }
 
 # Run the analysis if this script is executed directly
 if (!exists("SKIP_OUTER_CV_EXECUTION")) {
-  outer_cv_results <- main_outer_cv()
+  # Run merged and MDS-only merged versions (maxprob method)
+  cat("=== Running Outer CV Analysis (Merged - MaxProb Method) ===\n")
+  outer_cv_results_merged <- main_outer_cv(merge_classes = TRUE, merge_mds_only = FALSE)
+
+  cat("=== Running Outer CV Analysis (MDS Only Merged - MaxProb Method) ===\n")
+  outer_cv_results_mds_only <- main_outer_cv(merge_classes = TRUE, merge_mds_only = TRUE)
 }
