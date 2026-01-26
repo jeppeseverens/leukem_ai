@@ -1,252 +1,15 @@
-###
-main_train_test_analysis <- function(){
+# Source shared utility functions
+source("utility_functions.R")
 
-  #' Create directory safely
-  #' @param dir_path Directory path to create
-  create_directory_safely <- function(dir_path) {
-    if (!dir.exists(dir_path)) {
-      dir.create(dir_path, recursive = TRUE, showWarnings = FALSE)
-    }
-  }
-
-  load_library_quietly <- function(package_name) {
-    invisible(capture.output(
-      suppressMessages(
-        suppressWarnings(
-          library(package_name, character.only = TRUE)
-        )
-      )
-    ))
-  }
-
-  #' Combine multiple CSV files from a directory into a single data frame
-  #' @param directory_path Path to directory containing CSV files
-  #' @return Combined data frame
-  combine_csv_files <- function(directory_path) {
-    if (!dir.exists(directory_path)) {
-      stop(sprintf("Directory does not exist: %s", directory_path))
-    }
-
-    csv_files <- list.files(directory_path, recursive = TRUE, full.names = TRUE, pattern = "\\.csv$")
-
-    if (length(csv_files) == 0) {
-      stop(sprintf("No CSV files found in directory: %s", directory_path))
-    }
-
-    combined_results <- lapply(csv_files, function(file) {
-      data.frame(data.table::fread(file, sep = ",", drop = 1))
-    })
-
-    # Remove NULL results from failed reads
-    combined_results <- combined_results[!sapply(combined_results, is.null)]
-
-    if (length(combined_results) == 0) {
-      stop("No files could be read successfully")
-    }
-
-    do.call(rbind, combined_results)
-  }
-
-  #' Clean and parse string data consistently
-  #' @param input_string String to clean and parse
-  #' @return Numeric vector
-  parse_numeric_string <- function(input_string) {
-    if (is.null(input_string) || is.na(input_string) || input_string == "") {
-      return(numeric(0))
-    }
-
-    cleaned_string <- input_string %>%
-      str_replace_all(",|\\[|\\]|\\{|\\}|\\\n", "") %>%
-      str_squish()
-
-    if (cleaned_string == "") {
-      return(numeric(0))
-    }
-
-    numeric_values <- as.numeric(unlist(strsplit(cleaned_string, " ")))
-    numeric_values[!is.na(numeric_values)]
-  }
-
-  #' Add descriptive class labels to data frame
-  #' @param data_frame Input data frame
-  #' @param label_mapping Label mapping data frame
-  #' @return Data frame with added class labels
-  add_class_labels <- function(data_frame, label_mapping) {
-    if (!"class" %in% colnames(data_frame)) {
-      stop("Data frame must contain 'class' column")
-    }
-
-    data_frame$class_label <- label_mapping$Label[data_frame$class + 1]
-    as.data.frame(data_frame)
-  }
-
-  #' Process neural network results to clean epoch information
-  #' @param nn_results Neural network results data frame
-  #' @return Processed data frame
-  process_neural_net_results <- function(nn_results) {
-    # Extract best_epoch as numeric
-    nn_results$epochs <- str_match(nn_results$params, "best_epoch': np\\.int64\\((\\d+)\\)")[,2] |> as.integer()
-
-    # Remove best_epoch from param string
-    nn_results$params <- gsub(", 'best_epoch'.+", "", nn_results$params)
-
-    # Add mean best_epoch per group back into param string
-    nn_results %>%
-      group_by(params) %>%
-      mutate(params = paste0(params, ", 'best_epoch': ", round(mean(epochs)), "}")) %>%
-      ungroup()
-  }
-
-  #' Extract the best hyperparameters per outer fold based on mean kappa
-  #' @param inner_cv_results Data frame with inner cross-validation results
-  #' @param classification_type Classification type: "standard", "OvR", or "OvO"
-  #' @return Data frame with best parameters for each outer fold
-  extract_best_hyperparameters <- function(inner_cv_results, classification_type) {
-    # Validate inputs
-    required_cols <- c("params", "kappa", "accuracy")
-    missing_cols <- setdiff(required_cols, colnames(inner_cv_results))
-    if (length(missing_cols) > 0) {
-      stop(sprintf("Missing required columns: %s", paste(missing_cols, collapse = ", ")))
-    }
-
-    # Choose grouping variables based on classification type
-    grouping_vars <- if (classification_type == "standard") {
-      c("params")
-    } else {
-      c("class", "params")
-    }
-
-    # Compute mean kappa and accuracy across inner folds for each param set
-    best_parameters <- inner_cv_results %>%
-      group_by(across(all_of(grouping_vars))) %>%
-      summarise(
-        mean_kappa = mean(kappa, na.rm = TRUE),
-        sd_kappa = sd(kappa, na.rm = TRUE),
-        mean_mcc = mean(mcc, na.rm = TRUE),
-        sd_mcc = sd(mcc, na.rm = TRUE),
-        mean_accuracy = mean(accuracy, na.rm = TRUE),
-        sd_accuracy = sd(accuracy, na.rm = TRUE),
-        across(any_of(c("class_0", "class_1")), first),
-        .groups = "drop_last"
-      )
-
-    # For each group, retain the param set with the highest mean_kappa
-    best_parameters %>%
-      group_by(across(all_of(grouping_vars[-length(grouping_vars)]))) %>%
-      filter(mean_kappa == max(mean_kappa, na.rm = TRUE)) %>%
-      slice(1) %>%
-      ungroup()
-  }
-
-  extract_all_best_parameters <- function(model_results, model_configs) {
-    cat("Extracting best parameters...\n")
-
-    best_parameters <- list()
-
-    for (model_name in names(model_results)) {
-      config <- model_configs[[model_name]]
-      cat(sprintf("Extracting best parameters for %s...\n", toupper(model_name)))
-
-      best_parameters[[model_name]] <- list()
-
-      for (fold_type in names(model_results[[model_name]])) {
-        results <- model_results[[model_name]][[fold_type]]
-        if (!is.null(results)) {
-          best_params <- extract_best_hyperparameters(results, config$classification_type)
-          best_parameters[[model_name]][[fold_type]] <- best_params
-        }
-      }
-    }
-
-    best_parameters
-  }
-
-  load_all_model_data <- function(model_configs) {
-    cat("Loading model data...\n")
-
-    model_results <- list()
-
-    for (model_name in names(model_configs)) {
-      config <- model_configs[[model_name]]
-      cat(sprintf("Loading %s data...\n", toupper(model_name)))
-
-      model_results[[model_name]] <- list()
-
-      for (fold_type in names(config$file_paths)) {
-        file_path <- config$file_paths[[fold_type]]
-        results <- combine_csv_files(file_path)
-        if (model_name == "neural_net") {
-          if (!is.null(results)) {
-            results <- process_neural_net_results(results)
-          }
-        }
-
-        if (!is.null(results)) {
-          model_results[[model_name]][[fold_type]] <- results
-        } else {
-          warning(sprintf("Failed to load %s %s data", model_name, fold_type))
-        }
-      }
-    }
-
-    model_results
-  }
-
-  #' Modify class labels to group related subtypes
-  #' @param vector Vector of class labels
-  #' @return Modified vector with grouped classes
-  modify_classes <- function(vector) {
-    vector[grepl("MDS|TP53|MECOM", vector)] <- "MDS.r"
-    vector[!grepl("MLLT3", vector) & grepl("KMT2A", vector)] <- "other.KMT2A"
-    vector
-  }
-
-  #' Save best parameters for all models
-  #' @param best_parameters Best parameters for each model
-  #' @param model_configs Model configurations
-  save_all_best_parameters <- function(best_parameters, model_configs) {
-    cat("Saving best parameters...\n")
-
-    for (model_name in names(best_parameters)) {
-      config <- model_configs[[model_name]]
-      output_dir <- config$output_dir
-
-      cat(sprintf("Saving %s results...\n", toupper(model_name)))
-      dir.create(output_dir)
-
-      for (fold_type in names(best_parameters[[model_name]])) {
-        best_params <- best_parameters[[model_name]][[fold_type]]
-        if (!is.null(best_params)) {
-          filename <- sprintf("%s_best_param_%s.csv", toupper(model_name), fold_type)
-          filepath <- file.path(output_dir, filename)
-          write.csv(best_params, file = filepath, row.names = FALSE)
-          cat(sprintf("  Saved: %s\n", filepath))
-        }
-      }
-    }
-  }
-
-  #' Ensure all required class columns exist in probability matrix
-  #' @param prob_matrix Probability matrix
-  #' @param label_mapping Label mapping data frame
-  #' @return Matrix with all required columns
-  ensure_all_class_columns <- function(prob_matrix, label_mapping) {
-    required_cols <- make.names(label_mapping$Label)
-    missing_cols <- setdiff(required_cols, colnames(prob_matrix))
-
-    for (col_name in missing_cols) {
-      prob_matrix[[col_name]] <- 0
-    }
-
-    prob_matrix[, required_cols, drop = FALSE]
-  }
+main_train_test_analysis <- function(merge_classes = FALSE, merge_mds_only = FALSE){
 
   #' Generate probability data frames for One-vs-Rest classification
   #' @param cv_results_df Cross-validation results data frame
   #' @param best_params_df Best parameters data frame
   #' @param label_mapping Label mapping data frame
   #' @return List of probability data frames organized by outer fold
-  generate_ovr_probability_matrices <- function(cv_results_df, best_params_df, label_mapping, study_names) {
+  #'
+  generate_ovr_probability_matrices <- function(cv_results_df, best_params_df, label_mapping, study_names, merge_classes = FALSE, merge_mds_only = FALSE) {
     best_params_with_labels <- add_class_labels(best_params_df, label_mapping)
     outer_fold_ids <- unique(cv_results_df$outer_fold)
 
@@ -314,6 +77,12 @@ main_train_test_analysis <- function(){
         probability_matrix$outer_fold <- outer_fold_id
         probability_matrix$indices <- parse_numeric_string(inner_fold_data$sample_indices[1]) + 1
         probability_matrix$study <- study_names[probability_matrix$indices]
+
+        # Apply class merging if requested
+        if (merge_classes) {
+          probability_matrix <- merge_classes_in_matrix(probability_matrix, merge_mds_only = merge_mds_only)
+        }
+
         fold_matrices[[as.character(inner_fold_id)]] <- probability_matrix
       }
 
@@ -349,8 +118,6 @@ main_train_test_analysis <- function(){
           # Clean class labels
           truth <- gsub("Class. ", "", truth)
           preds <- gsub("Class. ", "", preds)
-          truth <- modify_classes(truth)
-          preds <- modify_classes(preds)
           # Ensure all classes are represented
           all_classes <- unique(c(truth, preds))
           truth <- factor(truth, levels = all_classes)
@@ -384,7 +151,7 @@ main_train_test_analysis <- function(){
   #' @param filtered_subtypes Filtered leukemia subtypes
   #' @return List of probability data frames organized by outer fold
 
-  generate_standard_probability_matrices <- function(cv_results_df, best_params_df, label_mapping, filtered_subtypes, study_names) {
+  generate_standard_probability_matrices <- function(cv_results_df, best_params_df, label_mapping, filtered_subtypes, study_names, merge_classes = FALSE, merge_mds_only = FALSE) {
     outer_fold_ids <- unique(cv_results_df$outer_fold)
     probability_matrices <- list()
 
@@ -428,6 +195,12 @@ main_train_test_analysis <- function(){
         probability_matrix$outer_fold <- outer_fold_id # outer left out fold, more an id of the cv run
         probability_matrix$indices <- parse_numeric_string(inner_fold_data$sample_indices) + 1
         probability_matrix$study <- study_names[probability_matrix$indices]
+
+        # Apply class merging if requested
+        if (merge_classes) {
+          probability_matrix <- merge_classes_in_matrix(probability_matrix, merge_mds_only = merge_mds_only)
+        }
+
         fold_matrices[[as.character(inner_fold_id)]] <- probability_matrix
       }
 
@@ -437,283 +210,22 @@ main_train_test_analysis <- function(){
     probability_matrices
   }
 
-  generate_weights <- function(step = 0.05){
-    # Generate all combinations of weights from 0 to 1 in 0.1 steps
-    steps <- seq(0, 1, by = step)
-    grid <- expand.grid(SVM = steps, XGB = steps, NN = steps)
-
-    # Remove rows where all the values are the same
-    grid <- grid[!apply(grid, 1, function(x) length(unique(x)) == 1),]
-    grid <- t(apply(grid, 1, function(row) round(row / sum(row), 1)))
-    grid <- grid[!duplicated(grid), ]
-
-    # Convert to a named list
-    ENSEMBLE_WEIGHTS <- apply(grid, 1, function(row) {
-      list(SVM = row["SVM"], XGB = row["XGB"], NN = row["NN"])
-    })
-
-    # Name the list elements for clarity (optional)
-    names(ENSEMBLE_WEIGHTS) <- paste0("W", seq_along(ENSEMBLE_WEIGHTS))
-    ENSEMBLE_WEIGHTS[["ALL"]] <- list(SVM = 1, XGB = 0, NN = 0) # SVM as main fallback since this is in general the best working model
-
-    return(ENSEMBLE_WEIGHTS)
-  }
-
   #' Align probability matrices from different models for ensemble analysis (train/test version)
-  #' @param prob_matrices List of probability matrices from different models
-  #' @param outer_fold_name Name of the outer fold being processed
-  #' @param type Type of analysis ("cv" or "loso")
-  #' @return List of aligned probability matrices
+  #' Uses the unified function from utility_functions.R
   align_probability_matrices_train_test <- function(prob_matrices, outer_fold_name, type) {
-    # Extract matrices for this outer fold (no inner fold nesting)
-    svm_matrix <- prob_matrices$svm[[type]][[outer_fold_name]]
-    xgb_matrix <- prob_matrices$xgboost[[type]][[outer_fold_name]]
-    nn_matrix <- prob_matrices$neural_net[[type]][[outer_fold_name]]
-
-    # Check if all matrices exist
-    if (is.null(svm_matrix) || is.null(xgb_matrix) || is.null(nn_matrix)) {
-      warning(sprintf("Missing probability matrix for outer fold %s in %s analysis", outer_fold_name, type))
-      return(NULL)
-    }
-
-    # Extract true labels
-    truth_svm <- make.names(svm_matrix$y)
-    truth_xgb <- make.names(xgb_matrix$y)
-    truth_nn <- make.names(nn_matrix$y)
-
-    # store non_prob columns
-    non_prob_cols <- svm_matrix[, colnames(svm_matrix) %in% c("y", "inner_fold", "outer_fold", "indices", "study"), drop = FALSE]
-    # Remove non-probability columns from matrices
-    svm_matrix <- svm_matrix[, !colnames(svm_matrix) %in% c("y", "inner_fold", "outer_fold", "indices", "study"), drop = FALSE]
-    xgb_matrix <- xgb_matrix[, !colnames(xgb_matrix) %in% c("y", "inner_fold", "outer_fold", "indices", "study"), drop = FALSE]
-    nn_matrix <- nn_matrix[, !colnames(nn_matrix) %in% c("y", "inner_fold", "outer_fold", "indices", "study"), drop = FALSE]
-
-    # Get all unique class names across all models
-    all_classes <- unique(c(
-      colnames(svm_matrix),
-      colnames(xgb_matrix),
-      colnames(nn_matrix)
-    ))
-
-    # Get the minimum number of samples across all models
-    min_samples <- min(nrow(svm_matrix), nrow(xgb_matrix), nrow(nn_matrix))
-    max_samples <- max(nrow(svm_matrix), nrow(xgb_matrix), nrow(nn_matrix))
-    # Align matrices by ensuring they have the same columns and sample size
-    aligned_matrices <- list()
-
-    for (model_name in c("svm", "xgboost", "neural_net")) {
-      matrix_data <- switch(model_name,
-                            "svm" = svm_matrix,
-                            "xgboost" = xgb_matrix,
-                            "neural_net" = nn_matrix
-      )
-
-      # Ensure all required columns exist (add 0s for missing classes)
-      missing_cols <- setdiff(all_classes, colnames(matrix_data))
-      for (col in missing_cols) {
-        matrix_data[[col]] <- 0
-      }
-
-      # Reorder columns to match all_classes
-      matrix_data <- matrix_data[, all_classes, drop = FALSE]
-
-      if (nrow(matrix_data) < max_samples) {
-        cat(sprintf("The probabilties for %s have less samples then max_samples\n", model_name))
-      }
-
-      # Truncate to minimum sample size if necessary
-      if (nrow(matrix_data) > min_samples) {
-        matrix_data <- matrix_data[1:min_samples, , drop = FALSE]
-      }
-
-      aligned_matrices[[model_name]] <- matrix_data
-    }
-
-    # Use the truth from SVM as reference (or the one with minimum samples)
-    reference_truth <- if (length(truth_svm) >= min_samples) {
-      truth_svm[1:min_samples]
-    } else if (length(truth_xgb) >= min_samples) {
-      truth_xgb[1:min_samples]
-    } else {
-      truth_nn[1:min_samples]
-    }
-
-    # Add aligned truth to the result
-    aligned_matrices$non_prob_cols <- non_prob_cols[1:min_samples, , drop = FALSE]
-    aligned_matrices
+    align_probability_matrices(prob_matrices, outer_fold_name, inner_fold_name = NULL, type)
   }
 
-  #' Perform One-vs-Rest ensemble analysis for train/test (simplified for outer folds only)
-  #' @param results Analysis results containing probability matrices
-  #' @param weights Weight configurations for ensemble
-  #' @param type Type of analysis ("cv" or "loso")
-  #' @return List of performance metrics for each outer fold and weight configuration
+  #' Perform One-vs-Rest ensemble analysis for train/test (parallelized)
+  #' Uses the unified function from utility_functions.R
   perform_ovr_ensemble_analysis_train_test <- function(results, weights, type = "cv") {
-    cat("Performing One-vs-Rest ensemble analysis for train/test...\n")
-
-    outer_folds <- names(results$probability_matrices$svm[[type]])
-    df_list <- list()
-
-    for (outer_fold in outer_folds) {
-      cat(sprintf("  Processing outer fold %s...\n", outer_fold))
-
-      # Store results for this outer fold
-      outer_fold_results <- list()
-
-      # Align probability matrices for this outer fold
-      aligned_matrices <- align_probability_matrices_train_test(results$probability_matrices, outer_fold, type)
-      if (is.null(aligned_matrices)) {
-        cat(sprintf("    Skipping outer fold %s - unable to align matrices\n", outer_fold))
-        next
-      }
-
-      for (i in seq_along(weights)) {
-        weight_i <- names(weights)[i]
-
-        # Extract aligned probability data frames
-        prob_df_SVM <- aligned_matrices$svm
-        prob_df_XGB <- aligned_matrices$xgboost
-        prob_df_NN <- aligned_matrices$neural_net
-        truth <- make.names(aligned_matrices$non_prob_cols$y)
-
-        # Get all class names
-        all_classes <- colnames(prob_df_SVM)
-
-        # Analyze each class separately as a binary classification problem
-        for (class_name in all_classes) {
-          # Calculate weighted ensemble probabilities for this class only
-          class_probs <- prob_df_SVM[[class_name]] * weights[[weight_i]]$SVM +
-            prob_df_XGB[[class_name]] * weights[[weight_i]]$XGB +
-            prob_df_NN[[class_name]] * weights[[weight_i]]$NN
-
-          # Create binary predictions: class vs not class
-          binary_preds <- ifelse(class_probs > 0.5, "Class", "Not_Class")
-
-          # Create binary truth: class vs not class
-          binary_truth <- ifelse(truth == class_name, "Class", "Not_Class")
-
-          # Ensure factor levels
-          binary_truth <- factor(binary_truth, levels = c("Not_Class", "Class"))
-          binary_preds <- factor(binary_preds, levels = c("Not_Class", "Class"))
-
-          # Calculate binary confusion matrix and metrics
-          cm <- caret::confusionMatrix(binary_preds, binary_truth, positive = "Class")
-
-          # Extract binary performance metrics
-          sensitivity <- cm$byClass["Sensitivity"]
-          specificity <- cm$byClass["Specificity"]
-          balanced_accuracy <- cm$byClass["Balanced Accuracy"]
-          f1_score <- cm$byClass["F1"]
-          prevalence <- cm$byClass["Prevalence"]
-
-          # Create results data frame for this class and outer fold
-          df <- data.frame(
-            outer_fold = outer_fold,
-            weights = weight_i,
-            type = type,
-            class = gsub("Class.", "", class_name),
-            sensitivity = sensitivity,
-            specificity = specificity,
-            balanced_accuracy = balanced_accuracy,
-            f1_score = f1_score,
-            prevalence = prevalence,
-            stringsAsFactors = FALSE
-          )
-
-          key <- paste(weight_i, class_name, sep = "_")
-          outer_fold_results[[key]] <- rbind(outer_fold_results[[key]], df)
-        }
-      }
-
-      # Store results for this outer fold (no aggregation needed since no inner folds)
-      if (length(outer_fold_results) > 0) {
-        df_list[[outer_fold]] <- do.call(rbind, outer_fold_results)
-      }
-    }
-
-    df_list
+    perform_ovr_ensemble_analysis_unified(results, weights, type, has_inner_folds = FALSE)
   }
 
-  #' Perform global ensemble optimization using overall kappa for train/test
-  #' @param results Analysis results containing probability matrices
-  #' @param weights Weight configurations for ensemble
-  #' @param type Type of analysis ("cv" or "loso")
-  #' @return List of performance metrics for each outer fold and weight configuration
+  #' Perform global ensemble optimization using overall kappa for train/test (parallelized)
+  #' Uses the unified function from utility_functions.R
   perform_global_ensemble_analysis_train_test <- function(results, weights, type = "cv") {
-    cat("Performing global ensemble analysis for train/test...\n")
-
-    outer_folds <- names(results$probability_matrices$svm[[type]])
-    df_list <- list()
-
-    for (outer_fold in outer_folds) {
-      cat(sprintf("  Processing outer fold %s...\n", outer_fold))
-
-      # Store results for this outer fold
-      outer_fold_results <- list()
-
-      # Align probability matrices for this outer fold
-      aligned_matrices <- align_probability_matrices_train_test(results$probability_matrices, outer_fold, type)
-      if (is.null(aligned_matrices)) {
-        cat(sprintf("    Skipping outer fold %s - unable to align matrices\n", outer_fold))
-        next
-      }
-
-      for (i in seq_along(weights)) {
-        weight_i <- names(weights)[i]
-
-        # Extract aligned probability data frames
-        prob_df_SVM <- aligned_matrices$svm
-        prob_df_XGB <- aligned_matrices$xgboost
-        prob_df_NN <- aligned_matrices$neural_net
-        truth <- make.names(aligned_matrices$non_prob_cols$y)
-
-        # Calculate weighted ensemble probabilities
-        prob_df <- prob_df_SVM * weights[[weight_i]]$SVM +
-          prob_df_XGB * weights[[weight_i]]$XGB +
-          prob_df_NN * weights[[weight_i]]$NN
-
-        # Normalize probabilities to sum to 1 for each sample
-        prob_df <- prob_df / rowSums(prob_df)
-
-        # Get predictions
-        preds <- colnames(prob_df)[apply(prob_df, 1, which.max)]
-
-        # Clean class labels
-        truth <- make.names(gsub("Class. ", "", truth))
-        preds <- make.names(gsub("Class. ", "", preds))
-
-        # Ensure all classes are represented
-        all_classes <- unique(c(truth, preds))
-        truth <- factor(truth, levels = all_classes)
-        preds <- factor(preds, levels = all_classes)
-
-        # Calculate confusion matrix and metrics
-        cm <- caret::confusionMatrix(preds, truth)
-
-        # Extract overall performance metrics
-        overall_kappa <- cm$overall["Kappa"]
-        overall_accuracy <- cm$overall["Accuracy"]
-
-        # Create results data frame for this outer fold
-        df <- data.frame(
-          outer_fold = outer_fold,
-          weights = weight_i,
-          type = type,
-          kappa = overall_kappa,
-          accuracy = overall_accuracy,
-          stringsAsFactors = FALSE
-        )
-
-        outer_fold_results[[weight_i]] <- rbind(outer_fold_results[[weight_i]], df)
-      }
-
-      # Store results for this outer fold (no aggregation needed since no inner folds)
-      if (length(outer_fold_results) > 0) {
-        df_list[[outer_fold]] <- do.call(rbind, outer_fold_results)
-      }
-    }
-
-    df_list
+    perform_global_ensemble_analysis_unified(results, weights, type, has_inner_folds = FALSE)
   }
 
   #' Generate One-vs-Rest optimized ensemble probability matrices for train/test
@@ -831,24 +343,27 @@ main_train_test_analysis <- function(){
       # Store the globally best weight configurations used for this outer fold
       outer_fold_weights_used <- global_class_weights
 
-      # Generate optimized matrices using the selected weights
-      aligned_matrices <- align_probability_matrices_train_test(results$probability_matrices, outer_fold, type)
+      # Generate optimized matrices using the selected weights (with caching)
+      alignment_cache <- new.env(hash = TRUE)
+      aligned_matrices <- align_probability_matrices_cached(
+        results$probability_matrices, outer_fold, NULL, type, alignment_cache
+      )
       if (is.null(aligned_matrices)) {
         cat(sprintf("      Skipping outer fold %s - unable to align matrices\n", outer_fold))
         next
       }
 
-      # Extract aligned probability data frames
-      prob_df_SVM <- aligned_matrices$svm
-      prob_df_XGB <- aligned_matrices$xgboost
-      prob_df_NN <- aligned_matrices$neural_net
+      # Convert to matrices once for efficiency
+      prob_mat_SVM <- as.matrix(aligned_matrices$svm)
+      prob_mat_XGB <- as.matrix(aligned_matrices$xgboost)
+      prob_mat_NN <- as.matrix(aligned_matrices$neural_net)
       non_prob_cols <- aligned_matrices$non_prob_cols
 
       # Get all class names
-      all_classes <- colnames(prob_df_SVM)
+      all_classes <- colnames(aligned_matrices$svm)
 
       # Initialize optimized probability matrix
-      optimized_matrix <- matrix(0, nrow = nrow(prob_df_SVM), ncol = length(all_classes))
+      optimized_matrix <- matrix(0, nrow = nrow(prob_mat_SVM), ncol = length(all_classes))
       colnames(optimized_matrix) <- all_classes
 
       # For each class, use the selected best weights for this outer fold
@@ -880,17 +395,18 @@ main_train_test_analysis <- function(){
           best_weights <- weights[["ALL"]]
         }
 
-        # Calculate weighted ensemble probabilities for this class
-        class_probs <- prob_df_SVM[[class_name]] * best_weights$SVM +
-          prob_df_XGB[[class_name]] * best_weights$XGB +
-          prob_df_NN[[class_name]] * best_weights$NN
-
-        optimized_matrix[, class_name] <- class_probs
+        # Calculate weighted ensemble probabilities for this class using matrix operations
+        class_col_idx <- which(all_classes == class_name)
+        optimized_matrix[, class_col_idx] <- prob_mat_SVM[, class_col_idx] * best_weights$SVM +
+          prob_mat_XGB[, class_col_idx] * best_weights$XGB +
+          prob_mat_NN[, class_col_idx] * best_weights$NN
       }
 
-      # Convert to data frame and normalize probabilities
-      optimized_matrix <- data.frame(optimized_matrix)
-      optimized_matrix <- t(apply(optimized_matrix, 1, function(row) row / sum(row)))
+      # Normalize probabilities to sum to 1 for each sample
+      row_sums <- rowSums(optimized_matrix)
+      optimized_matrix <- optimized_matrix / row_sums
+
+      # Convert to data frame and add true labels
       optimized_matrix <- data.frame(optimized_matrix)
       optimized_matrix <- cbind(optimized_matrix, non_prob_cols)
 
@@ -959,26 +475,30 @@ main_train_test_analysis <- function(){
       cat(sprintf("    Using globally optimized weights (%s) for outer fold %s (mean kappa = %.4f)\n",
                   global_best_weight_name, outer_fold, global_best_kappa))
 
-      # Align probability matrices for this outer fold
-      aligned_matrices <- align_probability_matrices_train_test(results$probability_matrices, outer_fold, type)
+      # Align probability matrices for this outer fold (with caching)
+      alignment_cache <- new.env(hash = TRUE)
+      aligned_matrices <- align_probability_matrices_cached(
+        results$probability_matrices, outer_fold, NULL, type, alignment_cache
+      )
       if (is.null(aligned_matrices)) {
         cat(sprintf("      Skipping outer fold %s - unable to align matrices\n", outer_fold))
         next
       }
 
-      # Extract aligned probability data frames
-      prob_df_SVM <- aligned_matrices$svm
-      prob_df_XGB <- aligned_matrices$xgboost
-      prob_df_NN <- aligned_matrices$neural_net
+      # Convert to matrices once for efficiency
+      prob_mat_SVM <- as.matrix(aligned_matrices$svm)
+      prob_mat_XGB <- as.matrix(aligned_matrices$xgboost)
+      prob_mat_NN <- as.matrix(aligned_matrices$neural_net)
       non_prob_cols <- aligned_matrices$non_prob_cols
 
-      # Calculate weighted ensemble probabilities using globally best weights
-      optimized_matrix <- prob_df_SVM * global_best_weights$SVM +
-        prob_df_XGB * global_best_weights$XGB +
-        prob_df_NN * global_best_weights$NN
+      # Calculate weighted ensemble probabilities using globally best weights (matrix operations)
+      optimized_matrix <- prob_mat_SVM * global_best_weights$SVM +
+        prob_mat_XGB * global_best_weights$XGB +
+        prob_mat_NN * global_best_weights$NN
 
       # Normalize probabilities to sum to 1 for each sample
-      optimized_matrix <- optimized_matrix / rowSums(optimized_matrix)
+      row_sums <- rowSums(optimized_matrix)
+      optimized_matrix <- optimized_matrix / row_sums
 
       # Convert to data frame and add true labels
       optimized_matrix <- data.frame(optimized_matrix)
@@ -1026,8 +546,6 @@ main_train_test_analysis <- function(){
       # Clean class labels
       truth <- gsub("Class. ", "", truth)
       preds <- gsub("Class. ", "", preds)
-      truth <- modify_classes(truth)
-      preds <- modify_classes(preds)
 
       # Ensure all classes are represented
       all_classes <- unique(c(truth, preds))
@@ -1044,148 +562,15 @@ main_train_test_analysis <- function(){
   }
 
   #' Evaluate nested CV kappa with rejection for a single probability matrix (train/test version)
-  #' @param prob_matrix Probability matrix with class probabilities and true labels
-  #' @param fold_name Name of the fold being analyzed
-  #' @param model_name Name of the model being analyzed
-  #' @param type Type of analysis ("cv" or "loso")
-  #' @return Data frame with rejection analysis results
+  #' Uses the unified function from utility_functions.R
   evaluate_single_matrix_with_rejection_train_test <- function(prob_matrix, fold_name, model_name, type) {
-    # Extract true labels and remove from probability matrix
-    truth <- prob_matrix$y
-    prob_matrix_clean <- prob_matrix[, !colnames(prob_matrix) %in% c("y", "inner_fold", "outer_fold", "indices", "study"), drop = FALSE]
-
-    # Clean class labels
-    truth <- gsub("Class. ", "", truth)
-    truth <- modify_classes(truth)
-
-    # Get predictions (class with highest probability)
-    pred_indices <- apply(prob_matrix_clean, 1, which.max)
-    preds <- colnames(prob_matrix_clean)[pred_indices]
-    preds <- gsub("Class. ", "", preds)
-    preds <- modify_classes(preds)
-
-    # Get max probabilities for each sample
-    max_probs <- apply(prob_matrix_clean, 1, max)
-
-    # Ensure all classes are represented
-    all_classes <- unique(c(truth, preds))
-    truth <- factor(truth, levels = all_classes)
-    preds <- factor(preds, levels = all_classes)
-
-    # Test probability cutoffs
-    prob_cutoffs <- seq(0.00, 1.00, by = 0.01)
-    all_results <- data.frame()
-
-    for (cutoff in prob_cutoffs) {
-      # Identify samples to reject (max probability below cutoff)
-      rejected_indices <- which(max_probs < cutoff)
-      accepted_indices <- which(max_probs >= cutoff)
-
-      if (length(accepted_indices) == 0) {
-        # If all samples are rejected, skip this cutoff
-        next
-      }
-
-      # Calculate accuracy for rejected samples (if any)
-      rejected_accuracy <- NA
-      if (length(rejected_indices) > 0) {
-        rejected_truth <- truth[rejected_indices]
-        rejected_preds <- preds[rejected_indices]
-        rejected_accuracy <- sum(rejected_truth == rejected_preds) / length(rejected_indices)
-      }
-
-      # Use only accepted samples for kappa calculation
-      accepted_truth <- truth[accepted_indices]
-      accepted_preds <- preds[accepted_indices]
-
-      # Calculate kappa for accepted samples
-      res <- caret::confusionMatrix(accepted_preds, accepted_truth)
-      kappa <- as.numeric(res$overall["Kappa"])
-      accuracy <- as.numeric(res$overall["Accuracy"])
-
-      # Store results
-      all_results <- rbind(
-        all_results,
-        data.frame(
-          model = model_name,
-          type = type,
-          fold = fold_name,
-          prob_cutoff = cutoff,
-          kappa = kappa,
-          accuracy = accuracy,
-          n_accepted = length(accepted_indices),
-          n_rejected = length(rejected_indices),
-          perc_rejected = length(rejected_indices) / (length(accepted_indices) + length(rejected_indices)),
-          rejected_accuracy = rejected_accuracy,
-          total_samples = nrow(prob_matrix),
-          stringsAsFactors = FALSE
-        )
-      )
-    }
-
-    return(all_results)
+    evaluate_single_matrix_with_rejection_parallel(prob_matrix, fold_name, model_name, type)
   }
 
-  #' Evaluate rejection analysis for all probability matrices (train/test version)
-  #' @param probability_matrices List of probability matrices for all models
-  #' @param ensemble_matrices List of ensemble probability matrices
-  #' @param type Type of analysis ("cv" or "loso")
-  #' @return Data frame with rejection analysis results for all models and ensembles
+  #' Evaluate rejection analysis for all probability matrices (train/test version, parallelized)
+  #' Uses the unified function from utility_functions.R
   evaluate_all_matrices_with_rejection_train_test <- function(probability_matrices, ensemble_matrices, type = "cv") {
-    cat("Performing rejection analysis for all probability matrices (train/test)...\n")
-
-    all_rejection_results <- data.frame()
-
-    # Analyze individual models
-    cat("  Analyzing individual models...\n")
-    for (model_name in names(probability_matrices)) {
-      cat(sprintf("    Processing %s...\n", toupper(model_name)))
-
-      if (type %in% names(probability_matrices[[model_name]])) {
-        outer_fold_matrices <- probability_matrices[[model_name]][[type]]
-
-        for (outer_fold_name in names(outer_fold_matrices)) {
-          prob_matrix <- outer_fold_matrices[[outer_fold_name]]
-
-          if (!is.null(prob_matrix) && nrow(prob_matrix) > 0) {
-            rejection_results <- evaluate_single_matrix_with_rejection_train_test(
-              prob_matrix, outer_fold_name, model_name, type
-            )
-            # Add outer fold information
-            rejection_results$outer_fold <- outer_fold_name
-            all_rejection_results <- rbind(all_rejection_results, rejection_results)
-          }
-        }
-      }
-    }
-
-    # Analyze ensemble methods
-    cat("  Analyzing ensemble methods...\n")
-    ensemble_methods <- list(
-      "OvR_Ensemble" = ensemble_matrices$ovr_optimized_ensemble_matrices,
-      "Global_Optimized" = ensemble_matrices$global_optimized_ensemble_matrices
-    )
-
-    for (ensemble_name in names(ensemble_methods)) {
-      cat(sprintf("    Processing %s...\n", ensemble_name))
-
-      ensemble_outer_fold_matrices <- ensemble_methods[[ensemble_name]]
-
-      for (outer_fold_name in names(ensemble_outer_fold_matrices)) {
-        prob_matrix <- ensemble_outer_fold_matrices[[outer_fold_name]]
-
-        if (!is.null(prob_matrix) && nrow(prob_matrix) > 0) {
-          rejection_results <- evaluate_single_matrix_with_rejection_train_test(
-            prob_matrix, outer_fold_name, ensemble_name, type
-          )
-          # Add outer fold information
-          rejection_results$outer_fold <- outer_fold_name
-          all_rejection_results <- rbind(all_rejection_results, rejection_results)
-        }
-      }
-    }
-
-    return(all_rejection_results)
+    evaluate_all_matrices_with_rejection_unified(probability_matrices, ensemble_matrices, type, has_inner_folds = FALSE)
   }
 
   #' Find optimal probability cutoff for each model/ensemble per outer fold (train/test version)
@@ -1292,79 +677,6 @@ main_train_test_analysis <- function(){
     return(combined_results)
   }
 
-  #' Save ensemble weights used for each analysis type (simplified version)
-  #' @param ensemble_results Ensemble analysis results containing weights used
-  #' @param output_base_dir Base directory for output files
-  save_ensemble_weights <- function(ensemble_results, output_base_dir) {
-    cat("Saving ensemble weights used...\n")
-
-    for (analysis_type in names(ensemble_results)) {
-      cat(sprintf("Saving weights for %s analysis...\n", toupper(analysis_type)))
-
-      # Create output directory for this analysis type
-      weights_output_dir <- file.path(output_base_dir, "ensemble_weights", analysis_type)
-      create_directory_safely(weights_output_dir)
-
-      # Save OvR ensemble weights (one weight per class, no fold column)
-      if ("ovr_ensemble_weights_used" %in% names(ensemble_results[[analysis_type]])) {
-        ovr_weights <- ensemble_results[[analysis_type]]$ovr_ensemble_weights_used
-
-        # Get weights from the first fold (since all folds have the same weights)
-        first_fold_name <- names(ovr_weights)[1]
-        if (!is.null(first_fold_name)) {
-          fold_weights <- ovr_weights[[first_fold_name]]
-
-          ovr_weights_df <- data.frame()
-
-          # Extract weights for each class
-          for (class_name in names(fold_weights)) {
-            class_weight_info <- fold_weights[[class_name]]
-
-            ovr_weights_df <- rbind(ovr_weights_df, data.frame(
-              class = class_name,
-              weight_name = class_weight_info$weight_name,
-              svm_weight = class_weight_info$weights$SVM,
-              xgb_weight = class_weight_info$weights$XGB,
-              nn_weight = class_weight_info$weights$NN,
-              mean_f1_score = class_weight_info$f1_score,
-              stringsAsFactors = FALSE
-            ))
-          }
-
-          # Save OvR weights
-          ovr_weights_file <- file.path(weights_output_dir, "ovr_ensemble_weights_used.csv")
-          write.csv(ovr_weights_df, ovr_weights_file, row.names = FALSE)
-          cat(sprintf("  Saved OvR weights: %s\n", ovr_weights_file))
-        }
-      }
-
-      # Save global ensemble weights (single weight set, no fold column)
-      if ("global_ensemble_weights_used" %in% names(ensemble_results[[analysis_type]])) {
-        global_weights <- ensemble_results[[analysis_type]]$global_ensemble_weights_used
-
-        # Get weights from the first fold (since all folds have the same weights)
-        first_fold_name <- names(global_weights)[1]
-        if (!is.null(first_fold_name)) {
-          fold_weight_info <- global_weights[[first_fold_name]]
-
-          global_weights_df <- data.frame(
-            weight_name = fold_weight_info$weight_name,
-            svm_weight = fold_weight_info$weights$SVM,
-            xgb_weight = fold_weight_info$weights$XGB,
-            nn_weight = fold_weight_info$weights$NN,
-            mean_kappa = fold_weight_info$kappa,
-            stringsAsFactors = FALSE
-          )
-
-          # Save global weights
-          global_weights_file <- file.path(weights_output_dir, "global_ensemble_weights_used.csv")
-          write.csv(global_weights_df, global_weights_file, row.names = FALSE)
-          cat(sprintf("  Saved global weights: %s\n", global_weights_file))
-        }
-      }
-    }
-  }
-
   load_library_quietly("plyr")
   load_library_quietly("dplyr")
   load_library_quietly("stringr")
@@ -1388,7 +700,7 @@ main_train_test_analysis <- function(){
   label_mapping <- read.csv("../data/label_mapping_all.csv")
 
   # Load leukemia subtype data
-  leukemia_subtypes <- read.csv("../data/rgas_20aug25.csv")$ICC_Subtype
+  leukemia_subtypes <- read.csv("../data/rgas_18dec25.csv")$ICC_Subtype
 
   # Load study metadata
   meta <- read.csv("../data/meta_20aug25.csv")
@@ -1416,33 +728,33 @@ main_train_test_analysis <- function(){
     svm = list(
       classification_type = "OvR",
       file_paths = list(
-        cv = "../data/out/final_train_test/final_cv_svm/",
-        loso = "../data/out/final_train_test/final_loso_svm/"
+        cv = "../data/out/final_train_test/SVM_final_selection/final_cv_svm/",
+        loso = "../data/out/final_train_test/SVM_final_selection/final_loso_svm/"
       ),
       output_dir = "../data/out/final_train_test/best_params/SVM"
     ),
     xgboost = list(
       classification_type = "OvR",
       file_paths = list(
-        cv = "../data/out/final_train_test/final_cv_xgb/",
-        loso = "../data/out/final_train_test/final_loso_xgb/"
+        cv = "../data/out/final_train_test/XGBOOST_final_selection/final_cv_xgb/",
+        loso = "../data/out/final_train_test/XGBOOST_final_selection/final_loso_xgb/"
       ),
       output_dir = "../data/out/final_train_test/best_params/XGBOOST"
     ),
     neural_net = list(
       classification_type = "standard",
       file_paths = list(
-        cv = "../data/out/final_train_test/final_cv_nn/",
-        loso = "../data/out/final_train_test/final_loso_nn/"
+        cv = "../data/out/final_train_test/NN_final_selection/final_cv_nn/",
+        loso = "../data/out/final_train_test/NN_final_selection/final_loso_nn/"
       ),
       output_dir = "../data/out/final_train_test/best_params/NN"
     )
   )
 
-  model_results <- load_all_model_data(MODEL_CONFIGS)
+  model_results <- load_all_model_data(MODEL_CONFIGS, group_nn_by_outer_fold = FALSE)
 
   # Extract best parameters
-  best_parameters <- extract_all_best_parameters(model_results, MODEL_CONFIGS)
+  best_parameters <- extract_all_best_parameters(model_results, MODEL_CONFIGS, include_outer_fold = FALSE)
 
   # Save best parameters
   save_all_best_parameters(best_parameters, MODEL_CONFIGS)
@@ -1460,25 +772,13 @@ main_train_test_analysis <- function(){
 
       if (!is.null(results) && !is.null(best_params)) {
         if (config$classification_type == "OvR") {
-          probs <- generate_ovr_probability_matrices(results, best_params, label_mapping, study_names)
+          probs <- generate_ovr_probability_matrices(results, best_params, label_mapping, study_names, merge_classes = merge_classes, merge_mds_only = merge_mds_only)
         } else {
-          probs <- generate_standard_probability_matrices(results, best_params, label_mapping, filtered_leukemia_subtypes, study_names)
+          probs <- generate_standard_probability_matrices(results, best_params, label_mapping, filtered_leukemia_subtypes, study_names, merge_classes = merge_classes, merge_mds_only = merge_mds_only)
         }
 
-        probs <- lapply(probs, function(prob) {
-          MDS_cols <- grepl("MDS|TP53|MECOM", colnames(prob))
-          MDS <- rowSums(prob[,MDS_cols])
-
-          other_KMT2A_cols <- grepl("KMT2A", colnames(prob)) & !grepl("MLLT3", colnames(prob))
-          other_KMT2A <- rowSums(prob[,other_KMT2A_cols])
-
-          prob <- prob[, !(MDS_cols | other_KMT2A_cols)]
-          prob$MDS.r <- MDS
-          prob$other.KMT2A <- other_KMT2A
-          prob$y <- modify_classes(prob$y)
-          colnames(prob) <- modify_classes(colnames(prob))
-          return(prob)
-        })
+        # No class grouping - keep original classes
+        # probs remain unchanged
 
         probability_matrices[[model_name]][[fold_type]] <- probs
         remove(probs)
@@ -1522,14 +822,14 @@ main_train_test_analysis <- function(){
     # Perform global ensemble analysis
     global_ensemble_results <- perform_global_ensemble_analysis_train_test(
       list(probability_matrices = probability_matrices),
-      generate_weights(0.05),
+      generate_weights(),
       analysis_type
     )
 
     # Generate globally optimized ensemble matrices
     global_optimized_ensemble_matrices <- generate_global_optimized_ensemble_matrices_train_test(
       list(probability_matrices = probability_matrices),
-      generate_weights(0.05),
+      generate_weights(),
       analysis_type,
       global_ensemble_results
     )
@@ -1540,14 +840,14 @@ main_train_test_analysis <- function(){
     # Perform One-vs-Rest ensemble analysis
     ovr_ensemble_results <- perform_ovr_ensemble_analysis_train_test(
       list(probability_matrices = probability_matrices),
-      generate_weights(0.05),
+      generate_weights(),
       analysis_type
     )
 
     # Generate One-vs-Rest optimized ensemble matrices
     ovr_optimized_result <- generate_ovr_optimized_ensemble_matrices_train_test(
       list(probability_matrices = probability_matrices),
-      generate_weights(0.05),
+      generate_weights(),
       analysis_type,
       ovr_ensemble_results
     )
@@ -1597,13 +897,22 @@ main_train_test_analysis <- function(){
     rejection_results[[analysis_type]][["optimal_results"]] <- find_optimal_cutoffs_train_test(rejection_results[[analysis_type]][["all_results"]], "kappa")
   }
 
+  # Determine suffix for file paths (maxprob method - uses max probability instead of summing)
+  if (!merge_classes) {
+    merge_suffix <- "_unmerged_maxprob"
+  } else if (merge_mds_only) {
+    merge_suffix <- "_mds_only_maxprob"
+  } else {
+    merge_suffix <- "_merged_maxprob"
+  }
+
   # Save ensemble weights
-  weights_dir <- "../data/out/final_train_test/ensemble_weights"
+  weights_dir <- paste0("../data/out/final_train_test/ensemble_weights", merge_suffix)
   dir.create(weights_dir, recursive = TRUE)
-  save_ensemble_weights(ensemble_results,  weights_dir)
+  save_ensemble_weights(ensemble_results, weights_dir, save_per_fold = FALSE)
 
   # Save cutoffs
-  cutoff_dir <- "../data/out/final_train_test/cutoffs"
+  cutoff_dir <- paste0("../data/out/final_train_test/cutoffs", merge_suffix)
   dir.create(cutoff_dir, recursive = TRUE)
 
   # Extract and save the optimal cutoffs
@@ -1634,7 +943,7 @@ main_train_test_analysis <- function(){
   }
 
   if (nrow(combined_cutoffs) > 0) {
-    write.csv(combined_cutoffs, file.path(cutoff_dir, "train_test_cutoffs.csv"), row.names = FALSE)
+    write.csv(combined_cutoffs, file.path(cutoff_dir, paste0("train_test_cutoffs", merge_suffix, ".csv")), row.names = FALSE)
   } else {
     cat("Warning: No optimal cutoffs found to save\n")
   }
@@ -1665,8 +974,6 @@ main_train_test_analysis <- function(){
             # Clean class labels
             truth <- gsub("Class.", "", truth)
             preds <- gsub("Class.", "", preds)
-            truth <- modify_classes(truth)
-            preds <- modify_classes(preds)
 
             # Ensure all classes are represented
             all_classes <- unique(c(truth, preds))
@@ -1743,11 +1050,19 @@ main_train_test_analysis <- function(){
 
   # Add final results comparison (with and without rejection)
   train_test_results$final_results <- combine_all_results_train_test(train_test_results)
+  train_test_results$merge_classes <- merge_classes  # Store merge status in results
+  train_test_results$merge_mds_only <- merge_mds_only  # Store merge_mds_only status in results
 
   cat("\n=== Final Train/Test Results Summary ===\n")
   print(train_test_results$final_results)
 
-  saveRDS(train_test_results, "../data/out/final_train_test/final_train_test_results.rds")
+  saveRDS(train_test_results, paste0("../data/out/final_train_test/final_train_test_results_5jan2025", merge_suffix, ".rds"))
   return(train_test_results)
 }
-train_test_results <- main_train_test_analysis()
+
+# Run merged and MDS-only merged versions (maxprob method)
+cat("=== Running Train/Test Analysis (Merged - MaxProb Method) ===\n")
+train_test_results_merged <- main_train_test_analysis(merge_classes = TRUE, merge_mds_only = FALSE)
+
+#cat("=== Running Train/Test Analysis (MDS Only Merged - MaxProb Method) ===\n")
+#train_test_results_mds_only <- main_train_test_analysis(merge_classes = TRUE, merge_mds_only = TRUE)

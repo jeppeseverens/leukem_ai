@@ -9,24 +9,46 @@ output:
 
 # Setup
 
-## -- Load Analysis Scripts
+## -- Load Analyses
 
 ```{r}
-#source("~/Documents/AML_PhD/leukem_ai/R/inner_cv_analysis.R")
+setwd("~/leukem_ai/R")
+#source("inner_cv_analysis.R")
 ```
 
 ```{r}
-source("~/Documents/AML_PhD/leukem_ai/R/outer_cv_analysis.r")
+#source("outer_cv_analysis.R")
+outer_merged <- readRDS("../data/out/outer_cv/outer_cv_results_5jan2025_merged.rds")
+outer_merged[["performance_summaries"]]
+outer_merged <- readRDS("../data/out/outer_cv/outer_cv_results_5jan2025_merged_maxprob.rds")
+outer_merged[["performance_summaries"]]
+```
+```{r}
+outer_merged <- readRDS("../data/out/outer_cv/outer_cv_results_5jan2025_mds_only.rds")
+outer_merged[["performance_summaries"]]
+outer_merged <- readRDS("../data/out/outer_cv/outer_cv_results_5jan2025_mds_only_maxprob.rds")
+outer_merged[["performance_summaries"]]
 ```
 
 
 ```{r}
+outer_unmerged <- readRDS("../data/out/outer_cv/outer_cv_results_5jan2025_unmerged.rds")
+outer_unmerged[["performance_summaries"]]
+```
+
+```{r}
+source("train_test_analysis.R")
+```
+
+# Load data
+```{r}
+
 modify_classes <- function(vector) {
     # Convert factor to character to avoid invalid factor level warnings
     was_factor <- is.factor(vector)
     vector <- as.character(vector)
     
-    vector[grepl("MDS|TP53|MECOM", vector)] <- "MDS.r/MECOM"
+    vector[grepl("MDS|TP53", vector)] <- "MDS.r"
     vector[!grepl("MLLT3", vector) & grepl("KMT2A", vector)] <- "other.KMT2A"
     
     # Optionally convert back to factor if input was factor
@@ -55,7 +77,7 @@ DATA_FILTERS <- list(
 label_mapping <- read.csv("../data/label_mapping_all.csv")
 
 # Load leukemia subtype data
-leukemia_subtypes <- read.csv("../data/rgas_20aug25.csv")$ICC_Subtype
+leukemia_subtypes <- read.csv("../data/rgas_18dec25.csv")$ICC_Subtype
 
 # Load study metadata
 meta <- read.csv("../data/meta_20aug25.csv")
@@ -72,7 +94,7 @@ filter <- which(
 leukemia_subtypes_mod <- modify_classes(leukemia_subtypes)
 
 filtered_leukemia_subtypes <- leukemia_subtypes[filter]
-
+filtered_leukemia_subtypes[filtered_leukemia_subtypes == "MECOM fusion"] <- "MECOM rearrangement"
 # Load study metadata
 filtered_study_names <- study_names[filter]
 
@@ -81,8 +103,8 @@ meta$classes <- filtered_leukemia_subtypes
 ```
 
 ```{r}
-dir.create("../writing/tables")
-dir.create("../writing/figures")
+dir.create("../writing/tables_new")
+dir.create("../writing/figures_new")
 ```
 
 # Training Cohort Tables
@@ -151,10 +173,31 @@ create_subtype_table <- function(df, cohort_order) {
 }
 
 # Create tables for included and excluded classes
-# For included, we need to show merged classes with breakdowns
+
+# For included, we need to show merged classes with breakdowns and
+# also group rare recurrent translocations into a single AML subgroup.
 included_df_modified <- included_df
 included_df_modified$Subtype_Original <- included_df$Subtype
+
+# Start from the standard merged labels (MDS-related and other KMT2A)
 included_df_modified$Subtype_Merged <- modify_classes(included_df$Subtype)
+
+# Define rare recurrent translocation subtypes to be grouped.
+# Allow for both "::" and ".." / comma variants so this works with
+# whichever naming is present in filtered_leukemia_subtypes.
+rare_tx_subtypes <- c(
+  "CBFA2T3::GLIS2",        "CBFA2T3..GLIS2",
+  "NUP98::KDM5A",          "NUP98..KDM5A",
+  "KAT6A::CREBBP",         "KAT6A..CREBBP",
+  "ETV6::MNX1",            "ETV6..MNX1",
+  "FUS::ERG", "RBM15::MRTF1", "NUP98::NSD1",
+  "NUP98, other partners", "NUP98..other.partners"
+)
+
+# Map these to a single merged group
+included_df_modified$Subtype_Merged[
+  included_df_modified$Subtype_Original %in% rare_tx_subtypes
+] <- "other.rare.tx"
 
 # Create table with merged classes
 included_table_merged <- create_subtype_table(
@@ -164,21 +207,54 @@ included_table_merged <- create_subtype_table(
 )
 
 # Rename merged subtypes for display
-included_table_merged$Subtype <- gsub("MDS\\.r/MECOM", "MDS-related and MECOM rearrangement", included_table_merged$Subtype)
+included_table_merged$Subtype <- gsub("MDS\\.r", "MDS-related", included_table_merged$Subtype)
 included_table_merged$Subtype <- gsub("other\\.KMT2A", "Other KMT2A rearrangements", included_table_merged$Subtype)
+included_table_merged$Subtype <- gsub(
+  "other\\.rare\\.tx",
+  "AML with other rare recurring translocations",
+  included_table_merged$Subtype
+)
+
+# Custom display order for included AML subtypes
+# (controls order in both Supplementary Table 1 and Table 1)
+# Use the actual row labels from the table.
+desired_included_order <- c(
+  "APL, t(15;17)/PML::RARA",                 # Acute promyelocytic leukemia
+  "AML with t(8;21)/RUNX1::RUNX1T1",
+  "AML with inv(16)/t(16;16)/CBFB::MYH11",
+  "AML with t(9;11)/MLLT3::KMT2A",
+  "Other KMT2A rearrangements",
+  "AML with t(6;9)/DEK::NUP214",
+  # MECOM rearrangements grouped at merged level
+  "MECOM rearrangement",
+  "AML with other rare recurring translocations",
+  "AML with t(9;22)/BCR::ABL1",             # May be absent; ordering still safe
+  "NUP98::NSD1",
+  "AML with mutated NPM1",
+  "AML with in-frame bZIP CEBPA",
+  "MDS-related"                             # MDS/AML-related entities at the end
+)
+
+included_table_merged$Subtype <- factor(
+  included_table_merged$Subtype,
+  levels = c(
+    desired_included_order,
+    setdiff(included_table_merged$Subtype, desired_included_order)
+  )
+)
+included_table_merged <- included_table_merged[order(included_table_merged$Subtype), ]
+included_table_merged$Subtype <- as.character(included_table_merged$Subtype)
 
 # Create breakdown tables for merged classes
 # MDS.r/MECOM breakdown
-mds_mecom_subtypes <- included_df_modified$Subtype_Original[included_df_modified$Subtype_Merged == "MDS.r/MECOM"]
-if (length(mds_mecom_subtypes) > 0) {
-  mds_mecom_breakdown <- create_subtype_table(
-    data.frame(Subtype = mds_mecom_subtypes, 
-               Cohort = included_df_modified$Cohort[included_df_modified$Subtype_Merged == "MDS.r/MECOM"]),
+mds_subtypes <- included_df_modified$Subtype_Original[included_df_modified$Subtype_Merged == "MDS.r"]
+if (length(mds_subtypes) > 0) {
+  mds_breakdown <- create_subtype_table(
+    data.frame(Subtype = mds_subtypes, 
+               Cohort = included_df_modified$Cohort[included_df_modified$Subtype_Merged == "MDS.r"]),
     cohort_order
   )
-  # Rename MECOM fusion to MECOM rearrangements in breakdown
-  mds_mecom_breakdown$Subtype <- gsub("MECOM fusion", "MECOM rearrangements", mds_mecom_breakdown$Subtype)
-  mds_mecom_breakdown$Subtype <- paste0("<span style='padding-left:20px;'>└─ ", mds_mecom_breakdown$Subtype, "</span>")
+  mds_breakdown$Subtype <- paste0("<span style='padding-left:20px;'>└─ ", mds_breakdown$Subtype, "</span>")
 }
 
 # other.KMT2A breakdown
@@ -190,6 +266,53 @@ if (length(other_kmt2a_subtypes) > 0) {
     cohort_order
   )
   other_kmt2a_breakdown$Subtype <- paste0("<span style='padding-left:20px;'>└─ ", other_kmt2a_breakdown$Subtype, "</span>")
+}
+
+# other.rare.tx breakdown (rare recurring translocations)
+rare_tx_subtypes_included <- included_df_modified$Subtype_Original[
+  included_df_modified$Subtype_Merged == "other.rare.tx"
+]
+if (length(rare_tx_subtypes_included) > 0) {
+  other_rare_tx_breakdown <- create_subtype_table(
+    data.frame(
+      Subtype = rare_tx_subtypes_included,
+      Cohort  = included_df_modified$Cohort[included_df_modified$Subtype_Merged == "other.rare.tx"]
+    ),
+    cohort_order
+  )
+  # Reorder rare translocations to follow the desired clinical order.
+  # Only levels present in the data will appear.
+  desired_rare_order <- c(
+    "PRDM16::RPN1",
+    "NPM1::MLF1",
+    "KAT6A::CREBBP",
+    "RBM15::MRTF1",
+    "NUP98::NSD1",
+    "NUP98::KDM5A",
+    "NUP98, other partners",
+    "ETV6::MNX1",
+    "PICALM::MLLT10",
+    "FUS::ERG",
+    "RUNX1::CBFA2T3",
+    "CBFA2T3::GLIS2"
+  )
+  other_rare_tx_breakdown$Subtype <- factor(
+    other_rare_tx_breakdown$Subtype,
+    levels = c(
+      desired_rare_order,
+      setdiff(other_rare_tx_breakdown$Subtype, desired_rare_order)
+    )
+  )
+  other_rare_tx_breakdown <- other_rare_tx_breakdown[
+    order(other_rare_tx_breakdown$Subtype),
+  ]
+  other_rare_tx_breakdown$Subtype <- as.character(other_rare_tx_breakdown$Subtype)
+
+  other_rare_tx_breakdown$Subtype <- paste0(
+    "<span style='padding-left:20px;'>└─ ",
+    other_rare_tx_breakdown$Subtype,
+    "</span>"
+  )
 }
 
 # Build the included table with hierarchical structure
@@ -204,22 +327,46 @@ for (i in 1:nrow(included_table_merged)) {
   stripe_groups <- c(stripe_groups, current_stripe)
   
   # Add breakdown rows if this is a merged class
-  if (subtype == "MDS-related and MECOM rearrangement" && exists("mds_mecom_breakdown")) {
-    included_table_final <- rbind(included_table_final, mds_mecom_breakdown)
+  if (subtype == "MDS-related" && exists("mds_breakdown")) {
+    included_table_final <- rbind(included_table_final, mds_breakdown)
     # Add same stripe group for all breakdown rows
-    stripe_groups <- c(stripe_groups, rep(current_stripe, nrow(mds_mecom_breakdown)))
+    stripe_groups <- c(stripe_groups, rep(current_stripe, nrow(mds_breakdown)))
   } else if (subtype == "Other KMT2A rearrangements" && exists("other_kmt2a_breakdown")) {
     included_table_final <- rbind(included_table_final, other_kmt2a_breakdown)
     # Add same stripe group for all breakdown rows
     stripe_groups <- c(stripe_groups, rep(current_stripe, nrow(other_kmt2a_breakdown)))
+  } else if (subtype == "AML with other rare recurring translocations" &&
+             exists("other_rare_tx_breakdown")) {
+    # Add expanded rows for rare translocations under the merged row
+    included_table_final <- rbind(included_table_final, other_rare_tx_breakdown)
+    stripe_groups <- c(stripe_groups, rep(current_stripe, nrow(other_rare_tx_breakdown)))
   }
   
   # Increment stripe for next group
   current_stripe <- current_stripe + 1
 }
 
-# Create excluded table (no merging needed)
-excluded_table <- create_subtype_table(excluded_df, cohort_order)
+# Create excluded table, with rare recurrent translocations grouped
+excluded_df_modified <- excluded_df
+excluded_df_modified$Subtype_Merged <- excluded_df$Subtype
+excluded_df_modified$Subtype_Merged[
+  excluded_df_modified$Subtype %in% rare_tx_subtypes
+] <- "other.rare.tx"
+
+excluded_table <- create_subtype_table(
+  data.frame(
+    Subtype = excluded_df_modified$Subtype_Merged,
+    Cohort = excluded_df_modified$Cohort
+  ),
+  cohort_order
+)
+
+# Rename merged rare group for excluded section as well
+excluded_table$Subtype <- gsub(
+  "other\\.rare\\.tx",
+  "AML with other rare recurring translocations",
+  excluded_table$Subtype
+)
 
 # Add Group column
 included_table_final$Group <- "Included"
@@ -291,14 +438,15 @@ table_output <- table_output %>%
   add_header_above(c(" " = 1, "Adult Cohorts" = 4, "Pediatric Cohorts" = 3, " " = 1))
 
 table_output
-save_kable(table_output, "../writing/tables/supplementary_table1.png", zoom = 2)
+save_kable(table_output, "../writing/tables_new/supplementary_table1.png", zoom = 2)
 ```
 
 ## -- Table 1: Included Subtypes Only
 
 ```{r results='asis'}
-# Simple table with only included classes (no breakdown)
-# Add a total row
+# Table with only included classes, with MDS-related and other KMT2A
+# subtypes expanded into their component subtypes (matching Supplementary Table 1)
+# Add a total row (based on merged-class counts to avoid double-counting)
 included_totals_simple <- data.frame(
   Subtype = "Total",
   t(colSums(included_table_merged[, cohort_order])),
@@ -306,8 +454,12 @@ included_totals_simple <- data.frame(
   stringsAsFactors = FALSE
 )
 colnames(included_totals_simple) <- c("Subtype", cohort_order, "Total")
-# Combine with the merged table
-included_simple <- rbind(included_table_merged, included_totals_simple)
+# Combine with the hierarchical included table (drop Group column)
+# that already contains the split MDS and other KMT2A subtypes
+included_simple <- rbind(
+  included_table_final[, c("Subtype", cohort_order, "Total")],
+  included_totals_simple
+)
 
 length(included_table_merged$Subtype)
 
@@ -326,43 +478,54 @@ simple_table <- kable(included_simple,
   add_header_above(c(" " = 1, "Adult Cohorts" = 4, "Pediatric Cohorts" = 3, " " = 1))
 
 simple_table
-save_kable(simple_table, "../writing/tables/table1.png", zoom = 2)
+save_kable(simple_table, "../writing/tables_new/table1.png", zoom = 2)
 ```
 
-# Model Performance Results
+```{r}
+included_simple_perc <- data.frame(class = included_simple$Subtype, perc = included_simple$Total/max(included_simple$Total) * 100, n = included_simple$Total)
+included_simple_perc$class <- gsub("<span style='padding-left:20px;'>└─ ", "", included_simple_perc$class)
+included_simple_perc$class <- gsub("</span>", "", included_simple_perc$class)
 
-```{r}
-outer_cv_results$performance_summaries$cv
-```
-```{r}
-outer_cv_results$performance_summaries$loso
+included_simple_perc
 ```
 
 
 ##  --Performance Boxplots
 
 ```{r}
-types = c("cv", "loso")
-models <- names(outer_cv_results$detailed_performance$cv)
+types <- c("cv", "loso")
+models <- names(outer_merged$detailed_performance$cv)
 
-
-results_per_fold <- data.frame()
-
-for (type_i in types){
-for (model_i in models){
-  folds <- names(outer_cv_results$detailed_performance[[type_i]][[models[1]]])
-  for (fold_i in folds){
-    results_per_fold <- rbind(results_per_fold, 
-                              data.frame(type = type_i, 
-                                         model = model_i, 
-                                         fold = fold_i, 
-                                         kappa = outer_cv_results$detailed_performance[[type_i]][[model_i]][[fold_i]][["kappa"]],
-                                         accuracy = outer_cv_results$detailed_performance[[type_i]][[model_i]][[fold_i]][["accuracy"]])
-                              
-                              )
+# Helper: extract per-fold performance for a given result object and label set
+get_results_per_fold <- function(res_obj, label_set) {
+  out <- data.frame()
+  for (type_i in types) {
+    for (model_i in models) {
+      folds <- names(res_obj$detailed_performance[[type_i]][[models[1]]])
+      for (fold_i in folds) {
+        out <- rbind(
+          out,
+          data.frame(
+            type      = type_i,
+            model     = model_i,
+            fold      = fold_i,
+            kappa     = res_obj$detailed_performance[[type_i]][[model_i]][[fold_i]][["kappa"]],
+            accuracy  = res_obj$detailed_performance[[type_i]][[model_i]][[fold_i]][["accuracy"]],
+            label_set = label_set,
+            stringsAsFactors = FALSE
+          )
+        )
+      }
+    }
   }
+  out
 }
-}
+
+# Combine unmerged (full subtype resolution) and merged (collapsed) results
+results_per_fold <- rbind(
+  get_results_per_fold(outer_unmerged, "Full subtypes"),
+  get_results_per_fold(outer_merged,  "Collapsed classes")
+)
 
 library(ggplot2)
 library(dplyr)
@@ -372,893 +535,285 @@ library(circlize)
 library(ggplotify)
 library(grid)
 
+# Clean model names
 results_per_fold$model <- gsub("_", " ", results_per_fold$model)
 results_per_fold$model <- gsub("xgboost", "XGBoost", results_per_fold$model)
 results_per_fold$model <- gsub("svm", "SVM", results_per_fold$model)
 results_per_fold$model <- gsub("neural net", "DNN", results_per_fold$model)
 results_per_fold$model <- gsub("Optimized", "Ensemble", results_per_fold$model)
 
+results_per_fold$label_set <- factor(
+  results_per_fold$label_set,
+  levels = c("Full subtypes", "Collapsed classes")
+)
+
+# Colour palette per model (used for outlines / points)
 colours <- c("#fd7f6f", "#7eb0d5", "#b2e061", "#bd7ebe", "#ffb55a")
 names(colours) <- c("XGBoost", "DNN", "SVM", "OvR Ensemble", "Global Ensemble")
 
-# Create separate ordering for each type
+# Subtle fill colours to distinguish full vs collapsed labels
+label_fills <- c("Full subtypes" = "#f0f0f0", "Collapsed classes" = "#bdbdbd")
+
+# Compute per-model, per-label-set means for annotations
 results_per_fold <- results_per_fold %>%
-  group_by(type, model) %>%
-  mutate(mean_kappa = mean(kappa)) %>%
-  ungroup() %>%
-  mutate(model_ordered = paste(type, model, sep = "_"),
-         model_ordered = reorder(model_ordered, mean_kappa))
-
-# Compute per-model means for annotations
-means_cv <- results_per_fold %>%
-  dplyr::filter(type == "cv") %>%
-  dplyr::group_by(model) %>%
-  dplyr::summarise(mean_kappa = mean(kappa), .groups = "drop")
-
-means_loso <- results_per_fold %>%
-  dplyr::filter(type == "loso") %>%
-  dplyr::group_by(model) %>%
-  dplyr::summarise(mean_kappa = mean(kappa), .groups = "drop")
-box_width = 0.6
-p1 <- ggplot(results_per_fold %>% dplyr::filter(type == "cv"),
-             aes(x = reorder(model, mean_kappa), y = kappa, fill = model)) +
-  geom_boxplot(width = box_width, alpha = 1, outlier.shape = NA) +
-  geom_jitter(width = 0.2, size = 2, alpha = 0.7) +
-  geom_text(data = means_cv,
-            aes(x = reorder(model, mean_kappa), y = 0.76, label = sprintf("%.2f", mean_kappa)),
-            inherit.aes = FALSE, size = 3.5) +
-  theme_bw() +
-  labs(
-    title = "CV: Boxplots of performance",
-    x = "Model",
-    y = "Cohen's Kappa",
-    fill = "Model"
-  ) +
-  theme(legend.position = "none",
-        axis.text.x = element_text(angle = 45, hjust = 1)) +
-  ylim(0.75, 1) +
-  scale_fill_manual(values = colours)
-
-p2 <- ggplot(results_per_fold %>% dplyr::filter(type == "loso"),
-             aes(x = reorder(model, mean_kappa), y = kappa, fill = model)) +
-  geom_boxplot(alpha = 1, width = box_width, outlier.shape = NA) +
-  geom_jitter(width = 0.2, size = 2, alpha = 0.7) +
-  geom_text(data = means_loso,
-            aes(x = reorder(model, mean_kappa), y = 0.76, label = sprintf("%.2f", mean_kappa)),
-            inherit.aes = FALSE, size = 3.5) +
-  theme_bw() +
-  labs(
-    title = "LOSO: Boxplots of performance",
-    x = "Model",
-    y = "Cohen's Kappa",
-    fill = "Model"
-  ) +
-  theme(legend.position = "none",
-        axis.text.x = element_text(angle = 45, hjust = 1)) +
-  ylim(0.75, 1) +
-  scale_fill_manual(values = colours)
-
-library(patchwork)
-p1 + p2
-```
-
-##  --Performance Resampling
-```{r}
-# Bootstrap resampling to calculate 95% CI for each model's kappa
-# Using STRATIFIED bootstrap to preserve cohort structure and class distribution
-
-# Function to calculate Cohen's kappa (same as used later in the document)
-calculate_kappa <- function(predictions, truth) {
-  all_classes <- unique(c(predictions, truth))
-  cm <- table(factor(predictions, levels = all_classes), 
-              factor(truth, levels = all_classes))
-  n <- sum(cm)
-  observed_accuracy <- sum(diag(cm)) / n
-  row_sums <- rowSums(cm)
-  col_sums <- colSums(cm)
-  expected_accuracy <- sum(row_sums * col_sums) / (n^2)
-  kappa <- (observed_accuracy - expected_accuracy) / (1 - expected_accuracy)
-  return(kappa)
-}
-
-# Set bootstrap parameters
-set.seed(42)
-n_bootstrap <- 1000
-
-# Extract sample-level predictions with cohort/fold information for all models
-extract_predictions_by_fold <- function(type_i, model_i) {
-  folds <- names(outer_cv_results$detailed_performance[[type_i]][[model_i]])
-  pred_df <- data.frame()
-  
-  for (fold_i in folds) {
-    fold_data <- outer_cv_results$detailed_performance[[type_i]][[model_i]][[fold_i]]
-    pred_df <- rbind(pred_df, data.frame(
-      fold = fold_i,
-      prediction = fold_data$predictions,
-      truth = fold_data$truth,
-      stringsAsFactors = FALSE
-    ))
-  }
-  
-  # Apply class modifications
-  pred_df$prediction_mod <- modify_classes(pred_df$prediction)
-  pred_df$truth_mod <- modify_classes(pred_df$truth)
-  
-  return(pred_df)
-}
-
-# ============================================================================
-# METHOD 1: Stratified Bootstrap (resample within each cohort/fold)
-# Preserves cohort structure and approximate class distribution
-# ============================================================================
-bootstrap_stratified <- data.frame()
-
-for (type_i in c("cv", "loso")) {
-  models <- names(outer_cv_results$detailed_performance[[type_i]])
-  
-  for (model_i in models) {
-    pred_df <- extract_predictions_by_fold(type_i, model_i)
-    folds <- unique(pred_df$fold)
-    
-    # Calculate observed kappa
-    observed_kappa <- calculate_kappa(pred_df$prediction_mod, pred_df$truth_mod)
-    
-    # Stratified bootstrap: resample within each fold
-    boot_kappa <- numeric(n_bootstrap)
-    
-    for (b in 1:n_bootstrap) {
-      boot_pred <- c()
-      boot_truth <- c()
-      
-      for (fold_i in folds) {
-        fold_data <- pred_df[pred_df$fold == fold_i, ]
-        n_fold <- nrow(fold_data)
-        idx <- sample(1:n_fold, replace = TRUE)
-        boot_pred <- c(boot_pred, fold_data$prediction_mod[idx])
-        boot_truth <- c(boot_truth, fold_data$truth_mod[idx])
-      }
-      
-      boot_kappa[b] <- calculate_kappa(boot_pred, boot_truth)
-    }
-    
-    ci_95 <- quantile(boot_kappa, c(0.025, 0.975))
-    
-    bootstrap_stratified <- rbind(bootstrap_stratified, data.frame(
-      type = type_i,
-      model = model_i,
-      method = "stratified",
-      n_samples = nrow(pred_df),
-      n_folds = length(folds),
-      observed_kappa = observed_kappa,
-      boot_mean = mean(boot_kappa),
-      boot_se = sd(boot_kappa),
-      ci_lower = ci_95[1],
-      ci_upper = ci_95[2]
-    ))
-  }
-}
-
-# ============================================================================
-# METHOD 2: Single-Cohort Stratified Bootstrap (LOSO only)
-# Randomly select ONE cohort per iteration and resample only within that cohort
-# Other cohorts remain unchanged - isolates per-cohort sampling variance
-# ============================================================================
-bootstrap_loso_single <- data.frame()
-
-models <- names(outer_cv_results$detailed_performance$loso)
-
-for (model_i in models) {
-  pred_df <- extract_predictions_by_fold("loso", model_i)
-  folds <- unique(pred_df$fold)
-  n_folds <- length(folds)
-  
-  # Calculate observed kappa
-  observed_kappa <- calculate_kappa(pred_df$prediction_mod, pred_df$truth_mod)
-  
-  # Single-cohort stratified bootstrap
-  boot_kappa <- numeric(n_bootstrap)
-  
-  for (b in 1:n_bootstrap) {
-    # Randomly select ONE cohort to resample
-    resample_fold <- sample(folds, 1)
-    
-    boot_pred <- c()
-    boot_truth <- c()
-    
-    #for (fold_i in folds) {
-      fold_data <- pred_df[pred_df$fold == resample_fold, ]
-      
-      #if (fold_i == resample_fold) {
-        # Resample within this cohort
-        n_fold <- nrow(fold_data)
-        idx <- sample(1:n_fold, replace = TRUE)
-        boot_pred <- c(boot_pred, fold_data$prediction_mod[idx])
-        boot_truth <- c(boot_truth, fold_data$truth_mod[idx])
-      #} else {
-        # Keep other cohorts unchanged
-      #  boot_pred <- c(boot_pred, fold_data$prediction_mod)
-      #  boot_truth <- c(boot_truth, fold_data$truth_mod)
-      #}
-    #}
-    
-    boot_kappa[b] <- calculate_kappa(boot_pred, boot_truth)
-  }
-  
-  ci_95 <- quantile(boot_kappa, c(0.025, 0.975))
-  
-  bootstrap_loso_single <- rbind(bootstrap_loso_single, data.frame(
-    type = "loso",
-    model = model_i,
-    method = "single_cohort",
-    n_samples = nrow(pred_df),
-    n_folds = n_folds,
-    observed_kappa = observed_kappa,
-    boot_mean = mean(boot_kappa),
-    boot_se = sd(boot_kappa),
-    ci_lower = ci_95[1],
-    ci_upper = ci_95[2]
-  ))
-}
-
-# ============================================================================
-# METHOD 3: Study-Level Bootstrap (LOSO only)
-# Resample which studies to include - captures study-level variance
-# Note: With only 7 studies, this gives coarser estimates
-# ============================================================================
-bootstrap_loso_study <- data.frame()
-
-for (model_i in models) {
-  pred_df <- extract_predictions_by_fold("loso", model_i)
-  folds <- unique(pred_df$fold)
-  n_folds <- length(folds)
-  
-  # Calculate observed kappa
-  observed_kappa <- calculate_kappa(pred_df$prediction_mod, pred_df$truth_mod)
-  
-  # Study-level bootstrap: resample which studies to include (with replacement)
-  # Each bootstrap includes n_folds studies (some may be repeated, some omitted)
-  boot_kappa <- numeric(n_bootstrap)
-  
-  for (b in 1:n_bootstrap) {
-    # Sample studies with replacement
-    sampled_folds <- sample(folds, n_folds, replace = TRUE)
-    
-    boot_pred <- c()
-    boot_truth <- c()
-    
-    for (fold_i in sampled_folds) {
-      fold_data <- pred_df[pred_df$fold == fold_i, ]
-      boot_pred <- c(boot_pred, fold_data$prediction_mod)
-      boot_truth <- c(boot_truth, fold_data$truth_mod)
-    }
-    
-    boot_kappa[b] <- calculate_kappa(boot_pred, boot_truth)
-  }
-  
-  ci_95 <- quantile(boot_kappa, c(0.025, 0.975))
-  
-  bootstrap_loso_study <- rbind(bootstrap_loso_study, data.frame(
-    type = "loso",
-    model = model_i,
-    method = "study_level",
-    n_samples = nrow(pred_df),
-    n_folds = n_folds,
-    observed_kappa = observed_kappa,
-    boot_mean = mean(boot_kappa),
-    boot_se = sd(boot_kappa),
-    ci_lower = ci_95[1],
-    ci_upper = ci_95[2]
-  ))
-}
-
-# Combine results
-bootstrap_results <- rbind(bootstrap_stratified, bootstrap_loso_single, bootstrap_loso_study)
-
-# Tidy model names for display
-bootstrap_results$model <- gsub("_", " ", bootstrap_results$model)
-bootstrap_results$model <- gsub("xgboost", "XGBoost", bootstrap_results$model)
-bootstrap_results$model <- gsub("svm", "SVM", bootstrap_results$model)
-bootstrap_results$model <- gsub("neural net", "DNN", bootstrap_results$model)
-bootstrap_results$model <- gsub("Optimized", "Ensemble", bootstrap_results$model)
-
-# Display results
-cat("\n=================================================================\n")
-cat("Bootstrap Results (", n_bootstrap, " iterations)\n", sep = "")
-cat("=================================================================\n\n")
-
-cat("CV Results (Stratified by Fold):\n")
-cat("---------------------------------\n")
-cv_results <- bootstrap_results[bootstrap_results$type == "cv", ]
-cv_results <- cv_results[order(-cv_results$observed_kappa), ]
-for (i in 1:nrow(cv_results)) {
-  cat(sprintf("  %s: κ = %.4f, 95%% CI [%.4f, %.4f], SE = %.4f\n",
-              cv_results$model[i], cv_results$observed_kappa[i],
-              cv_results$ci_lower[i], cv_results$ci_upper[i], cv_results$boot_se[i]))
-}
-
-cat("\nLOSO Results - Stratified Bootstrap (resample within ALL studies):\n")
-cat("------------------------------------------------------------------\n")
-cat("Resamples within every cohort simultaneously. May overestimate variance.\n\n")
-loso_strat <- bootstrap_results[bootstrap_results$type == "loso" & 
-                                  bootstrap_results$method == "stratified", ]
-loso_strat <- loso_strat[order(-loso_strat$observed_kappa), ]
-for (i in 1:nrow(loso_strat)) {
-  cat(sprintf("  %s: κ = %.4f, 95%% CI [%.4f, %.4f], SE = %.4f\n",
-              loso_strat$model[i], loso_strat$observed_kappa[i],
-              loso_strat$ci_lower[i], loso_strat$ci_upper[i], loso_strat$boot_se[i]))
-}
-
-cat("\nLOSO Results - Single-Cohort Bootstrap (resample within ONE random cohort):\n")
-cat("---------------------------------------------------------------------------\n")
-cat("Each iteration randomly selects ONE cohort to resample\n\n")
-loso_single <- bootstrap_results[bootstrap_results$type == "loso" & 
-                                   bootstrap_results$method == "single_cohort", ]
-loso_single <- loso_single[order(-loso_single$observed_kappa), ]
-for (i in 1:nrow(loso_single)) {
-  cat(sprintf("  %s: κ = %.4f, 95%% CI [%.4f, %.4f], SE = %.4f\n",
-              loso_single$model[i], loso_single$observed_kappa[i],
-              loso_single$ci_lower[i], loso_single$ci_upper[i], loso_single$boot_se[i]))
-}
-
-cat("\nLOSO Results - Study-Level Bootstrap (resample which studies to include):\n")
-cat("--------------------------------------------------------------------------\n")
-cat("This captures study-level variance (which studies happen to be in the data).\n")
-cat("Note: With only 7 studies, CIs may be coarser.\n\n")
-loso_study <- bootstrap_results[bootstrap_results$type == "loso" & 
-                                  bootstrap_results$method == "study_level", ]
-loso_study <- loso_study[order(-loso_study$observed_kappa), ]
-for (i in 1:nrow(loso_study)) {
-  cat(sprintf("  %s: κ = %.4f, 95%% CI [%.4f, %.4f], SE = %.4f\n",
-              loso_study$model[i], loso_study$observed_kappa[i],
-              loso_study$ci_lower[i], loso_study$ci_upper[i], loso_study$boot_se[i]))
-}
-
-cat("\n\nInterpretation:\n")
-cat("===============\n")
-cat("- Stratified (all cohorts): Resamples within every cohort - combined variance.\n")
-cat("- Single-Cohort: Resamples one random cohort per iteration - more conservative,\n")
-cat("  isolates individual cohort contributions to overall variance.\n")
-cat("- Study-Level: Resamples which studies to include - captures generalization\n")
-cat("  variance to new studies (the goal of LOSO). Wider CIs = more study variability.\n")
-```
-
-##  --Performance Boxplots with resampling
-```{r}
-# Generate STRATIFIED bootstrap samples for visualization
-# Store individual bootstrap kappa values for boxplots
-
-set.seed(42)
-n_bootstrap_viz <- 100  # Fewer samples for cleaner visualization
-
-# ============================================================================
-# Stratified Bootstrap Samples (resample within each fold/cohort)
-# ============================================================================
-bootstrap_samples_stratified <- data.frame()
-
-for (type_i in c("cv", "loso")) {
-  models <- names(outer_cv_results$detailed_performance[[type_i]])
-  
-  for (model_i in models) {
-    pred_df <- extract_predictions_by_fold(type_i, model_i)
-    folds <- unique(pred_df$fold)
-    
-    for (b in 1:n_bootstrap_viz) {
-      boot_pred <- c()
-      boot_truth <- c()
-      
-      # Stratified: resample within each fold
-      for (fold_i in folds) {
-        fold_data <- pred_df[pred_df$fold == fold_i, ]
-        n_fold <- nrow(fold_data)
-        idx <- sample(1:n_fold, replace = TRUE)
-        boot_pred <- c(boot_pred, fold_data$prediction_mod[idx])
-        boot_truth <- c(boot_truth, fold_data$truth_mod[idx])
-      }
-      
-      boot_kappa <- calculate_kappa(boot_pred, boot_truth)
-      
-      bootstrap_samples_stratified <- rbind(bootstrap_samples_stratified, data.frame(
-        type = type_i,
-        model = model_i,
-        method = "stratified",
-        bootstrap_iter = b,
-        kappa = boot_kappa
-      ))
-    }
-  }
-}
-
-# ============================================================================
-# Single-Cohort Bootstrap Samples (LOSO only - resample ONE random cohort)
-# ============================================================================
-bootstrap_samples_single <- data.frame()
-
-models <- names(outer_cv_results$detailed_performance$loso)
-
-for (model_i in models) {
-  pred_df <- extract_predictions_by_fold("loso", model_i)
-  folds <- unique(pred_df$fold)
-  
-  for (b in 1:n_bootstrap_viz) {
-    # Randomly select ONE cohort to resample
-    resample_fold <- sample(folds, 1)
-    
-    boot_pred <- c()
-    boot_truth <- c()
-    
-    for (fold_i in folds) {
-      fold_data <- pred_df[pred_df$fold == fold_i, ]
-      
-      if (fold_i == resample_fold) {
-        # Resample within this cohort
-        n_fold <- nrow(fold_data)
-        idx <- sample(1:n_fold, replace = TRUE)
-        boot_pred <- c(boot_pred, fold_data$prediction_mod[idx])
-        boot_truth <- c(boot_truth, fold_data$truth_mod[idx])
-      } else {
-        # Keep other cohorts unchanged
-        boot_pred <- c(boot_pred, fold_data$prediction_mod)
-        boot_truth <- c(boot_truth, fold_data$truth_mod)
-      }
-    }
-    
-    boot_kappa <- calculate_kappa(boot_pred, boot_truth)
-    
-    bootstrap_samples_single <- rbind(bootstrap_samples_single, data.frame(
-      type = "loso",
-      model = model_i,
-      method = "single_cohort",
-      bootstrap_iter = b,
-      kappa = boot_kappa
-    ))
-  }
-}
-
-# ============================================================================
-# Study-Level Bootstrap Samples (LOSO only - resample which studies to include)
-# ============================================================================
-bootstrap_samples_study <- data.frame()
-
-for (model_i in models) {
-  pred_df <- extract_predictions_by_fold("loso", model_i)
-  folds <- unique(pred_df$fold)
-  n_folds <- length(folds)
-  
-  for (b in 1:n_bootstrap_viz) {
-    # Sample studies with replacement
-    sampled_folds <- sample(folds, n_folds, replace = TRUE)
-    
-    boot_pred <- c()
-    boot_truth <- c()
-    
-    for (fold_i in sampled_folds) {
-      fold_data <- pred_df[pred_df$fold == fold_i, ]
-      boot_pred <- c(boot_pred, fold_data$prediction_mod)
-      boot_truth <- c(boot_truth, fold_data$truth_mod)
-    }
-    
-    boot_kappa <- calculate_kappa(boot_pred, boot_truth)
-    
-    bootstrap_samples_study <- rbind(bootstrap_samples_study, data.frame(
-      type = "loso",
-      model = model_i,
-      method = "study_level",
-      bootstrap_iter = b,
-      kappa = boot_kappa
-    ))
-  }
-}
-
-# Combine all bootstrap samples
-bootstrap_samples <- rbind(bootstrap_samples_stratified, bootstrap_samples_single, bootstrap_samples_study)
-
-# Tidy model names
-bootstrap_samples$model <- gsub("_", " ", bootstrap_samples$model)
-bootstrap_samples$model <- gsub("xgboost", "XGBoost", bootstrap_samples$model)
-bootstrap_samples$model <- gsub("svm", "SVM", bootstrap_samples$model)
-bootstrap_samples$model <- gsub("neural net", "DNN", bootstrap_samples$model)
-bootstrap_samples$model <- gsub("Optimized", "Ensemble", bootstrap_samples$model)
-
-# Calculate mean kappa per model for ordering
-bootstrap_samples <- bootstrap_samples %>%
-  group_by(type, model, method) %>%
+  group_by(type, model, label_set) %>%
   mutate(mean_kappa = mean(kappa)) %>%
   ungroup()
 
-# ============================================================================
-# PLOT 1: CV Stratified Bootstrap
-# ============================================================================
-means_cv_boot <- bootstrap_samples %>%
-  filter(type == "cv", method == "stratified") %>%
+means_cv <- results_per_fold %>%
+  filter(type == "cv") %>%
+  group_by(model, label_set) %>%
+  summarise(mean_kappa = mean(kappa), .groups = "drop")
+
+means_loso <- results_per_fold %>%
+  filter(type == "loso") %>%
+  group_by(model, label_set) %>%
+  summarise(mean_kappa = mean(kappa), .groups = "drop")
+
+# Order models on the x-axis from low to high median kappa, separately for CV and LOSO
+cv_order <- results_per_fold %>%
+  filter(type == "cv", label_set == "Collapsed classes") %>%
   group_by(model) %>%
-  summarise(mean_kappa = mean(kappa), 
-            ci_lower = quantile(kappa, 0.025),
-            ci_upper = quantile(kappa, 0.975),
-            .groups = "drop")
+  summarise(median_kappa = mean(kappa), .groups = "drop") %>%
+  arrange(median_kappa) %>%
+  pull(model)
 
-p1_boot <- ggplot(bootstrap_samples %>% filter(type == "cv", method == "stratified"),
-                  aes(x = reorder(model, mean_kappa), y = kappa, fill = model)) +
-  geom_boxplot(alpha = 0.8, outlier.shape = NA) +
-  geom_jitter(width = 0.15, size = 1.5, alpha = 0.3, color = "gray30") +
-  geom_text(data = means_cv_boot,
-            aes(x = reorder(model, mean_kappa), y = 0.76, 
-                label = sprintf("%.3f\n[%.3f-%.3f]", mean_kappa, ci_lower, ci_upper)),
-            inherit.aes = FALSE, size = 2.8) +
-  theme_bw() +
-  labs(
-    title = "CV: Stratified bootstrap",
-    subtitle = sprintf("Resampling within each fold (%d iterations)", n_bootstrap_viz),
-    x = "Model",
-    y = "Cohen's Kappa",
-    fill = "Model"
-  ) +
-  theme(legend.position = "none",
-        axis.text.x = element_text(angle = 45, hjust = 1)) +
-  ylim(0.75, 1) +
-  scale_fill_manual(values = colours)
-
-# ============================================================================
-# PLOT 2: LOSO Stratified Bootstrap (within-study sampling variance)
-# ============================================================================
-means_loso_strat <- bootstrap_samples %>%
-  filter(type == "loso", method == "stratified") %>%
+loso_order <- results_per_fold %>%
+  filter(type == "loso", label_set == "Collapsed classes") %>%
   group_by(model) %>%
-  summarise(mean_kappa = mean(kappa),
-            ci_lower = quantile(kappa, 0.025),
-            ci_upper = quantile(kappa, 0.975),
-            .groups = "drop")
+  summarise(median_kappa = mean(kappa), .groups = "drop") %>%
+  arrange(median_kappa) %>%
+  pull(model)
 
-p2_boot_strat <- ggplot(bootstrap_samples %>% filter(type == "loso", method == "stratified"),
-                        aes(x = reorder(model, mean_kappa), y = kappa, fill = model)) +
-  geom_boxplot(alpha = 0.8, outlier.shape = NA) +
-  geom_jitter(width = 0.15, size = 1.5, alpha = 0.3, color = "gray30") +
-  geom_text(data = means_loso_strat,
-            aes(x = reorder(model, mean_kappa), y = 0.76, 
-                label = sprintf("%.3f\n[%.3f-%.3f]", mean_kappa, ci_lower, ci_upper)),
-            inherit.aes = FALSE, size = 2.8) +
-  theme_bw() +
-  labs(
-    title = "LOSO: Stratified bootstrap",
-    subtitle = "Resampling within each study (sampling variance)",
-    x = "Model",
-    y = "Cohen's Kappa",
-    fill = "Model"
-  ) +
-  theme(legend.position = "none",
-        axis.text.x = element_text(angle = 45, hjust = 1)) +
-  ylim(0.75, 1) +
-  scale_fill_manual(values = colours)
+results_per_fold$model_cv   <- factor(results_per_fold$model,   levels = cv_order)
+results_per_fold$model_loso <- factor(results_per_fold$model, levels = loso_order)
 
-# ============================================================================
-# PLOT 3: LOSO Single-Cohort Bootstrap (one random cohort resampled)
-# ============================================================================
-means_loso_single <- bootstrap_samples %>%
-  filter(type == "loso", method == "single_cohort") %>%
-  group_by(model) %>%
-  summarise(mean_kappa = mean(kappa),
-            ci_lower = quantile(kappa, 0.025),
-            ci_upper = quantile(kappa, 0.975),
-            .groups = "drop")
+means_cv$model   <- factor(means_cv$model,   levels = cv_order)
+means_loso$model <- factor(means_loso$model, levels = loso_order)
 
-p2_boot_single <- ggplot(bootstrap_samples %>% filter(type == "loso", method == "single_cohort"),
-                         aes(x = reorder(model, mean_kappa), y = kappa, fill = model)) +
-  geom_boxplot(alpha = 0.8, outlier.shape = NA) +
-  geom_jitter(width = 0.15, size = 1.5, alpha = 0.3, color = "gray30") +
-  geom_text(data = means_loso_single,
-            aes(x = reorder(model, mean_kappa), y = 0.76, 
-                label = sprintf("%.3f\n[%.3f-%.3f]", mean_kappa, ci_lower, ci_upper)),
-            inherit.aes = FALSE, size = 2.8) +
-  theme_bw() +
-  labs(
-    title = "LOSO: Single-cohort bootstrap",
-    subtitle = "Resample ONE random cohort per iteration",
-    x = "Model",
-    y = "Cohen's Kappa",
-    fill = "Model"
-  ) +
-  theme(legend.position = "none",
-        axis.text.x = element_text(angle = 45, hjust = 1)) +
-  ylim(0.75, 1) +
-  scale_fill_manual(values = colours)
+box_width <- 0.6
 
-# ============================================================================
-# PLOT 4: LOSO Study-Level Bootstrap (study-level variance)
-# ============================================================================
-means_loso_study <- bootstrap_samples %>%
-  filter(type == "loso", method == "study_level") %>%
-  group_by(model) %>%
-  summarise(mean_kappa = mean(kappa),
-            ci_lower = quantile(kappa, 0.025),
-            ci_upper = quantile(kappa, 0.975),
-            .groups = "drop")
-
-p2_boot_study <- ggplot(bootstrap_samples %>% filter(type == "loso", method == "study_level"),
-                        aes(x = reorder(model, mean_kappa), y = kappa, fill = model)) +
-  geom_boxplot(alpha = 0.8, outlier.shape = NA) +
-  geom_jitter(width = 0.15, size = 1.5, alpha = 0.3, color = "gray30") +
-  geom_text(data = means_loso_study,
-            aes(x = reorder(model, mean_kappa), y = 0.76, 
-                label = sprintf("%.3f\n[%.3f-%.3f]", mean_kappa, ci_lower, ci_upper)),
-            inherit.aes = FALSE, size = 2.8) +
-  theme_bw() +
-  labs(
-    title = "LOSO: Study-level bootstrap",
-    subtitle = "Resample which studies to include",
-    x = "Model",
-    y = "Cohen's Kappa",
-    fill = "Model"
-  ) +
-  theme(legend.position = "none",
-        axis.text.x = element_text(angle = 45, hjust = 1)) +
-  ylim(0.75, 1) +
-  scale_fill_manual(values = colours)
-
-# Combined plots - 2x2 layout
-(p1_boot + p2_boot_strat) / (p2_boot_single + p2_boot_study) +
-  plot_annotation(
-    title = "Bootstrap Resampled Performance",
-    subtitle = "CV (top-left) | LOSO: All-cohort stratified (top-right) | Single-cohort (bottom-left) | Study-level (bottom-right)"
+# CV boxplots: per model, side-by-side boxes for full vs collapsed classes
+p1 <- ggplot(
+  results_per_fold %>% filter(type == "cv"),
+  aes(
+    x     = model_cv,
+    y     = kappa,
+    fill  = label_set,
+    color = model,
+    group = interaction(model, label_set),
+    show_legend = FALSE
   )
+) +
+  geom_boxplot(
+    width         = box_width,
+    alpha         = 0.9,
+    outlier.shape = NA,
+    position      = position_dodge(width = 0.7),
+    show_legend = FALSE
+  ) +
+  geom_jitter(
+    aes(color = model),
+    size     = 1.8,
+    alpha    = 0.6,
+    position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.7),
+    show_legend = FALSE
+  ) +
+  geom_text(
+    data = means_cv,
+    aes(
+      x     = model,
+      y     = 0.76,
+      angle = 45,
+      label = sprintf("%.2f", mean_kappa),
+      group = interaction(model, label_set),
+      color = model
+    ),
+    position    = position_dodge(width = 0.7),
+    inherit.aes = FALSE,
+    size        = 3.2
+  ) +
+  theme_bw() +
+  labs(
+    title = "Regular nested CV",
+    x     = "",
+    y     = "Cohen's Kappa",
+    fill  = "Label set",
+    color = "Model"
+  ) +
+  theme(
+    axis.text.x  = element_text(angle = 45, hjust = 1),
+    legend.location = "none"
+  ) +
+  ylim(0.75, 1) +
+  scale_fill_manual(values = label_fills) +
+  scale_color_manual(values = colours) + guides(color=FALSE, fill = FALSE)
+
+# LOSO boxplots: same structure as CV
+p2 <- ggplot(
+  results_per_fold %>% filter(type == "loso"),
+  aes(
+    x     = model_loso,
+    y     = kappa,
+    fill  = label_set,
+    color = model,
+    group = interaction(model, label_set)
+  )
+) +
+  geom_boxplot(
+    width         = box_width,
+    alpha         = 0.9,
+    outlier.shape = NA,
+    position      = position_dodge(width = 0.7)
+  ) +
+  geom_jitter(
+    aes(color = model),
+    size     = 1.8,
+    alpha    = 0.6,
+    position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.7)
+  ) +
+  geom_text(
+    data = means_loso,
+    aes(
+      x     = model,
+      y     = 0.76,
+      angle = 45,
+      label = sprintf("%.2f", mean_kappa),
+      group = interaction(model, label_set),
+      color = model
+    ),
+    position    = position_dodge(width = 0.7),
+    inherit.aes = FALSE,
+    size        = 3.2
+  ) +
+  theme_bw() +
+  labs(
+    title = "LOSO nested CV",
+    x     = "",
+    y     = "Cohen's Kappa",
+    fill  = "Label set",
+    color = "Model"
+  ) +
+  theme(
+    axis.text.x  = element_text(angle = 45, hjust = 1),
+    legend.box   = "vertical",
+    legend.title = element_text(size = 9),
+    legend.text  = element_text(size = 8)
+  ) +
+  ylim(0.75, 1) +
+  scale_fill_manual(values = label_fills,guide = guide_legend(reverse = TRUE)) +
+  scale_color_manual(values = colours, guide = guide_legend(reverse = TRUE))
+
+library(patchwork)
+# Arrange CV and LOSO boxplots vertically and collect a single shared legend
+boxplot_figure <- (p1 + p2) + patchwork::plot_annotation(title = "Performance by model and label granularity")
+boxplot_figure
 ```
 
-```{r}
-# Compare variance sources: fold-based, stratified bootstrap, and study-level bootstrap
-cat("\n=================================================================\n")
-cat("Comparison of Variance Estimation Methods\n")
-cat("=================================================================\n\n")
-
-# Fold-based variance (original)
-fold_var <- results_per_fold %>%
-  group_by(type, model) %>%
-  summarise(
-    fold_mean = mean(kappa), 
-    fold_sd = sd(kappa), 
-    .groups = "drop"
-  )
-
-# Bootstrap variance (stratified)
-boot_strat_var <- bootstrap_samples %>%
-  filter(method == "stratified") %>%
-  group_by(type, model) %>%
-  summarise(
-    boot_strat_mean = mean(kappa),
-    boot_strat_se = sd(kappa),
-    .groups = "drop"
-  )
-
-# Bootstrap variance (single-cohort, LOSO only)
-boot_single_var <- bootstrap_samples %>%
-  filter(method == "single_cohort") %>%
-  group_by(type, model) %>%
-  summarise(
-    boot_single_mean = mean(kappa),
-    boot_single_se = sd(kappa),
-    .groups = "drop"
-  )
-
-# Bootstrap variance (study-level, LOSO only)
-boot_study_var <- bootstrap_samples %>%
-  filter(method == "study_level") %>%
-  group_by(type, model) %>%
-  summarise(
-    boot_study_mean = mean(kappa),
-    boot_study_se = sd(kappa),
-    .groups = "drop"
-  )
-
-# Merge all
-comparison <- fold_var %>%
-  left_join(boot_strat_var, by = c("type", "model")) %>%
-  left_join(boot_single_var, by = c("type", "model")) %>%
-  left_join(boot_study_var, by = c("type", "model"))
-
-cat("CV Results:\n")
-cat("-----------\n")
-cv_comp <- comparison %>% filter(type == "cv") %>% 
-  select(model, fold_mean, fold_sd, boot_strat_se)
-print(cv_comp)
-
-cat("\n\nLOSO Results:\n")
-cat("-------------\n")
-cat("fold_sd:        Between-fold variance (7 cohorts)\n")
-cat("boot_strat_se:  Resample ALL cohorts (combined within-study variance)\n")
-cat("boot_single_se: Resample ONE random cohort (isolated per-cohort variance)\n")
-cat("boot_study_se:  Resample which studies (study-level/generalization variance)\n\n")
-loso_comp <- comparison %>% filter(type == "loso") %>%
-  select(model, fold_mean, fold_sd, boot_strat_se, boot_single_se, boot_study_se)
-print(loso_comp)
-
-cat("\n\nInterpretation:\n")
-cat("---------------\n")
-cat("- fold_sd: Observed variance across the 7 LOSO folds (study-level effects)\n")
-cat("- boot_strat_se: Combined sampling variance when resampling ALL cohorts\n")
-cat("- boot_single_se: More conservative - resamples ONE cohort at a time\n")
-cat("  (Smaller SE since only 1/7 of data varies per iteration)\n")
-cat("- boot_study_se: Study selection variance - if we had different studies\n")
-cat("\nExpected: boot_single_se < boot_strat_se (only one cohort changes per iter)\n")
-cat("If boot_study_se >> boot_single_se: study selection dominates over sampling variance.\n")
-```
-
-
-##  --Overall Summary Statistics
+##  --Performance Table (Mean ± SD)
 
 ```{r}
 library(ComplexHeatmap)
-# Summary heatmaps of mean and SD per model for CV and LOSO (including accuracy)
+
+# Summary heatmaps of mean and SD per model for CV and LOSO (including accuracy),
+# now with separate columns for full vs collapsed label sets.
 summary_stats <- results_per_fold %>%
-  dplyr::group_by(type, model) %>%
-  dplyr::summarise(
-    mean_kappa = mean(kappa),
-    sd_kappa = sd(kappa),
+  group_by(type, model, label_set) %>%
+  summarise(
+    mean_kappa    = mean(kappa),
+    sd_kappa      = sd(kappa),
     mean_accuracy = mean(accuracy),
-    sd_accuracy = sd(accuracy),
-    .groups = "drop"
+    sd_accuracy   = sd(accuracy),
+    .groups       = "drop"
   )
 
-# CV ordering and data
-cv_stats <- summary_stats %>% dplyr::filter(type == "cv") %>%
-  dplyr::arrange(dplyr::desc(mean_kappa)) %>%
-  dplyr::mutate(model = factor(model, levels = unique(model)))
+# Create table with mean (±SD) format directly from summary_stats
+# Extract and rename columns for each combination of type and label_set
+cv_full <- summary_stats %>%
+  filter(type == "cv", label_set == "Full subtypes") %>%
+  select(model, 
+         cv_kappa_mean_full = mean_kappa, 
+         cv_kappa_sd_full = sd_kappa,
+         cv_acc_mean_full = mean_accuracy, 
+         cv_acc_sd_full = sd_accuracy)
 
-# LOSO ordering and data
-loso_stats <- summary_stats %>% dplyr::filter(type == "loso") %>%
-  dplyr::arrange(dplyr::desc(mean_kappa)) %>%
-  dplyr::mutate(model = factor(model, levels = unique(model)))
+cv_collapsed <- summary_stats %>%
+  filter(type == "cv", label_set == "Collapsed classes") %>%
+  select(model,
+         cv_kappa_mean_collapsed = mean_kappa,
+         cv_kappa_sd_collapsed = sd_kappa,
+         cv_acc_mean_collapsed = mean_accuracy,
+         cv_acc_sd_collapsed = sd_accuracy)
 
-# ComplexHeatmap: combined heatmaps per CV and LOSO with per-metric shared scales
-# Build matrices for CV (ordered by mean kappa)
-cv_row_order <- as.character(cv_stats$model)
-cv_mat <- cbind(
-  Mean = cv_stats$mean_kappa,
-  SD   = cv_stats$sd_kappa,
-  Mean = cv_stats$mean_accuracy,
-  SD   = cv_stats$sd_accuracy
-)
-colnames(cv_mat) <- c("Mean", "SD", "Mean", "SD")
-rownames(cv_mat) <- cv_row_order
+loso_full <- summary_stats %>%
+  filter(type == "loso", label_set == "Full subtypes") %>%
+  select(model,
+         loso_kappa_mean_full = mean_kappa,
+         loso_kappa_sd_full = sd_kappa,
+         loso_acc_mean_full = mean_accuracy,
+         loso_acc_sd_full = sd_accuracy)
 
-# Build matrices for LOSO (ordered by mean kappa)
-loso_row_order <- as.character(loso_stats$model)
-loso_mat <- cbind(
-  Mean = loso_stats$mean_kappa,
-  SD   = loso_stats$sd_kappa,
-  Mean = loso_stats$mean_accuracy,
-  SD   = loso_stats$sd_accuracy
-)
-colnames(loso_mat) <- c("Mean", "SD", "Mean", "SD")
-rownames(loso_mat) <- loso_row_order
+loso_collapsed <- summary_stats %>%
+  filter(type == "loso", label_set == "Collapsed classes") %>%
+  select(model,
+         loso_kappa_mean_collapsed = mean_kappa,
+         loso_kappa_sd_collapsed = sd_kappa,
+         loso_acc_mean_collapsed = mean_accuracy,
+         loso_acc_sd_collapsed = sd_accuracy)
 
-# Column grouping for hierarchical headers
-col_groups <- factor(c("Kappa", "Kappa", "Accuracy", "Accuracy"), levels = c("Kappa", "Accuracy"))
+# Join all data together
+performance_table <- cv_full %>%
+  left_join(cv_collapsed, by = "model") %>%
+  left_join(loso_full, by = "model") %>%
+  left_join(loso_collapsed, by = "model") %>%
+  mutate(
+    Model = model,
+    `CV Kappa (Full)` = sprintf("%.2f ± %.2f", cv_kappa_mean_full, cv_kappa_sd_full),
+    `CV Kappa (Collapsed)` = sprintf("%.2f ± %.2f", cv_kappa_mean_collapsed, cv_kappa_sd_collapsed),
+    `CV Accuracy (Full)` = sprintf("%.1f%% ± %.1f%%", cv_acc_mean_full * 100, cv_acc_sd_full * 100),
+    `CV Accuracy (Collapsed)` = sprintf("%.1f%% ± %.1f%%", cv_acc_mean_collapsed * 100, cv_acc_sd_collapsed * 100),
+    `LOSO Kappa (Full)` = sprintf("%.2f ± %.2f", loso_kappa_mean_full, loso_kappa_sd_full),
+    `LOSO Kappa (Collapsed)` = sprintf("%.2f ± %.2f", loso_kappa_mean_collapsed, loso_kappa_sd_collapsed),
+    `LOSO Accuracy (Full)` = sprintf("%.1f%% ± %.1f%%", loso_acc_mean_full * 100, loso_acc_sd_full * 100),
+    `LOSO Accuracy (Collapsed)` = sprintf("%.1f%% ± %.1f%%", loso_acc_mean_collapsed * 100, loso_acc_sd_collapsed * 100)
+  ) %>%
+  select(Model, `CV Kappa (Full)`, `CV Kappa (Collapsed)`, `CV Accuracy (Full)`, 
+         `CV Accuracy (Collapsed)`, `LOSO Kappa (Full)`, `LOSO Kappa (Collapsed)`, 
+         `LOSO Accuracy (Full)`, `LOSO Accuracy (Collapsed)`)
 
-# Build normalized color-value matrices so each metric has sensible shared scales
-normalize_vec <- function(x, lims) {
-  if (diff(lims) == 0) return(rep(0.5, length(x)))
-  pmin(pmax((x - lims[1]) / (lims[2] - lims[1]), 0), 1)
-}
+# Order by cv_order (reverse order to match original)
+performance_table <- performance_table %>%
+  mutate(Model = factor(Model, levels = cv_order)) %>%
+  arrange(desc(Model)) %>%
+  mutate(Model = as.character(Model))
 
-# Normalize CV matrix (columns 1-2 are Kappa, 3-4 are Accuracy)
-mean_kappa_limits <- range(cv_mat[, 1], na.rm = TRUE)
-sd_kappa_limits <- range(cv_mat[, 2], na.rm = TRUE)
-mean_acc_limits <- range(cv_mat[, 3], na.rm = TRUE)
-sd_acc_limits <- range(cv_mat[, 4], na.rm = TRUE)
+# Display table using kable
+performance_table_kable <- kable(
+  performance_table,
+  caption = "Model Performance Metrics (Mean ± SD)",
+  align = c("l", rep("c", 8)),
+  col.names = NULL
+) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed"),
+    full_width = FALSE,
+    position = "center"
+  ) %>%
+  column_spec(1, bold = TRUE) %>%
+  add_header_above(c(" " = 1, "Full" = 1, "Collapsed" = 1, "Full" = 1, "Collapsed" = 1, "Full" = 1, "Collapsed" = 1, "Full" = 1, "Collapsed" = 1)) %>%
+  add_header_above(c(" " = 1, "Kappa" = 2, "Accuracy" = 2, "Kappa" = 2, "Accuracy" = 2)) %>%
+  add_header_above(c(" " = 1, "Standard CV" = 4, "LOSO" = 4)) 
+  
 
-cv_colval_mat <- cv_mat
-cv_colval_mat[, 1] <- normalize_vec(cv_mat[, 1], mean_kappa_limits)
-cv_colval_mat[, 2] <- 1 - normalize_vec(cv_mat[, 2], sd_kappa_limits)
-cv_colval_mat[, 3] <- normalize_vec(cv_mat[, 3], mean_acc_limits)
-cv_colval_mat[, 4] <- 1 - normalize_vec(cv_mat[, 4], sd_acc_limits)
-
-# Normalize LOSO matrix
-mean_kappa_limits <- range(loso_mat[, 1], na.rm = TRUE)
-sd_kappa_limits <- range(loso_mat[, 2], na.rm = TRUE)
-mean_acc_limits <- range(loso_mat[, 3], na.rm = TRUE)
-sd_acc_limits <- range(loso_mat[, 4], na.rm = TRUE)
-
-loso_colval_mat <- loso_mat
-loso_colval_mat[, 1] <- normalize_vec(loso_mat[, 1], mean_kappa_limits)
-loso_colval_mat[, 2] <- 1 - normalize_vec(loso_mat[, 2], sd_kappa_limits)
-loso_colval_mat[, 3] <- normalize_vec(loso_mat[, 3], mean_acc_limits)
-loso_colval_mat[, 4] <- 1 - normalize_vec(loso_mat[, 4], sd_acc_limits)
-
-# Palette applied to normalized [0,1] values
-palette_fun <- circlize::colorRamp2(c(0, 1), c("#e5f5e6", "#31a354"))
-
-# CV combined heatmap with hierarchical column headers (Kappa/Accuracy above Mean/SD)
-ht_cv <- Heatmap(
-  cv_mat,
-  name = NULL,
-  row_names_side = "left",
-  column_names_side = "top",
-  row_names_gp = gpar(fontsize = 10),
-  column_names_gp = gpar(fontsize = 10),
-  column_split = col_groups,
-  column_title_gp = gpar(fontsize = 11, fontface = "bold"),
-  cluster_rows = FALSE,
-  cluster_columns = FALSE,
-  cluster_column_slices = FALSE,
-  rect_gp = gpar(col = "#d9d9d9", lwd = 0.5),
-  height = unit(nrow(cv_mat) * 4, "mm"),
-  width = unit(65, "mm"),
-  cell_fun = function(j, i, x, y, width, height, fill) {
-    val <- cv_mat[i, j]
-    norm_val <- cv_colval_mat[i, j]
-    grid.rect(x, y, width = width, height = height,
-              gp = gpar(fill = palette_fun(norm_val), col = "#d9d9d9", lwd = 0.5))
-    grid.text(sprintf("%.3f", val), x, y, gp = gpar(fontsize = 10))
-  },
-  show_heatmap_legend = FALSE,
-  column_names_rot = 0,
-  column_names_centered = TRUE,
-  column_gap = unit(2, "mm")
-)
-
-cv_heatmap_plot <- ggplotify::as.ggplot(function() ComplexHeatmap::draw(ht_cv, padding = unit(c(10, 0, 10, 5), "mm"),
-  column_title = "CV: Overall Performance",
-  column_title_gp = gpar(fontsize = 13)))
-
-# LOSO combined heatmap with hierarchical column headers (Kappa/Accuracy above Mean/SD)
-ht_loso <- Heatmap(
-  loso_mat,
-  name = NULL,
-  row_names_side = "left",
-  column_names_side = "top",
-  row_names_gp = gpar(fontsize = 10),
-  column_names_gp = gpar(fontsize = 10),
-  column_split = col_groups,
-  column_title_gp = gpar(fontsize = 11, fontface = "bold"),
-  cluster_rows = FALSE,
-  cluster_columns = FALSE,
-  cluster_column_slices = FALSE,
-  rect_gp = gpar(col = "#d9d9d9", lwd = 0.5),
-  height = unit(nrow(loso_mat) * 4, "mm"),
-  width = unit(65, "mm"),
-  cell_fun = function(j, i, x, y, width, height, fill) {
-    val <- loso_mat[i, j]
-    norm_val <- loso_colval_mat[i, j]
-    grid.rect(x, y, width = width, height = height,
-              gp = gpar(fill = palette_fun(norm_val), col = "#d9d9d9", lwd = 0.5))
-    grid.text(sprintf("%.3f", val), x, y, gp = gpar(fontsize = 10))
-  },
-  show_heatmap_legend = FALSE,
-  column_names_rot = 0,
-  column_names_centered = TRUE,
-  column_gap = unit(2, "mm")
-)
-
-loso_heatmap_plot <- ggplotify::as.ggplot(function() ComplexHeatmap::draw(ht_loso, padding = unit(c(10, 0, 10, 5), "mm"), #bottom, left, top and right.  
-  column_title = "LOSO: Overall Performance",
-  column_title_gp = gpar(fontsize = 13)))
-
-cv_heatmap_plot + loso_heatmap_plot
+performance_table_kable
 ```
-
-##  --Combined Performance Figure
-
-```{r}
-library(egg)
-
-figure1_egg <- ggarrange(
-  p1, p2,
-  cv_heatmap_plot, loso_heatmap_plot,
-  ncol = 2, nrow = 2,
-  labels = c('A', 'B', 'C', 'D'),
-  label.args = list(gp = gpar(fontface = "bold"))
-)
-figure1_egg
-ggsave('../writing/figures/figure1.png', figure1_egg, width = 9, height = 8*2/3)
-```
-
 
 # Per-Class Performance Analysis
 
 ##  --Per-Class Metrics by Subtype
 
 ```{r}
-# Global_Optimized is best
-fix_names <- function(x){
-  # Map verbose labels to concise AML names; preserves factor inputs by relabeling levels
-  mapping <- c(
+mapping <- c(
     "AML.with.inv.16..t.16.16..CBFB..MYH11" = "CBFB::MYH11",
     "APL..t.15.17..PML..RARA" = "PML::RARA",
     "AML.with.t.6.9..DEK..NUP214" = "DEK::NUP214",
@@ -1268,14 +823,75 @@ fix_names <- function(x){
     "ETV6..MNX1" = "ETV6::MNX1",
     "KAT6A..CREBBP" = "KAT6A::CREBBP",
     "RBM15..MRTF1" = "RBM15::MRTF1",
-    "MDS.r.and.MECOM" = "MDS-related and MECOM rearrangement",
+    "MDS.r" = "MDS-related",
     "AML.with.t.9.11..MLLT3..KMT2A" = "MLLT3::KMT2A",
     "FUS..ERG" = "FUS::ERG",
     "NUP98..NSD1" = "NUP98::NSD1",
     "other.KMT2A" = "Other KMT2A rearrangements",
     "CBFA2T3..GLIS2" = "CBFA2T3::GLIS2",
-    "NUP98..KDM5A" = "NUP98::KDM5A"
+    "NUP98..KDM5A" = "NUP98::KDM5A",
+    "NUP98..other.partners" = "NUP98, other partners",
+    # MDS-related subtypes (all map to MDS-related)
+    "AML.with.MDS.related.gene.mutations" = "MDS-related, gene mutations",
+    "AML.with.MDS.related.cytogenetic.abnormalities" = "MDS-related, cytogenetic abnormalities",
+    "AML.with.mutated.TP53" = "MDS-related, TP53 mutated",
+    # MECOM variants
+    "MECOM.fusion" = "MECOM rearrangement",
+    "MECOM.rearrangement" = "MECOM rearrangement",
+    # Additional subtypes that may appear in results
+    "AML.with.t.9.22..BCR..ABL1" = "BCR::ABL1",
+    "BCR..ABL1" = "BCR::ABL1",
+    "PRDM16..RPN1" = "PRDM16::RPN1",
+    "NPM1..MLF1" = "NPM1::MLF1",
+    "PICALM..MLLT10" = "PICALM::MLLT10",
+    "RUNX1..CBFA2T3" = "RUNX1::CBFA2T3",
+    # KMT2A variants
+    "KMT2A..ELL" = "KMT2A::ELL",
+    "KMT2A..MLLT10" = "KMT2A::MLLT10",
+    "KMT2A..MLLT4" = "KMT2A::MLLT4",
+    "KMT2A..MLLT4....AFDN." = "KMT2A::MLLT4",
+    "KMT2A..SEPT6" = "KMT2A::SEPT6"
   )
+
+# Order matching the table with all included subtypes (desired_included_order)
+# This matches the ordering used in Supplementary Table 1
+order_AML <- c(
+    "PML::RARA",                                    # APL, t(15;17)/PML::RARA
+    "RUNX1::RUNX1T1",                              # AML with t(8;21)/RUNX1::RUNX1T1
+    "CBFB::MYH11",                                 # AML with inv(16)/t(16;16)/CBFB::MYH11
+    "MLLT3::KMT2A",                                # AML with t(9;11)/MLLT3::KMT2A
+    "Other KMT2A rearrangements",                  # Other KMT2A rearrangements
+    # Other KMT2A subtypes
+    "KMT2A::ELL",
+    "KMT2A::MLLT10",
+    "KMT2A::MLLT4",
+    "KMT2A::SEPT6",
+    "DEK::NUP214",                                 # AML with t(6;9)/DEK::NUP214
+    "MECOM rearrangement",                         # MECOM rearrangement
+    "BCR::ABL1",                                   # AML with t(9;22)/BCR::ABL1
+    "PRDM16::RPN1",
+    "NPM1::MLF1",
+    "KAT6A::CREBBP",
+    "RBM15::MRTF1",
+    "NUP98::KDM5A",
+    "NUP98, other partners",
+    "ETV6::MNX1",
+    "PICALM::MLLT10",
+    "FUS::ERG",
+    "RUNX1::CBFA2T3",
+    "CBFA2T3::GLIS2",
+    "NUP98::NSD1",                                 # NUP98::NSD1
+    "Mutated NPM1",                                # AML with mutated NPM1
+    "CEBPA bZIP in-frame",                         # AML with in-frame bZIP CEBPA
+    "MDS-related",          # MDS-related
+    "MDS-related, gene mutations",
+    "MDS-related, cytogenetic abnormalities",
+    "MDS-related, TP53 mutated"
+  )
+# Global_Optimized is best
+fix_names <- function(x){
+  # Map verbose labels to concise AML names; preserves factor inputs by relabeling levels
+
   if (is.factor(x)) {
     new_levels <- vapply(levels(x), function(l) {
       val <- unname(mapping[l])
@@ -1292,267 +908,1470 @@ fix_names <- function(x){
   }
 }
 
-make_cm_fig <- function(type){
-# All per class summaries
-per_class <- outer_cv_results$per_class_summaries[[type]]
-per_class <- per_class[per_class$Model == "Global_Optimized", ]
-rownames(per_class) <- gsub("Class: ", "", per_class$Class)
+make_cm_fig <- function(res_obj, type, label_set) {
+  # All per-class summaries for a given result object (full vs collapsed)
+  per_class <- res_obj$per_class_summaries[[type]]
+  per_class <- per_class[per_class$Model == "OvR_Ensemble", ]
+  rownames(per_class) <- gsub("Class: ", "", per_class$Class)
 
+  # Apply pretty names to per-class row labels
+  rownames(per_class) <- fix_names(rownames(per_class))
 
+  # Get subtypes that exist in both per_class and order_AML, preserving order_AML order
+  available_subtypes <- intersect(order_AML, rownames(per_class))
+  per_class <- per_class[available_subtypes, c(
+    "Mean_F1",
+    "Mean_Sensitivity",
+    "Mean_Specificity",
+    "Mean_Precision",
+    "Mean_Recall"
+  )]
+  colnames(per_class) <- gsub("Mean_", "", colnames(per_class))
 
-order_AML <- c("PML::RARA",
-           "RUNX1::RUNX1T1",
-           "CBFB::MYH11",
-           "MLLT3::KMT2A",
-           "Other KMT2A rearrangements",
-           "DEK::NUP214",
-           "Mutated NPM1",
-           "CEBPA bZIP in-frame",
-           "NUP98::NSD1",
-           "ETV6::MNX1",
-           "CBFA2T3::GLIS2",
-           "NUP98::KDM5A",
-           "FUS::ERG",
-           "KAT6A::CREBBP",
-           "RBM15::MRTF1",
-           "MDS-related and MECOM rearrangement"
-           )
+  to_remove <- apply(per_class, 1, function(x) any(is.na(x)))
+  per_class <- per_class[!to_remove, ]
+per_class <- apply(per_class, 2, function(x) round(x, 2))
+  normalise <- function(x) {
+    (x - min(x)) / (max(x) - min(x))
+  }
+  per_class_norm <- apply(per_class, 2, normalise)
 
-# Apply pretty names to per-class row labels
-rownames(per_class) <- fix_names(rownames(per_class))
+  # Define palette for per-class metrics (white to green for performance)
+  palette_fun <- circlize::colorRamp2(c(0, 1), c("white", "green4"))
 
-per_class <- per_class[order_AML, c("Mean_F1",
-                           "Mean_Sensitivity",
-                           "Mean_Specificity",
-                           "Mean_Precision",
-                           "Mean_Recall")]
-colnames(per_class) <- gsub("Mean_", "", colnames(per_class))
-
-to_remove <- apply(per_class, 1, function(x) any(is.na(x)))
-per_class <- per_class[!to_remove,]
-print(per_class)
-normalise <- function(x) {
-  return((x - min(x)) / (max(x) - min(x)))
-}
-per_class_norm <- apply(per_class, 2, normalise)
-
-
-ht_per_class <- Heatmap(
-  per_class,
-  name = NULL,
-  row_names_side = "left",
-  column_names_side = "top",
-  row_names_gp = gpar(fontsize = 10),
-  column_names_gp = gpar(fontsize = 10),
-  cluster_rows = FALSE,
-  cluster_columns = FALSE,
-  rect_gp = gpar(col = "#d9d9d9", lwd = 0.5),
-  # height = unit(nrow(loso_mat) * 3, "mm"),
-  # width = unit(30, "mm"),
-  cell_fun = function(j, i, x, y, width, height, fill) {
-    val <- per_class[i, j]
-    norm_val <- per_class_norm[i, j]
-    grid.rect(
-      x,
-      y,
-      width = width,
-      height = height,
-      gp = gpar(
-        fill = palette_fun(norm_val),
-        col = "#d9d9d9",
-        lwd = 0.5
+  ht_per_class <- Heatmap(
+    per_class,
+    name              = NULL,
+    row_names_side    = "left",
+    column_names_side = "top",
+    row_names_gp      = gpar(fontsize = 10),
+    column_names_gp   = gpar(fontsize = 10),
+    cluster_rows      = FALSE,
+    cluster_columns   = FALSE,
+    rect_gp           = gpar(col = "#d9d9d9", lwd = 0.5),
+    cell_fun = function(j, i, x, y, width, height, fill) {
+      val      <- per_class[i, j]
+      norm_val <- per_class_norm[i, j]
+      grid.rect(
+        x,
+        y,
+        width  = width,
+        height = height,
+        gp     = gpar(
+          fill = palette_fun(norm_val),
+          col  = "#d9d9d9",
+          lwd  = 0.5
+        )
       )
+      grid.text(sprintf("%.2f", val), x, y, gp = gpar(fontsize = 11))
+    },
+    show_heatmap_legend  = FALSE,
+    column_names_rot     = 45,
+    column_names_centered = FALSE,
+    column_title         = "Performance measure",
+    column_title_gp      = gpar(fontface = "bold"),
+    row_title            = "Reference class",
+    row_title_gp         = gpar(fontface = "bold")
+  )
+
+  # Confusion matrices across folds for the same result object
+  conf_table <- list()
+  for (fold in names(res_obj$detailed_performance[[type]]$Global_Optimized)) {
+    conf_table[[fold]] <- res_obj$detailed_performance[[type]]$Global_Optimized[[fold]]$confusion_matrix$table
+  }
+
+  # Get all unique classes across all folds
+  all_classes <- unique(unlist(lapply(conf_table, function(x) c(rownames(x), colnames(x)))))
+
+  # Pad each confusion matrix to have the same dimensions
+  conf_table_padded <- lapply(conf_table, function(mat) {
+    padded_mat <- matrix(
+      0,
+      nrow    = length(all_classes),
+      ncol    = length(all_classes),
+      dimnames = list(all_classes, all_classes)
     )
-    grid.text(sprintf("%.2f", val), x, y, gp = gpar(fontsize = 11))
-  },
-  show_heatmap_legend = FALSE,
-  column_names_rot = 45,
-  column_names_centered = F,
-  column_title = "Performance measure",
-  column_title_gp = gpar(fontface = "bold"),
-  row_title = "Reference class",
-  row_title_gp = gpar(fontface = "bold")
-)
+    padded_mat[rownames(mat), colnames(mat)] <- mat
+    padded_mat
+  })
 
+  total_conf <- Reduce("+", conf_table_padded)
+  total_conf <- t(total_conf)
 
-conf_table <- list() 
+  # Apply pretty names to confusion matrix axes and reorder to match per_class
+  rownames(total_conf) <- fix_names(rownames(total_conf))
+  colnames(total_conf) <- fix_names(colnames(total_conf))
+  total_conf <- total_conf[rownames(per_class), rownames(per_class)]
 
-for (fold in names(outer_cv_results$detailed_performance[[type]]$Global_Optimized)){
- conf_table[[fold]] <- outer_cv_results$detailed_performance[[type]]$Global_Optimized[[fold]]$confusion_matrix$table
+  total_conf_norm <- apply(total_conf, 2, normalise)
+
+  total_conf_palette_fun <- circlize::colorRamp2(c(0, 1), c("white", "purple3"))
+  ht_table <- Heatmap(
+    total_conf,
+    name              = NULL,
+    row_names_side    = "left",
+    column_names_side = "top",
+    row_names_gp      = gpar(fontsize = 10),
+    column_names_gp   = gpar(fontsize = 10),
+    cluster_rows      = FALSE,
+    cluster_columns   = FALSE,
+    rect_gp           = gpar(col = "#d9d9d9", lwd = 0.5),
+    cell_fun = function(j, i, x, y, width, height, fill) {
+      val      <- total_conf[i, j]
+      norm_val <- total_conf_norm[i, j]
+      grid.rect(
+        x,
+        y,
+        width  = width,
+        height = height,
+        gp     = gpar(
+          fill = total_conf_palette_fun(norm_val),
+          col  = "#d9d9d9",
+          lwd  = 0.5
+        )
+      )
+      grid.text(sprintf("%.0f", val), x, y, gp = gpar(fontsize = 11))
+    },
+    show_heatmap_legend  = FALSE,
+    column_names_rot     = 45,
+    column_names_centered = FALSE,
+    column_title         = "Predicted class",
+    column_title_gp      = gpar(fontface = "bold"),
+    row_title            = "Reference class",
+    row_title_gp         = gpar(fontface = "bold")
+  )
+
+  ht_per_class + ht_table
 }
 
-# Get all unique classes across all folds
-all_classes <- unique(unlist(lapply(conf_table, function(x) c(rownames(x), colnames(x)))))
+# Build class-performance + confusion-matrix composites for both full and collapsed label sets
+cm_fig_cv_full       <- make_cm_fig(outer_unmerged, "cv",   "Full subtypes")
+cm_fig_loso_full     <- make_cm_fig(outer_unmerged, "loso", "Full subtypes")
+cm_fig_cv_collapsed  <- make_cm_fig(outer_merged,   "cv",   "Collapsed classes")
+cm_fig_loso_collapsed <- make_cm_fig(outer_merged,  "loso", "Collapsed classes")
 
-# Pad each confusion matrix to have the same dimensions
-conf_table_padded <- lapply(conf_table, function(mat) {
-  # Create a matrix with all classes, initialized with zeros
-  padded_mat <- matrix(0, nrow = length(all_classes), ncol = length(all_classes),
-                       dimnames = list(all_classes, all_classes))
-  # Fill in the values from the original matrix
-  padded_mat[rownames(mat), colnames(mat)] <- mat
-  return(padded_mat)
+# Wrap as ggplot objects with informative titles
+cm_fig_cv_full_plot <- ggplotify::as.ggplot(function() {
+  ComplexHeatmap::draw(
+    cm_fig_cv_full,
+    padding        = unit(c(5, 3, 5, 50), "mm"),
+    column_title   = "CV: Class performance (Full subtypes)",
+    column_title_gp = gpar(fontsize = 12, fontface = "bold")
+  )
 })
 
-total_conf <- Reduce("+", conf_table_padded)
-total_conf <- t(total_conf)
-# Apply pretty names to confusion matrix axes and reorder to match per_class
-rownames(total_conf) <- fix_names(rownames(total_conf))
-colnames(total_conf) <- fix_names(colnames(total_conf))
-total_conf <- total_conf[rownames(per_class),rownames(per_class)]
-print(total_conf)
-total_conf_norm <- apply(total_conf, 2, normalise)
-# Palette applied to normalized [0,1] values
-total_conf_palette_fun <- circlize::colorRamp2(c(0, 1), c("white", "purple"))
-ht_table <- Heatmap(
-  total_conf,
-  name = NULL,
-  row_names_side = "left",
-  column_names_side = "top",
-  row_names_gp = gpar(fontsize = 10),
-  column_names_gp = gpar(fontsize = 10),
-  cluster_rows = FALSE,
-  cluster_columns = FALSE,
-  rect_gp = gpar(col = "#d9d9d9", lwd = 0.5),
-  # height = unit(nrow(loso_mat) * 3, "mm"),
-  # width = unit(30, "mm"),
-  cell_fun = function(j, i, x, y, width, height, fill) {
-    val <- total_conf[i, j]
-    norm_val <- total_conf_norm[i, j]
-    grid.rect(
-      x,
-      y,
-      width = width,
-      height = height,
-      gp = gpar(
-        fill = total_conf_palette_fun(norm_val),
-        col = "#d9d9d9",
-        lwd = 0.5
-      )
-    )
-    grid.text(sprintf("%.0f", val), x, y, gp = gpar(fontsize = 11))
-  },
-  show_heatmap_legend = FALSE,
-  column_names_rot = 45,
-  column_names_centered = F,
-  column_title = "Predicted class",
-  column_title_gp = gpar(fontface = "bold"),
-  row_title = "Reference class",
-  row_title_gp = gpar(fontface = "bold")
-)
+cm_fig_cv_collapsed_plot <- ggplotify::as.ggplot(function() {
+  ComplexHeatmap::draw(
+    cm_fig_cv_collapsed,
+    padding        = unit(c(5, 3, 5, 50), "mm"),
+    column_title   = "CV: Class performance (Collapsed classes)",
+    column_title_gp = gpar(fontsize = 12, fontface = "bold")
+  )
+})
 
-ht_comb <- ht_per_class + ht_table
-return(ht_comb)
-}
+cm_fig_loso_full_plot <- ggplotify::as.ggplot(function() {
+  ComplexHeatmap::draw(
+    cm_fig_loso_full,
+    padding        = unit(c(5, 3, 5, 50), "mm"),
+    column_title   = "LOSO: Class performance (Full subtypes)",
+    column_title_gp = gpar(fontsize = 12, fontface = "bold")
+  )
+})
 
-cm_fig_cv <- make_cm_fig("cv")
-
-cm_fig_loso <- make_cm_fig("loso")
-
-# png("../writing/figures/per_class_cv.png", width = 1000, pointsize = 12)
-# ComplexHeatmap::draw(cm_fig_cv, padding = unit(c(5, 3, 5, 30), "mm"))
-# dev.off()
-
-cm_fig_cv_plot <- ggplotify::as.ggplot(function() ComplexHeatmap::draw(cm_fig_cv, padding = unit(c(5, 3, 5, 50), "mm"), #bottom, left, top and right.  
-  column_title = "CV: Class performance",
-  column_title_gp = gpar(fontsize = 12, fontface ="bold")))
-
-# png("../writing/figures/per_class_loso.png", width = 1000, pointsize = 12)
-# ComplexHeatmap::draw(cm_fig_loso, padding = unit(c(5, 3, 5, 30), "mm"))
-# dev.off()
-
-cm_fig_loso_plot <- ggplotify::as.ggplot(function() ComplexHeatmap::draw(cm_fig_loso, padding = unit(c(5, 3, 5, 50), "mm"), #bottom, left, top and right.  
-  column_title = "LOSO: Class performance",
-  column_title_gp = gpar(fontsize = 12, fontface ="bold", just = "center")))
+cm_fig_loso_collapsed_plot <- ggplotify::as.ggplot(function() {
+  ComplexHeatmap::draw(
+    cm_fig_loso_collapsed,
+    padding        = unit(c(5, 3, 5, 50), "mm"),
+    column_title   = "LOSO: Class performance (Collapsed classes)",
+    column_title_gp = gpar(fontsize = 12, fontface = "bold")
+  )
+})
 ```
 ```{r}
-# figure1_egg <- ggarrange(
-#   p1, p2, cm_fig_cv_plot,
-#   cv_heatmap_plot, loso_heatmap_plot, cm_fig_loso_plot
-#   ncol = 3, nrow = 2,
-#   labels = c('A', 'B', 'C', 'D', "E", "F"),
-#   label.args = list(gp = gpar(fontface = "bold"))
-# )
+library(egg)
 
+# Arrange the four class-performance panels (CV/LOSO × full/collapsed)
 figure2_egg <- ggarrange(
-  cm_fig_cv_plot, cm_fig_loso_plot,
-  ncol = 1, nrow = 2,
-  labels = c('A', 'B'),
+  cm_fig_cv_full_plot,      cm_fig_cv_collapsed_plot,
+  cm_fig_loso_full_plot,    cm_fig_loso_collapsed_plot,
+  ncol  = 2, nrow = 2,
+  labels = c("A", "B", "C", "D"),
   label.args = list(gp = gpar(fontface = "bold", cex = 1))
 )
-ggsave('../writing/figures/figures_class_perf.png', figure2_egg, width = 300, height = 300,units = "mm")
+
+ggsave(
+  "../writing/figures_new/figures_class_perf.png",
+  figure2_egg,
+  width  = 400*2,
+  height = 300*2,
+  units  = "mm"
+)
+```
+
+## -- Three-Panel Figure: F1 Comparison and Error Analysis
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(ComplexHeatmap)
+library(circlize)
+library(grid)
+library(gridExtra)
+
+# Panel A: F1 Scores Comparison (Full vs Merged)
+# Extract F1 scores for full and merged classes
+f1_full <- outer_unmerged$per_class_summaries$cv %>%
+  filter(Model == "OvR_Ensemble") %>%
+  mutate(Class = gsub("Class: ", "", Class),
+         Class = fix_names(Class),
+         Type = "Full",
+         F1 = Mean_F1) %>%
+  select(Class, F1, Type)
+
+f1_merged <- outer_merged$per_class_summaries$cv %>%
+  filter(Model == "OvR_Ensemble") %>%
+  mutate(Class = gsub("Class: ", "", Class),
+         Class = fix_names(Class),
+         Type = "Merged",
+         F1 = Mean_F1) %>%
+  select(Class, F1, Type)
+
+# Combine and create comparison data
+f1_comparison <- bind_rows(f1_full, f1_merged) %>%
+  filter(!is.na(F1))
+
+# Define merge mapping for connecting lines
+merge_mapping <- list(
+  "Other KMT2A rearrangements" = c("KMT2A::ELL", "KMT2A::MLLT10", "KMT2A::MLLT4", "KMT2A::SEPT6"),
+  "MDS-related" = c("MDS-related, gene mutations", "MDS-related, cytogenetic abnormalities", "MDS-related, TP53 mutated", "MDS.r")
+)
+
+# Create category groups for coloring
+f1_comparison <- f1_comparison %>%
+  mutate(
+    Category = case_when(
+      Class %in% c("PML::RARA", "RUNX1::RUNX1T1", "CBFB::MYH11", "DEK::NUP214", "MECOM rearrangement") ~ "Major rearrangements",
+      Class %in% c("MLLT3::KMT2A", "Other KMT2A rearrangements", "KMT2A::ELL", "KMT2A::MLLT10", "KMT2A::MLLT4", "KMT2A::SEPT6") ~ "KMT2A rearrangements",
+      Class %in% c("MDS-related", "MDS-related, gene mutations", "MDS-related, cytogenetic abnormalities", "MDS-related, TP53 mutated", "MDS.r") ~ "MDS-related",
+      Class %in% c("Mutated NPM1", "CEBPA bZIP in-frame") ~ "Major mutations",
+      Class %in% c("PRDM16::RPN1", "NPM1::MLF1", "KAT6A::CREBBP", "RBM15::MRTF1", "ETV6::MNX1", "PICALM::MLLT10", "FUS::ERG", "RUNX1::CBFA2T3", "CBFA2T3::GLIS2", "NUP98::NSD1", "NUP98::KDM5A", "NUP98, other partners") ~ "Rare translocations",
+      TRUE ~ "Other"
+    )
+  )
+
+# Order classes consistently
+all_classes_ordered <- c(
+  "PML::RARA", "RUNX1::RUNX1T1", "CBFB::MYH11",
+  "MLLT3::KMT2A", "Other KMT2A rearrangements", "KMT2A::ELL", "KMT2A::MLLT10", "KMT2A::MLLT4", "KMT2A::SEPT6",
+  "DEK::NUP214", "MECOM rearrangement", "BCR::ABL1",
+  "PRDM16::RPN1", "NPM1::MLF1", "KAT6A::CREBBP", "RBM15::MRTF1", "NUP98::KDM5A", "NUP98, other partners",
+  "ETV6::MNX1", "PICALM::MLLT10", "FUS::ERG", "RUNX1::CBFA2T3", "CBFA2T3::GLIS2",
+  "NUP98::NSD1", "Mutated NPM1", "CEBPA bZIP in-frame",
+  "MDS-related", "MDS-related, gene mutations", "MDS-related, cytogenetic abnormalities", "MDS-related, TP53 mutated", "MDS.r"
+)
+
+f1_comparison$Class <- factor(f1_comparison$Class, levels = rev(all_classes_ordered))
+
+# Create color palette for categories
+category_colors <- c(
+  "Major rearrangements" = "#1f77b4",
+  "KMT2A" = "#ff7f0e",
+  "Major mutations" = "#2ca02c",
+  "MDS-related" = "#d62728",
+  "Rare translocations" = "#9467bd"
+)
+
+# Panel A: F1 Comparison Plot
+panel_a <- ggplot(f1_comparison, aes(x = F1, y = Class, color = Category, shape = Type)) +
+  geom_point(size = 2.5, alpha = 0.8, position = position_dodge(width = 0.5)) +
+  geom_vline(xintercept = 0.9, linetype = "dashed", color = "gray50", alpha = 0.5) +
+  scale_color_manual(values = category_colors, name = "Category") +
+  scale_shape_manual(values = c("Full" = 16, "Merged" = 17), name = "Type") +
+  labs(
+    x = "F1 Score",
+    y = "",
+    title = "A. F1 Scores: Full vs Merged Classes"
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(face = "bold", size = 11),
+    axis.text.y = element_text(size = 8),
+    axis.text.x = element_text(size = 9),
+    legend.position = "right",
+    legend.text = element_text(size = 8),
+    legend.title = element_text(size = 9)
+  ) +
+  xlim(0.5, 1.0)
+panel_a
+```
+```{r}
+# Panel B & C: Error Heatmaps for KMT2A and MDS groups
+# Function to extract and prepare confusion matrix for specific groups
+get_error_heatmap <- function(res_obj, type, label_set, focus_groups) {
+  # Get confusion matrices across folds
+  conf_table <- list()
+  
+  # Determine model name - check what's available
+  available_models <- names(res_obj$detailed_performance[[type]])
+  model_name <- if ("OvR_Ensemble" %in% available_models) {
+    "OvR_Ensemble"
+  } else if ("Global_Optimized" %in% available_models) {
+    "Global_Optimized"
+  } else {
+    available_models[1]  # Use first available model
+  }
+  
+  if (is.null(model_name) || !model_name %in% names(res_obj$detailed_performance[[type]])) {
+    return(NULL)
+  }
+  
+  for (fold in names(res_obj$detailed_performance[[type]][[model_name]])) {
+    cm_obj <- res_obj$detailed_performance[[type]][[model_name]][[fold]]$confusion_matrix
+    if (!is.null(cm_obj) && !is.null(cm_obj$table)) {
+      conf_table[[fold]] <- cm_obj$table
+    }
+  }
+  
+  if (length(conf_table) == 0) {
+    return(NULL)
+  }
+  
+  # Get all unique classes
+  all_classes <- unique(unlist(lapply(conf_table, function(x) c(rownames(x), colnames(x)))))
+  
+  if (length(all_classes) == 0) {
+    return(NULL)
+  }
+  
+  # Pad each confusion matrix
+  conf_table_padded <- lapply(conf_table, function(mat) {
+    padded_mat <- matrix(
+      0,
+      nrow = length(all_classes),
+      ncol = length(all_classes),
+      dimnames = list(all_classes, all_classes)
+    )
+    padded_mat[rownames(mat), colnames(mat)] <- mat
+    padded_mat
+  })
+  
+  # Sum across folds
+  total_conf <- Reduce("+", conf_table_padded)
+  total_conf <- t(total_conf)
+  
+  # Apply pretty names
+  rownames(total_conf) <- fix_names(rownames(total_conf))
+  colnames(total_conf) <- fix_names(colnames(total_conf))
+  
+  # Debug: Print available classes and focus groups
+  cat(sprintf("\n%s - Available classes after fix_names:\n", label_set))
+  cat(paste(rownames(total_conf), collapse = ", "), "\n")
+  cat(sprintf("Focus groups:\n"))
+  cat(paste(focus_groups, collapse = ", "), "\n")
+  
+  # Filter to focus groups - show square matrix of focus classes
+  focus_classes <- intersect(focus_groups, rownames(total_conf))
+  cat(sprintf("Matched focus classes:\n"))
+  cat(paste(focus_classes, collapse = ", "), "\n\n")
+  
+  if (length(focus_classes) == 0) {
+    return(NULL)
+  }
+  
+  # Show square matrix: focus classes as both rows and columns
+  # This shows errors between the focus classes themselves
+  conf_focused <- total_conf[focus_classes, focus_classes, drop = FALSE]
+  
+  # Debug: Print the full confusion matrix and focused subset
+  cat(sprintf("%s - Full confusion matrix dimensions: %d x %d\n", label_set, nrow(total_conf), ncol(total_conf)))
+  cat(sprintf("%s - Focused confusion matrix (counts):\n", label_set))
+  print(conf_focused)
+  
+  # Check for off-diagonal errors
+  off_diag <- conf_focused
+  diag(off_diag) <- 0
+  cat(sprintf("%s - Off-diagonal errors (sum): %d\n", label_set, sum(off_diag)))
+  cat("\n")
+  
+  # Calculate row percentages (error rates)
+  row_sums <- rowSums(conf_focused)
+  conf_percent <- sweep(conf_focused, 1, row_sums, "/") * 100
+  conf_percent[is.nan(conf_percent)] <- 0
+  
+  return(list(
+    counts = conf_focused,
+    percentages = conf_percent,
+    label_set = label_set
+  ))
+}
+
+# Define focus groups for KMT2A and MDS
+# Full classes that will be shown
+kmt2a_groups_full <- c("KMT2A::ELL", "KMT2A::MLLT10", "KMT2A::MLLT4", "KMT2A::SEPT6", "MLLT3::KMT2A")
+kmt2a_groups_merged <- c("Other KMT2A rearrangements", "MLLT3::KMT2A")
+
+mds_groups_full <- c("MDS-related, gene mutations", "MDS-related, cytogenetic abnormalities", 
+                     "MDS-related, TP53 mutated", "MDS-related")
+mds_groups_merged <- c("MDS-related")
+
+# Note: "MDS.r" maps to "MDS-related" so we use "MDS-related" in both
+
+# Combine groups
+focus_groups_full <- c(kmt2a_groups_full, mds_groups_full)
+focus_groups_merged <- c(kmt2a_groups_merged, mds_groups_merged)
+
+# Get error heatmaps
+error_before <- get_error_heatmap(outer_unmerged, "cv", "Full", focus_groups_full)
+error_after <- get_error_heatmap(outer_merged, "cv", "Merged", focus_groups_merged)
+
+# Create heatmap function
+create_error_heatmap <- function(error_data, title, kmt2a_groups) {
+  if (is.null(error_data)) {
+    return(NULL)
+  }
+  
+  conf_percent <- error_data$percentages
+  
+  # Create annotation for groups
+  # Check which groups are present
+  present_kmt2a <- intersect(rownames(conf_percent), kmt2a_groups)
+  group_anno <- ifelse(
+    rownames(conf_percent) %in% present_kmt2a,
+    "KMT2A",
+    "MDS-related"
+  )
+  
+  ha <- rowAnnotation(
+    Group = group_anno,
+    col = list(Group = c("KMT2A" = "#ff7f0e", "MDS-related" = "#d62728")),
+    annotation_legend_param = list(title = "Group", title_gp = gpar(fontsize = 9))
+  )
+  
+  # Color function for percentages (white to red for errors)
+  col_fun <- colorRamp2(c(0, 100), c("white", "purple3"))
+  
+  ht <- Heatmap(
+    conf_percent,
+    name = "Error %",
+    col = col_fun,
+    cluster_rows = FALSE,
+    cluster_columns = FALSE,
+    row_names_side = "left",
+    column_names_side = "top",
+    row_names_gp = gpar(fontsize = 9),
+    column_names_gp = gpar(fontsize = 9),
+    cell_fun = function(j, i, x, y, width, height, fill) {
+      val <- conf_percent[i, j]
+      count <- error_data$counts[i, j]
+      grid.rect(x, y, width, height, gp = gpar(fill = fill, col = "#d9d9d9", lwd = 0.5))
+      if (i == j) {
+        # Diagonal: correct predictions
+        grid.text(sprintf("%.0f", count), x, y, gp = gpar(fontsize = 8, fontface = "bold"))
+      } else if (count > 0) {
+        # Off-diagonal: errors (show all non-zero errors, not just > 5%)
+        if (val > 1) {
+          # Show percentage if > 1%
+          grid.text(sprintf("%.0f\n(%.1f%%)", count, val), x, y, gp = gpar(fontsize = 7))
+        } else {
+          # Just show count for very small percentages
+          grid.text(sprintf("%.0f", count), x, y, gp = gpar(fontsize = 7))
+        }
+      }
+    },
+    column_title = title,
+    column_title_gp = gpar(fontsize = 11, fontface = "bold"),
+    left_annotation = ha,
+    heatmap_legend_param = list(
+      title = "Error %",
+      title_gp = gpar(fontsize = 9),
+      labels_gp = gpar(fontsize = 8)
+    )
+  )
+  
+  return(ht)
+}
+
+# Create heatmaps
+ht_before <- create_error_heatmap(error_before, "B. Error Analysis: Full Classes", 
+                                   kmt2a_groups = kmt2a_groups_full)
+ht_after <- create_error_heatmap(error_after, "C. Error Analysis: Merged Classes",
+                                  kmt2a_groups = kmt2a_groups_merged)
+
+# Convert heatmaps to ggplot objects
+panel_b <- ggplotify::as.ggplot(function() {
+  draw(ht_before, padding = unit(c(5, 3, 5, 50), "mm"))
+})
+
+panel_c <- ggplotify::as.ggplot(function() {
+  draw(ht_after, padding = unit(c(5, 3, 5, 50), "mm"))
+})
+
+# Combine panels
+library(cowplot)
+three_panel_figure <- plot_grid(
+  panel_a,
+  panel_b,
+  panel_c,
+  ncol = 3,
+  align = "h",
+  rel_widths = c(1.2, 1, 1),
+  labels = NULL
+)
+
+# Save figure
+ggsave(
+  "../writing/figures_new/f1_comparison_error_analysis.png",
+  three_panel_figure,
+  width = 450,
+  height = 200,
+  units = "mm",
+  dpi = 300
+)
+
+print(three_panel_figure)
+```
+
+## -- Error Reduction Analysis: Full vs Merged Classes
+
+```{r}
+# Function to extract full confusion matrix (not just focus groups)
+get_full_confusion_matrix <- function(res_obj, type) {
+  conf_table <- list()
+  
+  # Determine model name
+  available_models <- names(res_obj$detailed_performance[[type]])
+  model_name <- if ("OvR_Ensemble" %in% available_models) {
+    "OvR_Ensemble"
+  } else if ("Global_Optimized" %in% available_models) {
+    "Global_Optimized"
+  } else {
+    available_models[1]
+  }
+  
+  if (is.null(model_name) || !model_name %in% names(res_obj$detailed_performance[[type]])) {
+    return(NULL)
+  }
+  
+  for (fold in names(res_obj$detailed_performance[[type]][[model_name]])) {
+    cm_obj <- res_obj$detailed_performance[[type]][[model_name]][[fold]]$confusion_matrix
+    if (!is.null(cm_obj) && !is.null(cm_obj$table)) {
+      conf_table[[fold]] <- cm_obj$table
+    }
+  }
+  
+  if (length(conf_table) == 0) {
+    return(NULL)
+  }
+  
+  # Get all unique classes
+  all_classes <- unique(unlist(lapply(conf_table, function(x) c(rownames(x), colnames(x)))))
+  
+  if (length(all_classes) == 0) {
+    return(NULL)
+  }
+  
+  # Pad each confusion matrix
+  conf_table_padded <- lapply(conf_table, function(mat) {
+    padded_mat <- matrix(
+      0,
+      nrow = length(all_classes),
+      ncol = length(all_classes),
+      dimnames = list(all_classes, all_classes)
+    )
+    padded_mat[rownames(mat), colnames(mat)] <- mat
+    padded_mat
+  })
+  
+  # Sum across folds
+  total_conf <- Reduce("+", conf_table_padded)
+  total_conf <- t(total_conf)
+  
+  # Apply pretty names
+  rownames(total_conf) <- fix_names(rownames(total_conf))
+  colnames(total_conf) <- fix_names(colnames(total_conf))
+  
+  return(total_conf)
+}
+
+# Extract full confusion matrices
+conf_full <- get_full_confusion_matrix(outer_unmerged, "cv")
+conf_merged <- get_full_confusion_matrix(outer_merged, "cv")
+
+# Calculate error statistics
+calculate_error_stats <- function(conf_matrix, label) {
+  if (is.null(conf_matrix)) {
+    return(NULL)
+  }
+  
+  total_samples <- sum(conf_matrix)
+  correct_predictions <- sum(diag(conf_matrix))
+  total_errors <- total_samples - correct_predictions
+  error_rate <- (total_errors / total_samples) * 100
+  
+  # Off-diagonal errors
+  off_diag <- conf_matrix
+  diag(off_diag) <- 0
+  off_diag_errors <- sum(off_diag)
+  
+  # Number of classes
+  n_classes <- nrow(conf_matrix)
+  
+  # Average errors per class
+  avg_errors_per_class <- total_errors / n_classes
+  
+  # Classes with high error rates (>10%)
+  class_error_rates <- (rowSums(off_diag) / rowSums(conf_matrix)) * 100
+  high_error_classes <- sum(class_error_rates > 10)
+  
+  # Largest error pairs
+  off_diag_df <- as.data.frame(as.table(off_diag))
+  off_diag_df <- off_diag_df[off_diag_df$Freq > 0, ]
+  off_diag_df <- off_diag_df[order(-off_diag_df$Freq), ]
+  colnames(off_diag_df) <- c("True_Class", "Predicted_Class", "Count")
+  
+  return(list(
+    label = label,
+    total_samples = total_samples,
+    correct_predictions = correct_predictions,
+    total_errors = total_errors,
+    error_rate = error_rate,
+    off_diag_errors = off_diag_errors,
+    n_classes = n_classes,
+    avg_errors_per_class = avg_errors_per_class,
+    high_error_classes = high_error_classes,
+    class_error_rates = class_error_rates,
+    top_errors = head(off_diag_df, 10)
+  ))
+}
+
+# Calculate statistics
+stats_full <- calculate_error_stats(conf_full, "Full Classes")
+stats_merged <- calculate_error_stats(conf_merged, "Merged Classes")
+
+# Create comparison data frame
+comparison_df <- data.frame(
+  Metric = c(
+    "Total Samples",
+    "Total Errors",
+    "Correct Predictions",
+    "Error Rate (%)",
+    "Number of Classes",
+    "Average Errors per Class",
+    "Classes with >10% Error Rate"
+  ),
+  Full = c(
+    stats_full$total_samples,
+    stats_full$total_errors,
+    stats_full$correct_predictions,
+    round(stats_full$error_rate, 2),
+    stats_full$n_classes,
+    round(stats_full$avg_errors_per_class, 2),
+    stats_full$high_error_classes
+  ),
+  Merged = c(
+    stats_merged$total_samples,
+    stats_merged$total_errors,
+    stats_merged$correct_predictions,
+    round(stats_merged$error_rate, 2),
+    stats_merged$n_classes,
+    round(stats_merged$avg_errors_per_class, 2),
+    stats_merged$high_error_classes
+  )
+)
+
+# Calculate reductions
+comparison_df$Reduction <- comparison_df$Full - comparison_df$Merged
+comparison_df$Reduction_Percent <- round((comparison_df$Reduction / comparison_df$Full) * 100, 1)
+comparison_df$Reduction_Percent[comparison_df$Metric == "Total Samples"] <- NA
+comparison_df$Reduction_Percent[comparison_df$Metric == "Number of Classes"] <- NA
+
+# Print summary table
+cat("\n=== ERROR REDUCTION SUMMARY ===\n\n")
+print(comparison_df)
+cat("\n")
+
+# Visualization 1: Bar chart comparing key metrics
+library(ggplot2)
+library(tidyr)
+
+# Prepare data for visualization
+viz_data <- comparison_df %>%
+  filter(Metric %in% c("Total Errors", "Error Rate (%)", "Average Errors per Class")) %>%
+  select(Metric, Full, Merged) %>%
+  pivot_longer(cols = c(Full, Merged), names_to = "Type", values_to = "Value")
+
+viz1 <- ggplot(viz_data, aes(x = Metric, y = Value, fill = Type)) +
+  geom_bar(stat = "identity", position = "dodge", width = 0.7) +
+  scale_fill_manual(values = c("Full" = "#d62728", "Merged" = "#2ca02c"), 
+                    labels = c("Full Classes", "Merged Classes")) +
+  labs(
+    title = "Error Metrics: Full vs Merged Classes",
+    x = "",
+    y = "Value",
+    fill = "Type"
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(face = "bold", size = 12),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "bottom"
+  )
+
+print(viz1)
+ggsave("../writing/figures_new/error_reduction_bar.png", viz1, width = 8, height = 6, dpi = 300)
+
+# Visualization 2: Error reduction percentage
+reduction_data <- comparison_df %>%
+  filter(!is.na(Reduction_Percent)) %>%
+  mutate(Metric = factor(Metric, levels = Metric))
+
+viz2 <- ggplot(reduction_data, aes(x = Metric, y = Reduction_Percent)) +
+  geom_bar(stat = "identity", fill = "#2ca02c", width = 0.7) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  labs(
+    title = "Error Reduction After Merging (%)",
+    x = "",
+    y = "Reduction (%)"
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(face = "bold", size = 12),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  ) +
+  coord_cartesian(ylim = c(0, max(reduction_data$Reduction_Percent) * 1.1))
+
+print(viz2)
+ggsave("../writing/figures_new/error_reduction_percent.png", viz2, width = 8, height = 6, dpi = 300)
+
+# Visualization 3: Error count comparison with breakdown
+error_comparison <- data.frame(
+  Type = c("Full Classes", "Merged Classes"),
+  Total_Errors = c(stats_full$total_errors, stats_merged$total_errors),
+  Correct_Predictions = c(stats_full$correct_predictions, stats_merged$correct_predictions)
+) %>%
+  pivot_longer(cols = c(Total_Errors, Correct_Predictions), 
+               names_to = "Category", values_to = "Count")
+
+viz3 <- ggplot(error_comparison, aes(x = Type, y = Count, fill = Category)) +
+  geom_bar(stat = "identity", position = "stack", width = 0.6) +
+  scale_fill_manual(values = c("Total_Errors" = "#d62728", "Correct_Predictions" = "#2ca02c"),
+                    labels = c("Correct Predictions", "Errors")) +
+  labs(
+    title = "Prediction Accuracy: Full vs Merged Classes",
+    x = "",
+    y = "Number of Predictions",
+    fill = "Outcome"
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(face = "bold", size = 12),
+    legend.position = "bottom"
+  ) +
+  geom_text(aes(label = Count), position = position_stack(vjust = 0.5), color = "white", fontface = "bold")
+
+print(viz3)
+ggsave("../writing/figures_new/error_comparison_stacked.png", viz3, width = 8, height = 6, dpi = 300)
+
+# Visualization 4: Top error pairs before and after
+# Top errors in full classes
+top_errors_full <- stats_full$top_errors %>%
+  mutate(Error_Pair = paste(True_Class, "→", Predicted_Class),
+         Type = "Full Classes") %>%
+  head(10)
+
+# Top errors in merged classes
+top_errors_merged <- stats_merged$top_errors %>%
+  mutate(Error_Pair = paste(True_Class, "→", Predicted_Class),
+         Type = "Merged Classes") %>%
+  head(10)
+
+top_errors_combined <- bind_rows(top_errors_full, top_errors_merged) %>%
+  mutate(Error_Pair = factor(Error_Pair, levels = unique(c(top_errors_full$Error_Pair, top_errors_merged$Error_Pair))))
+
+viz4 <- ggplot(top_errors_combined, aes(x = Error_Pair, y = Count, fill = Type)) +
+  geom_bar(stat = "identity", position = "dodge", width = 0.7) +
+  scale_fill_manual(values = c("Full Classes" = "#d62728", "Merged Classes" = "#2ca02c")) +
+  labs(
+    title = "Top 10 Error Pairs: Full vs Merged Classes",
+    x = "Error Pair (True → Predicted)",
+    y = "Number of Errors",
+    fill = "Type"
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(face = "bold", size = 12),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
+    legend.position = "bottom"
+  )
+
+print(viz4)
+ggsave("../writing/figures_new/top_errors_comparison.png", viz4, width = 12, height = 6, dpi = 300)
+
+# Visualization 5: Error rate distribution by class
+class_error_full <- data.frame(
+  Class = names(stats_full$class_error_rates),
+  Error_Rate = stats_full$class_error_rates,
+  Type = "Full Classes"
+)
+
+class_error_merged <- data.frame(
+  Class = names(stats_merged$class_error_rates),
+  Error_Rate = stats_merged$class_error_rates,
+  Type = "Merged Classes"
+)
+
+class_error_combined <- bind_rows(class_error_full, class_error_merged)
+
+viz5 <- ggplot(class_error_combined, aes(x = Error_Rate, fill = Type)) +
+  geom_histogram(alpha = 0.7, bins = 20, position = "identity") +
+  scale_fill_manual(values = c("Full Classes" = "#d62728", "Merged Classes" = "#2ca02c")) +
+  labs(
+    title = "Distribution of Error Rates by Class",
+    x = "Error Rate (%)",
+    y = "Number of Classes",
+    fill = "Type"
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(face = "bold", size = 12),
+    legend.position = "bottom"
+  ) +
+  geom_vline(xintercept = 10, linetype = "dashed", color = "gray50", alpha = 0.7)
+
+print(viz5)
+ggsave("../writing/figures_new/error_rate_distribution.png", viz5, width = 10, height = 6, dpi = 300)
+
+# Visualization 6: Summary comparison with key numbers
+summary_numbers <- data.frame(
+  Metric = c("Total Errors", "Error Rate", "Classes"),
+  Full = c(stats_full$total_errors, paste0(round(stats_full$error_rate, 1), "%"), stats_full$n_classes),
+  Merged = c(stats_merged$total_errors, paste0(round(stats_merged$error_rate, 1), "%"), stats_merged$n_classes),
+  Reduction = c(
+    paste0("-", stats_full$total_errors - stats_merged$total_errors, " (", 
+           round((stats_full$total_errors - stats_merged$total_errors) / stats_full$total_errors * 100, 1), "%)"),
+    paste0("-", round(stats_full$error_rate - stats_merged$error_rate, 1), "%"),
+    paste0("-", stats_full$n_classes - stats_merged$n_classes)
+  )
+)
+
+# Create a simple text-based summary
+cat("\n=== KEY FINDINGS ===\n\n")
+cat(sprintf("Total Errors Reduced: %d → %d (Reduction: %d, %.1f%%)\n",
+            stats_full$total_errors, stats_merged$total_errors,
+            stats_full$total_errors - stats_merged$total_errors,
+            (stats_full$total_errors - stats_merged$total_errors) / stats_full$total_errors * 100))
+cat(sprintf("Error Rate Reduced: %.2f%% → %.2f%% (Reduction: %.2f%%)\n",
+            stats_full$error_rate, stats_merged$error_rate,
+            stats_full$error_rate - stats_merged$error_rate))
+cat(sprintf("Number of Classes: %d → %d (Reduction: %d)\n",
+            stats_full$n_classes, stats_merged$n_classes,
+            stats_full$n_classes - stats_merged$n_classes))
+cat(sprintf("Average Errors per Class: %.2f → %.2f (Reduction: %.2f)\n",
+            stats_full$avg_errors_per_class, stats_merged$avg_errors_per_class,
+            stats_full$avg_errors_per_class - stats_merged$avg_errors_per_class))
+cat(sprintf("Classes with >10%% Error Rate: %d → %d (Reduction: %d)\n",
+            stats_full$high_error_classes, stats_merged$high_error_classes,
+            stats_full$high_error_classes - stats_merged$high_error_classes))
+cat("\n")
+
+# Additional Visualizations
+# Visualization 7: Side-by-side comparison with annotations
+comparison_summary <- data.frame(
+  Metric = rep(c("Total Errors", "Error Rate (%)", "Avg Errors/Class"), 2),
+  Value = c(
+    stats_full$total_errors,
+    stats_full$error_rate,
+    stats_full$avg_errors_per_class,
+    stats_merged$total_errors,
+    stats_merged$error_rate,
+    stats_merged$avg_errors_per_class
+  ),
+  Type = rep(c("Full", "Merged"), each = 3)
+)
+
+viz7 <- ggplot(comparison_summary, aes(x = Metric, y = Value, fill = Type)) +
+  geom_bar(stat = "identity", position = "dodge", width = 0.7) +
+  scale_fill_manual(values = c("Full" = "#d62728", "Merged" = "#2ca02c")) +
+  labs(
+    title = "Error Metrics Comparison",
+    subtitle = paste0("Total Errors: ", stats_full$total_errors, " → ", stats_merged$total_errors, 
+                     " (", round((stats_full$total_errors - stats_merged$total_errors) / stats_full$total_errors * 100, 1), "% reduction)"),
+    x = "",
+    y = "Value",
+    fill = "Type"
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(face = "bold", size = 12),
+    plot.subtitle = element_text(size = 10),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "bottom"
+  ) +
+  geom_text(aes(label = round(Value, 1)), 
+            position = position_dodge(width = 0.7), 
+            vjust = -0.5, size = 3)
+
+print(viz7)
+ggsave("../writing/figures_new/error_comparison_annotated.png", viz7, width = 8, height = 6, dpi = 300)
+
+# Visualization 8: Error reduction waterfall-style
+waterfall_data <- data.frame(
+  Stage = c("Full Classes\n(Total Errors)", "Merged Classes\n(Total Errors)", "Reduction"),
+  Value = c(stats_full$total_errors, stats_merged$total_errors, 
+            -(stats_full$total_errors - stats_merged$total_errors)),
+  Type = c("Before", "After", "Reduction")
+)
+
+viz8 <- ggplot(waterfall_data, aes(x = Stage, y = Value, fill = Type)) +
+  geom_bar(stat = "identity", width = 0.6) +
+  scale_fill_manual(values = c("Before" = "#d62728", "After" = "#2ca02c", "Reduction" = "#1f77b4"),
+                    guide = "none") +
+  labs(
+    title = "Error Reduction: Waterfall View",
+    x = "",
+    y = "Number of Errors"
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(face = "bold", size = 12)
+  ) +
+  geom_text(aes(label = Value), vjust = ifelse(waterfall_data$Value > 0, -0.5, 1.5), 
+            fontface = "bold", size = 4) +
+  geom_hline(yintercept = 0, linetype = "solid", color = "black")
+
+print(viz8)
+ggsave("../writing/figures_new/error_waterfall.png", viz8, width = 8, height = 6, dpi = 300)
+
+# Visualization 9: Error rate comparison with arrows showing improvement
+improvement_data <- data.frame(
+  Metric = c("Error Rate", "Avg Errors per Class"),
+  Full = c(stats_full$error_rate, stats_full$avg_errors_per_class),
+  Merged = c(stats_merged$error_rate, stats_merged$avg_errors_per_class),
+  Improvement = c(
+    stats_full$error_rate - stats_merged$error_rate,
+    stats_full$avg_errors_per_class - stats_merged$avg_errors_per_class
+  )
+)
+
+viz9 <- ggplot(improvement_data, aes(x = Metric)) +
+  geom_segment(aes(xend = Metric, y = Full, yend = Merged), 
+               arrow = arrow(length = unit(0.3, "cm"), type = "closed"),
+               color = "#2ca02c", size = 1.5) +
+  geom_point(aes(y = Full), color = "#d62728", size = 4) +
+  geom_point(aes(y = Merged), color = "#2ca02c", size = 4) +
+  labs(
+    title = "Error Reduction: Before → After",
+    x = "",
+    y = "Value"
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(face = "bold", size = 12)
+  ) +
+  geom_text(aes(y = Full, label = round(Full, 2)), vjust = -1, color = "#d62728", fontface = "bold") +
+  geom_text(aes(y = Merged, label = round(Merged, 2)), vjust = 2, color = "#2ca02c", fontface = "bold")
+
+print(viz9)
+ggsave("../writing/figures_new/error_improvement_arrows.png", viz9, width = 8, height = 6, dpi = 300)
+
+# Create a comprehensive summary table with formatting
+library(knitr)
+library(kableExtra)
+
+summary_table <- comparison_df %>%
+  mutate(
+    Full_Formatted = case_when(
+      Metric == "Total Samples" ~ format(Full, big.mark = ","),
+      Metric == "Total Errors" ~ format(Full, big.mark = ","),
+      Metric == "Correct Predictions" ~ format(Full, big.mark = ","),
+      Metric == "Error Rate (%)" ~ paste0(Full, "%"),
+      Metric == "Number of Classes" ~ as.character(Full),
+      Metric == "Average Errors per Class" ~ sprintf("%.2f", Full),
+      TRUE ~ as.character(Full)
+    ),
+    Merged_Formatted = case_when(
+      Metric == "Total Samples" ~ format(Merged, big.mark = ","),
+      Metric == "Total Errors" ~ format(Merged, big.mark = ","),
+      Metric == "Correct Predictions" ~ format(Merged, big.mark = ","),
+      Metric == "Error Rate (%)" ~ paste0(Merged, "%"),
+      Metric == "Number of Classes" ~ as.character(Merged),
+      Metric == "Average Errors per Class" ~ sprintf("%.2f", Merged),
+      TRUE ~ as.character(Merged)
+    ),
+    Reduction_Formatted = case_when(
+      Metric == "Total Samples" ~ "",
+      Metric == "Total Errors" ~ paste0(format(Reduction, big.mark = ","), 
+                                       " (", Reduction_Percent, "%)"),
+      Metric == "Correct Predictions" ~ paste0(format(Reduction, big.mark = ",")),
+      Metric == "Error Rate (%)" ~ paste0(Reduction, "% (", Reduction_Percent, "%)"),
+      Metric == "Number of Classes" ~ as.character(Reduction),
+      Metric == "Average Errors per Class" ~ paste0(sprintf("%.2f", Reduction), 
+                                                    " (", Reduction_Percent, "%)"),
+      TRUE ~ ""
+    )
+  ) %>%
+  select(Metric, Full_Formatted, Merged_Formatted, Reduction_Formatted)
+
+kable_summary <- kable(summary_table, 
+                      col.names = c("Metric", "Full Classes", "Merged Classes", "Reduction"),
+                      align = c("l", "r", "r", "r")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), 
+                full_width = FALSE,
+                position = "center") %>%
+  column_spec(1, bold = TRUE) %>%
+  column_spec(4, color = "#2ca02c", bold = TRUE) %>%
+  add_header_above(c(" " = 1, "Full Classes" = 1, "Merged Classes" = 1, "Reduction" = 1))
+
+print(kable_summary)
+```
+
+## -- Error Reduction Analysis: KMT2A and MDS-Related Classes Separately
+
+```{r}
+# Function to calculate error statistics for specific groups
+calculate_group_error_stats <- function(conf_matrix, group_classes, group_name) {
+  if (is.null(conf_matrix)) {
+    return(NULL)
+  }
+  
+  # Find classes that match the group
+  matching_classes <- intersect(group_classes, rownames(conf_matrix))
+  
+  if (length(matching_classes) == 0) {
+    return(NULL)
+  }
+  
+  # Get subset of confusion matrix for this group
+  group_conf <- conf_matrix[matching_classes, matching_classes, drop = FALSE]
+  
+  # Calculate statistics
+  total_samples_group <- sum(group_conf)
+  correct_predictions_group <- sum(diag(group_conf))
+  total_errors_group <- total_samples_group - correct_predictions_group
+  error_rate_group <- (total_errors_group / total_samples_group) * 100
+  
+  # Off-diagonal errors (errors within the group)
+  off_diag_group <- group_conf
+  diag(off_diag_group) <- 0
+  within_group_errors <- sum(off_diag_group)
+  
+  # Errors where group classes are predicted as other classes (outside group)
+  group_conf_full_rows <- conf_matrix[matching_classes, , drop = FALSE]
+  outside_group_errors <- sum(group_conf_full_rows[, !colnames(group_conf_full_rows) %in% matching_classes, drop = FALSE])
+  
+  # Total errors involving this group
+  total_errors_involving_group <- total_errors_group
+  
+  # Average errors per class in group
+  n_classes_group <- length(matching_classes)
+  avg_errors_per_class <- total_errors_group / n_classes_group
+  
+  # Classes with high error rates (>10%)
+  class_error_rates <- (rowSums(off_diag_group) / rowSums(group_conf)) * 100
+  class_error_rates[is.nan(class_error_rates)] <- 0
+  high_error_classes <- sum(class_error_rates > 10)
+  
+  # Top error pairs within group
+  off_diag_df <- as.data.frame(as.table(off_diag_group))
+  off_diag_df <- off_diag_df[off_diag_df$Freq > 0, ]
+  off_diag_df <- off_diag_df[order(-off_diag_df$Freq), ]
+  colnames(off_diag_df) <- c("True_Class", "Predicted_Class", "Count")
+  
+  return(list(
+    group_name = group_name,
+    matching_classes = matching_classes,
+    n_classes = n_classes_group,
+    total_samples = total_samples_group,
+    correct_predictions = correct_predictions_group,
+    total_errors = total_errors_group,
+    error_rate = error_rate_group,
+    within_group_errors = within_group_errors,
+    outside_group_errors = outside_group_errors,
+    avg_errors_per_class = avg_errors_per_class,
+    high_error_classes = high_error_classes,
+    class_error_rates = class_error_rates,
+    top_errors = head(off_diag_df, 10)
+  ))
+}
+
+# Define groups
+kmt2a_classes_full <- c("KMT2A::ELL", "KMT2A::MLLT10", "KMT2A::MLLT4", "KMT2A::SEPT6", "MLLT3::KMT2A")
+kmt2a_classes_merged <- c("Other KMT2A rearrangements", "MLLT3::KMT2A")
+
+mds_classes_full <- c("MDS-related, gene mutations", "MDS-related, cytogenetic abnormalities", 
+                     "MDS-related, TP53 mutated", "MDS-related")
+mds_classes_merged <- c("MDS-related")
+
+# Calculate statistics for each group
+kmt2a_stats_full <- calculate_group_error_stats(conf_full, kmt2a_classes_full, "KMT2A (Full)")
+kmt2a_stats_merged <- calculate_group_error_stats(conf_merged, kmt2a_classes_merged, "KMT2A (Merged)")
+
+mds_stats_full <- calculate_group_error_stats(conf_full, mds_classes_full, "MDS-related (Full)")
+mds_stats_merged <- calculate_group_error_stats(conf_merged, mds_classes_merged, "MDS-related (Merged)")
+
+# Create comparison data frames
+kmt2a_comparison <- data.frame(
+  Metric = c("Number of Classes", "Total Samples", "Total Errors", "Error Rate (%)", 
+             "Within-Group Errors", "Average Errors per Class", "Classes with >10% Error Rate"),
+  Full = c(
+    kmt2a_stats_full$n_classes,
+    kmt2a_stats_full$total_samples,
+    kmt2a_stats_full$total_errors,
+    round(kmt2a_stats_full$error_rate, 2),
+    kmt2a_stats_full$within_group_errors,
+    round(kmt2a_stats_full$avg_errors_per_class, 2),
+    kmt2a_stats_full$high_error_classes
+  ),
+  Merged = c(
+    kmt2a_stats_merged$n_classes,
+    kmt2a_stats_merged$total_samples,
+    kmt2a_stats_merged$total_errors,
+    round(kmt2a_stats_merged$error_rate, 2),
+    kmt2a_stats_merged$within_group_errors,
+    round(kmt2a_stats_merged$avg_errors_per_class, 2),
+    kmt2a_stats_merged$high_error_classes
+  )
+)
+
+kmt2a_comparison$Reduction <- kmt2a_comparison$Full - kmt2a_comparison$Merged
+kmt2a_comparison$Reduction_Percent <- round((kmt2a_comparison$Reduction / kmt2a_comparison$Full) * 100, 1)
+kmt2a_comparison$Reduction_Percent[kmt2a_comparison$Metric == "Number of Classes"] <- NA
+kmt2a_comparison$Reduction_Percent[kmt2a_comparison$Metric == "Total Samples"] <- NA
+
+mds_comparison <- data.frame(
+  Metric = c("Number of Classes", "Total Samples", "Total Errors", "Error Rate (%)", 
+             "Within-Group Errors", "Average Errors per Class", "Classes with >10% Error Rate"),
+  Full = c(
+    mds_stats_full$n_classes,
+    mds_stats_full$total_samples,
+    mds_stats_full$total_errors,
+    round(mds_stats_full$error_rate, 2),
+    mds_stats_full$within_group_errors,
+    round(mds_stats_full$avg_errors_per_class, 2),
+    mds_stats_full$high_error_classes
+  ),
+  Merged = c(
+    mds_stats_merged$n_classes,
+    mds_stats_merged$total_samples,
+    mds_stats_merged$total_errors,
+    round(mds_stats_merged$error_rate, 2),
+    mds_stats_merged$within_group_errors,
+    round(mds_stats_merged$avg_errors_per_class, 2),
+    mds_stats_merged$high_error_classes
+  )
+)
+
+mds_comparison$Reduction <- mds_comparison$Full - mds_comparison$Merged
+mds_comparison$Reduction_Percent <- round((mds_comparison$Reduction / mds_comparison$Full) * 100, 1)
+mds_comparison$Reduction_Percent[mds_comparison$Metric == "Number of Classes"] <- NA
+mds_comparison$Reduction_Percent[mds_comparison$Metric == "Total Samples"] <- NA
+
+# Print summaries
+cat("\n=== KMT2A CLASSES ERROR REDUCTION ===\n\n")
+print(kmt2a_comparison)
+cat("\n")
+
+cat("\n=== MDS-RELATED CLASSES ERROR REDUCTION ===\n\n")
+print(mds_comparison)
+cat("\n")
+
+# Key findings
+cat("\n=== KEY FINDINGS BY GROUP ===\n\n")
+cat("KMT2A Classes:\n")
+cat(sprintf("  Total Errors: %d → %d (Reduction: %d, %.1f%%)\n",
+            kmt2a_stats_full$total_errors, kmt2a_stats_merged$total_errors,
+            kmt2a_stats_full$total_errors - kmt2a_stats_merged$total_errors,
+            (kmt2a_stats_full$total_errors - kmt2a_stats_merged$total_errors) / kmt2a_stats_full$total_errors * 100))
+cat(sprintf("  Within-Group Errors: %d → %d (Reduction: %d, %.1f%%)\n",
+            kmt2a_stats_full$within_group_errors, kmt2a_stats_merged$within_group_errors,
+            kmt2a_stats_full$within_group_errors - kmt2a_stats_merged$within_group_errors,
+            ifelse(kmt2a_stats_full$within_group_errors > 0,
+                   (kmt2a_stats_full$within_group_errors - kmt2a_stats_merged$within_group_errors) / kmt2a_stats_full$within_group_errors * 100,
+                   0)))
+cat(sprintf("  Error Rate: %.2f%% → %.2f%% (Reduction: %.2f%%)\n",
+            kmt2a_stats_full$error_rate, kmt2a_stats_merged$error_rate,
+            kmt2a_stats_full$error_rate - kmt2a_stats_merged$error_rate))
+
+cat("\nMDS-Related Classes:\n")
+cat(sprintf("  Total Errors: %d → %d (Reduction: %d, %.1f%%)\n",
+            mds_stats_full$total_errors, mds_stats_merged$total_errors,
+            mds_stats_full$total_errors - mds_stats_merged$total_errors,
+            (mds_stats_full$total_errors - mds_stats_merged$total_errors) / mds_stats_full$total_errors * 100))
+cat(sprintf("  Within-Group Errors: %d → %d (Reduction: %d, %.1f%%)\n",
+            mds_stats_full$within_group_errors, mds_stats_merged$within_group_errors,
+            mds_stats_full$within_group_errors - mds_stats_merged$within_group_errors,
+            ifelse(mds_stats_full$within_group_errors > 0,
+                   (mds_stats_full$within_group_errors - mds_stats_merged$within_group_errors) / mds_stats_full$within_group_errors * 100,
+                   0)))
+cat(sprintf("  Error Rate: %.2f%% → %.2f%% (Reduction: %.2f%%)\n",
+            mds_stats_full$error_rate, mds_stats_merged$error_rate,
+            mds_stats_full$error_rate - mds_stats_merged$error_rate))
+cat("\n")
+
+# Visualizations for group-specific error reduction
+# Visualization 1: KMT2A error reduction
+kmt2a_viz_data <- kmt2a_comparison %>%
+  filter(Metric %in% c("Total Errors", "Error Rate (%)", "Within-Group Errors")) %>%
+  select(Metric, Full, Merged) %>%
+  pivot_longer(cols = c(Full, Merged), names_to = "Type", values_to = "Value")
+
+viz_kmt2a <- ggplot(kmt2a_viz_data, aes(x = Metric, y = Value, fill = Type)) +
+  geom_bar(stat = "identity", position = "dodge", width = 0.7) +
+  scale_fill_manual(values = c("Full" = "#ff7f0e", "Merged" = "#2ca02c"),
+                    labels = c("Full KMT2A Classes", "Merged KMT2A Classes")) +
+  labs(
+    title = "KMT2A Classes: Error Reduction After Merging",
+    subtitle = paste0("Total Errors: ", kmt2a_stats_full$total_errors, " → ", kmt2a_stats_merged$total_errors,
+                     " (", round((kmt2a_stats_full$total_errors - kmt2a_stats_merged$total_errors) / kmt2a_stats_full$total_errors * 100, 1), "% reduction)"),
+    x = "",
+    y = "Value",
+    fill = "Type"
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(face = "bold", size = 12),
+    plot.subtitle = element_text(size = 10),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "bottom"
+  ) +
+  geom_text(aes(label = round(Value, 1)), 
+            position = position_dodge(width = 0.7), 
+            vjust = -0.5, size = 3)
+
+print(viz_kmt2a)
+ggsave("../writing/figures_new/kmt2a_error_reduction.png", viz_kmt2a, width = 8, height = 6, dpi = 300)
+
+# Visualization 2: MDS-related error reduction
+mds_viz_data <- mds_comparison %>%
+  filter(Metric %in% c("Total Errors", "Error Rate (%)", "Within-Group Errors")) %>%
+  select(Metric, Full, Merged) %>%
+  pivot_longer(cols = c(Full, Merged), names_to = "Type", values_to = "Value")
+
+viz_mds <- ggplot(mds_viz_data, aes(x = Metric, y = Value, fill = Type)) +
+  geom_bar(stat = "identity", position = "dodge", width = 0.7) +
+  scale_fill_manual(values = c("Full" = "#d62728", "Merged" = "#2ca02c"),
+                    labels = c("Full MDS Classes", "Merged MDS Classes")) +
+  labs(
+    title = "MDS-Related Classes: Error Reduction After Merging",
+    subtitle = paste0("Total Errors: ", mds_stats_full$total_errors, " → ", mds_stats_merged$total_errors,
+                     " (", round((mds_stats_full$total_errors - mds_stats_merged$total_errors) / mds_stats_full$total_errors * 100, 1), "% reduction)"),
+    x = "",
+    y = "Value",
+    fill = "Type"
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(face = "bold", size = 12),
+    plot.subtitle = element_text(size = 10),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "bottom"
+  ) +
+  geom_text(aes(label = round(Value, 1)), 
+            position = position_dodge(width = 0.7), 
+            vjust = -0.5, size = 3)
+
+print(viz_mds)
+ggsave("../writing/figures_new/mds_error_reduction.png", viz_mds, width = 8, height = 6, dpi = 300)
+
+# Visualization 3: Side-by-side comparison of both groups
+combined_group_data <- bind_rows(
+  kmt2a_comparison %>% 
+    filter(Metric %in% c("Total Errors", "Error Rate (%)", "Within-Group Errors")) %>%
+    mutate(Group = "KMT2A"),
+  mds_comparison %>% 
+    filter(Metric %in% c("Total Errors", "Error Rate (%)", "Within-Group Errors")) %>%
+    mutate(Group = "MDS-related")
+) %>%
+  select(Metric, Group, Full, Merged, Reduction, Reduction_Percent) %>%
+  pivot_longer(cols = c(Full, Merged), names_to = "Type", values_to = "Value")
+
+viz_groups_combined <- ggplot(combined_group_data, aes(x = Metric, y = Value, fill = interaction(Group, Type))) +
+  geom_bar(stat = "identity", position = "dodge", width = 0.7) +
+  scale_fill_manual(
+    values = c(
+      "KMT2A.Full" = "#ff7f0e",
+      "KMT2A.Merged" = "#2ca02c",
+      "MDS-related.Full" = "#d62728",
+      "MDS-related.Merged" = "#2ca02c"
+    ),
+    labels = c("KMT2A (Full)", "KMT2A (Merged)", "MDS-related (Full)", "MDS-related (Merged)")
+  ) +
+  labs(
+    title = "Error Reduction: KMT2A vs MDS-Related Classes",
+    x = "",
+    y = "Value",
+    fill = "Group & Type"
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(face = "bold", size = 12),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "bottom"
+  )
+
+print(viz_groups_combined)
+ggsave("../writing/figures_new/groups_error_reduction_combined.png", viz_groups_combined, width = 10, height = 6, dpi = 300)
+
+# Visualization 4: Reduction percentage comparison
+reduction_comparison <- data.frame(
+  Group = rep(c("KMT2A", "MDS-related"), each = 3),
+  Metric = rep(c("Total Errors", "Error Rate (%)", "Within-Group Errors"), 2),
+  Reduction_Percent = c(
+    kmt2a_comparison$Reduction_Percent[kmt2a_comparison$Metric == "Total Errors"],
+    kmt2a_comparison$Reduction_Percent[kmt2a_comparison$Metric == "Error Rate (%)"],
+    kmt2a_comparison$Reduction_Percent[kmt2a_comparison$Metric == "Within-Group Errors"],
+    mds_comparison$Reduction_Percent[mds_comparison$Metric == "Total Errors"],
+    mds_comparison$Reduction_Percent[mds_comparison$Metric == "Error Rate (%)"],
+    mds_comparison$Reduction_Percent[mds_comparison$Metric == "Within-Group Errors"]
+  )
+)
+
+viz_reduction_pct <- ggplot(reduction_comparison, aes(x = Metric, y = Reduction_Percent, fill = Group)) +
+  geom_bar(stat = "identity", position = "dodge", width = 0.7) +
+  scale_fill_manual(values = c("KMT2A" = "#ff7f0e", "MDS-related" = "#d62728")) +
+  labs(
+    title = "Error Reduction Percentage by Group",
+    x = "",
+    y = "Reduction (%)",
+    fill = "Group"
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(face = "bold", size = 12),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "bottom"
+  ) +
+  geom_text(aes(label = paste0(round(Reduction_Percent, 1), "%")), 
+            position = position_dodge(width = 0.7), 
+            vjust = -0.5, size = 3)
+
+print(viz_reduction_pct)
+ggsave("../writing/figures_new/groups_reduction_percentage.png", viz_reduction_pct, width = 8, height = 6, dpi = 300)
+
+# Create formatted tables for each group
+kmt2a_table <- kmt2a_comparison %>%
+  mutate(
+    Full_Formatted = case_when(
+      Metric == "Total Samples" ~ format(Full, big.mark = ","),
+      Metric == "Total Errors" ~ format(Full, big.mark = ","),
+      Metric == "Within-Group Errors" ~ format(Full, big.mark = ","),
+      Metric == "Error Rate (%)" ~ paste0(Full, "%"),
+      Metric == "Number of Classes" ~ as.character(Full),
+      Metric == "Average Errors per Class" ~ sprintf("%.2f", Full),
+      TRUE ~ as.character(Full)
+    ),
+    Merged_Formatted = case_when(
+      Metric == "Total Samples" ~ format(Merged, big.mark = ","),
+      Metric == "Total Errors" ~ format(Merged, big.mark = ","),
+      Metric == "Within-Group Errors" ~ format(Merged, big.mark = ","),
+      Metric == "Error Rate (%)" ~ paste0(Merged, "%"),
+      Metric == "Number of Classes" ~ as.character(Merged),
+      Metric == "Average Errors per Class" ~ sprintf("%.2f", Merged),
+      TRUE ~ as.character(Merged)
+    ),
+    Reduction_Formatted = case_when(
+      Metric == "Total Samples" ~ "",
+      Metric == "Total Errors" ~ paste0(format(Reduction, big.mark = ","), 
+                                        " (", Reduction_Percent, "%)"),
+      Metric == "Within-Group Errors" ~ paste0(format(Reduction, big.mark = ","), 
+                                               " (", Reduction_Percent, "%)"),
+      Metric == "Error Rate (%)" ~ paste0(Reduction, "% (", Reduction_Percent, "%)"),
+      Metric == "Number of Classes" ~ as.character(Reduction),
+      Metric == "Average Errors per Class" ~ paste0(sprintf("%.2f", Reduction), 
+                                                    " (", Reduction_Percent, "%)"),
+      TRUE ~ ""
+    )
+  ) %>%
+  select(Metric, Full_Formatted, Merged_Formatted, Reduction_Formatted)
+
+kable_kmt2a <- kable(kmt2a_table, 
+                     col.names = c("Metric", "Full Classes", "Merged Classes", "Reduction"),
+                     caption = "KMT2A Classes: Error Reduction Summary") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), 
+                full_width = FALSE,
+                position = "center") %>%
+  column_spec(1, bold = TRUE) %>%
+  column_spec(4, color = "#2ca02c", bold = TRUE) %>%
+  add_header_above(c(" " = 1, "Full Classes" = 1, "Merged Classes" = 1, "Reduction" = 1))
+
+print(kable_kmt2a)
+
+mds_table <- mds_comparison %>%
+  mutate(
+    Full_Formatted = case_when(
+      Metric == "Total Samples" ~ format(Full, big.mark = ","),
+      Metric == "Total Errors" ~ format(Full, big.mark = ","),
+      Metric == "Within-Group Errors" ~ format(Full, big.mark = ","),
+      Metric == "Error Rate (%)" ~ paste0(Full, "%"),
+      Metric == "Number of Classes" ~ as.character(Full),
+      Metric == "Average Errors per Class" ~ sprintf("%.2f", Full),
+      TRUE ~ as.character(Full)
+    ),
+    Merged_Formatted = case_when(
+      Metric == "Total Samples" ~ format(Merged, big.mark = ","),
+      Metric == "Total Errors" ~ format(Merged, big.mark = ","),
+      Metric == "Within-Group Errors" ~ format(Merged, big.mark = ","),
+      Metric == "Error Rate (%)" ~ paste0(Merged, "%"),
+      Metric == "Number of Classes" ~ as.character(Merged),
+      Metric == "Average Errors per Class" ~ sprintf("%.2f", Merged),
+      TRUE ~ as.character(Merged)
+    ),
+    Reduction_Formatted = case_when(
+      Metric == "Total Samples" ~ "",
+      Metric == "Total Errors" ~ paste0(format(Reduction, big.mark = ","), 
+                                       " (", Reduction_Percent, "%)"),
+      Metric == "Within-Group Errors" ~ paste0(format(Reduction, big.mark = ","), 
+                                               " (", Reduction_Percent, "%)"),
+      Metric == "Error Rate (%)" ~ paste0(Reduction, "% (", Reduction_Percent, "%)"),
+      Metric == "Number of Classes" ~ as.character(Reduction),
+      Metric == "Average Errors per Class" ~ paste0(sprintf("%.2f", Reduction), 
+                                                    " (", Reduction_Percent, "%)"),
+      TRUE ~ ""
+    )
+  ) %>%
+  select(Metric, Full_Formatted, Merged_Formatted, Reduction_Formatted)
+
+kable_mds <- kable(mds_table, 
+                   col.names = c("Metric", "Full Classes", "Merged Classes", "Reduction"),
+                   caption = "MDS-Related Classes: Error Reduction Summary") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), 
+                full_width = FALSE,
+                position = "center") %>%
+  column_spec(1, bold = TRUE) %>%
+  column_spec(4, color = "#2ca02c", bold = TRUE) %>%
+  add_header_above(c(" " = 1, "Full Classes" = 1, "Merged Classes" = 1, "Reduction" = 1))
+
+print(kable_mds)
 ```
 
 ## -- Faceted Confusion Matrices per Fold
-
-```{r}
-fix_names_local <- function(x){
-      mapping <- c(
-        "AML.with.inv.16..t.16.16..CBFB..MYH11" = "CBFB::MYH11",
-        "APL..t.15.17..PML..RARA" = "PML::RARA",
-        "AML.with.t.6.9..DEK..NUP214" = "DEK::NUP214",
-        "AML.with.mutated.NPM1" = "Mutated NPM1",
-        "AML.with.t.8.21..RUNX1..RUNX1T1" = "RUNX1::RUNX1T1",
-        "AML.with.in.frame.bZIP.CEBPA" = "CEBPA bZIP in-frame",
-        "ETV6..MNX1" = "ETV6::MNX1",
-        "KAT6A..CREBBP" = "KAT6A::CREBBP",
-        "RBM15..MRTF1" = "RBM15::MRTF1",
-        "MDS.r.and.MECOM" = "MDS-related and MECOM rearrangement",
-        "AML.with.t.9.11..MLLT3..KMT2A" = "MLLT3::KMT2A",
-        "FUS..ERG" = "FUS::ERG",
-        "NUP98..NSD1" = "NUP98::NSD1",
-        "other.KMT2A" = "Other KMT2A rearrangements",
-        "CBFA2T3..GLIS2" = "CBFA2T3::GLIS2",
-        "NUP98..KDM5A" = "NUP98::KDM5A"
-      )
-      if (is.factor(x)) {
-        new_levels <- vapply(levels(x), function(l) {
-          val <- unname(mapping[l])
-          if (is.na(val)) l else val
-        }, character(1))
-        levels(x) <- new_levels
-        return(x)
-      } else {
-        y <- vapply(as.character(x), function(l) {
-          val <- unname(mapping[l])
-          if (is.na(val)) l else val
-        }, character(1))
-        return(y)
-      }
-    }
-    
-    order_AML_local <- c("PML::RARA", "RUNX1::RUNX1T1", "CBFB::MYH11", "MLLT3::KMT2A",
-                        "Other KMT2A rearrangements", "DEK::NUP214", "Mutated NPM1",
-                        "CEBPA bZIP in-frame", "NUP98::NSD1", "ETV6::MNX1", "CBFA2T3::GLIS2",
-                        "NUP98::KDM5A", "FUS::ERG", "KAT6A::CREBBP", "RBM15::MRTF1",
-                        "MDS-related and MECOM rearrangement")
-```
 
 
 ```{r}
 # Function to create faceted confusion matrices per fold
 make_faceted_cm <- function(type) {
   # Get all folds for this type
-  folds <- names(outer_cv_results$detailed_performance[[type]]$Global_Optimized)
+  folds <- names(outer_merged$detailed_performance[[type]]$Global_Optimized)
   # Per class
   per_class_list <- list()
   # Collect confusion matrices for all folds
   conf_matrices <- list()
   for (fold in folds) {
-    per_class <- outer_cv_results$detailed_performance[[type]]$Global_Optimized[[fold]]$confusion_matrix$byClass
+    per_class <- outer_merged$detailed_performance[[type]]$Global_Optimized[[fold]]$confusion_matrix$byClass
     rownames(per_class) <- gsub("Class: ", "", rownames(per_class))
-    rownames(per_class) <- fix_names_local(rownames(per_class))
+    rownames(per_class) <- fix_names(rownames(per_class))
     
-    cm <- outer_cv_results$detailed_performance[[type]]$Global_Optimized[[fold]]$confusion_matrix$table
+    cm <- outer_merged$detailed_performance[[type]]$Global_Optimized[[fold]]$confusion_matrix$table
     cm <- t(cm)  # Transpose to match convention (rows = reference, cols = prediction)
     
     
     # Apply pretty names
-    rownames(cm) <- fix_names_local(rownames(cm))
-    colnames(cm) <- fix_names_local(colnames(cm))
+    rownames(cm) <- fix_names(rownames(cm))
+    colnames(cm) <- fix_names(colnames(cm))
     
     # Reorder to match standard order
-    all_classes <- intersect(order_AML_local, unique(c(
+    all_classes <- intersect(order_AML, unique(c(
       rownames(per_class))))
     per_class <- per_class[all_classes, c("F1", "Sensitivity", "Specificity", "Precision", "Recall")]
     to_remove <- apply(per_class, 1, function(x)
@@ -1583,6 +2402,9 @@ make_faceted_cm <- function(type) {
   
   # Define palette for confusion matrices (white to purple)
   total_conf_palette_fun <- circlize::colorRamp2(c(0, 1), c("white", "purple"))
+  
+  # Define palette for per-class metrics (white to green for performance)
+  palette_fun <- circlize::colorRamp2(c(0, 1), c("white", "green"))
   
   # Create individual heatmaps for each fold
   heatmaps <- list()
@@ -1679,9 +2501,9 @@ cm_heatmaps_loso <- make_faceted_cm("loso")
 # Draw CV confusion matrices
 cat("Saving CV faceted confusion matrices...\n")
 png(
-  "../writing/figures/confusion_matrix_cv_faceted.png",
-  width = 900,
-  height = 400*5,
+  "../writing/figures_new/confusion_matrix_cv_faceted.png",
+  width = 1500,
+  height = 700*5,
   pointsize = 10,
   res = 150
 )
@@ -1709,8 +2531,8 @@ dev.off()
 # Draw LOSO confusion matrices
 cat("Saving LOSO faceted confusion matrices...\n")
 png(
-  "../writing/figures/confusion_matrix_loso_faceted.png",
-  width = 1300,
+  "../writing/figures_new/confusion_matrix_loso_faceted.png",
+  width = 1500,
   height = 700*7,
   pointsize = 10,
   res = 150
@@ -1742,36 +2564,163 @@ cat("Faceted confusion matrices saved!\n")
 ##  --Performance by Fold
 
 ```{r}
-p3 <- ggplot(results_per_fold[results_per_fold$type == "cv",] , aes(x = fold, y = kappa, color = model, group = model)) +
+# Define pediatric cohorts for color coding
+pediatric_cohorts <- c("AAML0531", "AAML1031", "AAML03P1")
+
+# Helper function to order folds by mean kappa and create color vector for x-axis labels
+prepare_fold_data <- function(data_subset) {
+  # Calculate mean kappa per fold
+  fold_means <- data_subset %>% filter(model == "OvR Ensemble") %>%
+    group_by(fold) %>%
+    summarise(mean_kappa = mean(kappa), .groups = "drop") %>%
+    arrange(mean_kappa)
+  
+  # Reorder factor levels from low to high mean kappa
+  data_subset$fold <- factor(data_subset$fold, levels = fold_means$fold)
+  
+  # Create color vector for x-axis labels (pediatric = red, adult = blue)
+  fold_order <- levels(data_subset$fold)
+  label_colors <- ifelse(fold_order %in% pediatric_cohorts, "#fd7f6f", "#7eb0d5")
+  
+  return(list(data = data_subset, label_colors = label_colors))
+}
+
+# CV: Full subtypes - keep folds in order 0-4, no coloring
+cv_full_data <- results_per_fold[results_per_fold$type == "cv" & results_per_fold$label_set == "Full subtypes", ]
+# Ensure folds are ordered 0-4 (convert to numeric for proper sorting)
+cv_full_data$fold <- factor(cv_full_data$fold, levels = sort(unique(as.character(cv_full_data$fold))))
+pa <- ggplot(cv_full_data, aes(x = fold, y = kappa, color = model, group = model)) +
   geom_line(linewidth = 1) +
   geom_point(size = 3) +
-  theme_bw() + theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none") +
+  theme_bw() + 
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "none"
+  ) +
   labs(
-    title = "CV: Performance across folds",
+    title = "CV: Full subtypes",
     x = "Fold",
     y = "Cohen's Kappa",
     color = "Model"
-  ) + scale_color_manual(values = colours, breaks = rev(names(colours)), limits = rev(names(colours))) + ylim(0.75, 1)
+  ) + 
+  scale_color_manual(values = colours, breaks = rev(names(colours)), limits = rev(names(colours))) + 
+  ylim(0.75, 1)
 
-# Calculate mean kappa per fold for ordering
-results_ordered <- results_per_fold[results_per_fold$type == "loso",] %>%
-  group_by(fold) %>%
-  mutate(mean_fold_kappa = mean(kappa)) %>%
-  ungroup() %>%
-  mutate(fold = reorder(fold, mean_fold_kappa))
-
-p4 <- ggplot(results_ordered, aes(x = fold, y = kappa, color = model, group = model)) +
+# CV: Collapsed classes - keep folds in order 0-4, no coloring
+cv_collapsed_data <- results_per_fold[results_per_fold$type == "cv" & results_per_fold$label_set == "Collapsed classes", ]
+# Ensure folds are ordered 0-4 (convert to numeric for proper sorting)
+cv_collapsed_data$fold <- factor(cv_collapsed_data$fold, levels = sort(unique(as.character(cv_collapsed_data$fold))))
+pb <- ggplot(cv_collapsed_data, aes(x = fold, y = kappa, color = model, group = model)) +
   geom_line(linewidth = 1) +
   geom_point(size = 3) +
-  theme_bw() + theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  theme_bw() + 
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "none"
+  ) +
   labs(
-    title = "LOSO: Performance across folds",
+    title = "CV: Collapsed classes",
     x = "Fold",
     y = "Cohen's Kappa",
     color = "Model"
-  )  + scale_color_manual(values = colours, breaks = rev(names(colours)), limits = rev(names(colours))) + ylim(0.75, 1)
+  ) + 
+  scale_color_manual(values = colours, breaks = rev(names(colours)), limits = rev(names(colours))) + 
+  ylim(0.75, 1)
 
-p3 + p4
+# LOSO: Full subtypes - order by mean kappa
+loso_full_data <- results_per_fold[results_per_fold$type == "loso" & results_per_fold$label_set == "Full subtypes", ]
+loso_full_prep <- prepare_fold_data(loso_full_data)
+pc <- ggplot(loso_full_prep$data, aes(x = fold, y = kappa, color = model, group = model)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 3) +
+  theme_bw() + 
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, colour = loso_full_prep$label_colors),
+    legend.position = "none"
+  ) +
+  labs(
+    title = "LOSO: Full subtypes",
+    x = "Cohort (Fold)",
+    y = "Cohen's Kappa",
+    color = "Model"
+  ) + 
+  scale_color_manual(values = colours, breaks = rev(names(colours)), limits = rev(names(colours))) + 
+  ylim(0.75, 1)
+
+# LOSO: Collapsed classes - order by mean kappa
+loso_collapsed_data <- results_per_fold[results_per_fold$type == "loso" & results_per_fold$label_set == "Collapsed classes", ]
+loso_collapsed_prep <- prepare_fold_data(loso_collapsed_data)
+pd <- ggplot(loso_collapsed_prep$data, aes(x = fold, y = kappa, color = model, group = model)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 3) +
+  theme_bw() + 
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, colour = loso_collapsed_prep$label_colors),
+    legend.position = "right"
+  ) +
+  labs(
+    title = "LOSO: Collapsed classes",
+    x = "Cohort (Fold)",
+    y = "Cohen's Kappa",
+    color = "Model"
+  ) + 
+  scale_color_manual(values = colours, breaks = rev(names(colours)), limits = rev(names(colours))) + 
+  ylim(0.75, 1)
+
+# Combine plots with merged legends
+library(patchwork)
+library(cowplot)
+library(grid)
+
+# Create a dummy plot for pediatric/adult legend (invisible, just for legend)
+ped_adult_legend_data <- data.frame(
+  cohort_type = c("Pediatric", "Adult"),
+  x = 1:2,
+  y = 1:2
+)
+ped_adult_legend_plot <- ggplot(ped_adult_legend_data, aes(x = x, y = y, fill = cohort_type)) +
+  geom_bar(stat = "identity", width = 0.5) +
+  scale_fill_manual(values = c("Adult" = "#7eb0d5", "Pediatric" = "#fd7f6f"), name = "Cohort Type") +
+  theme_void() +
+  theme(legend.position = "right",
+        legend.title = element_text(size = 10),
+        legend.text = element_text(size = 9),
+        legend.key = element_rect(fill = "white", color = NA),
+        plot.margin = margin(0, 0, 0, 0)) +
+  xlim(0, 0) + ylim(0, 0)  # Hide the actual bars by setting limits to 0
+
+# Create plots without individual legends
+pa_no_legend <- pa + theme(legend.position = "none")
+pb_no_legend <- pb + theme(legend.position = "none")
+pc_no_legend <- pc + theme(legend.position = "none")
+pd_no_legend <- pd + theme(legend.position = "none")
+
+# Combine plots in 2x2 grid
+plots_grid <- (pa_no_legend + pb_no_legend) / (pc_no_legend + pd_no_legend)
+
+# Extract model legend from one of the plots (they all have the same model legend)
+model_legend <- get_legend(pa + theme(legend.position = "right"))
+
+# Extract pediatric/adult legend
+ped_adult_legend <- get_legend(ped_adult_legend_plot)
+
+# Combine legends vertically
+combined_legends <- plot_grid(
+  model_legend,
+  ped_adult_legend,
+  ncol = 1,
+  align = "v"
+)
+
+# Combine plots and legends
+final_plot <- plot_grid(
+  plots_grid,
+  combined_legends,
+  ncol = 2,
+  rel_widths = c(4, 0.6)
+)
+
+print(final_plot)
 ```
 ## -- Cohort-Level Performance
 
@@ -1779,8 +2728,8 @@ p3 + p4
 library(ggplot2)
 library(dplyr)
 
-# Extract LOSO performance per cohort for the best model (Global_Optimized)
-loso_performance <- outer_cv_results$detailed_performance$loso$Global_Optimized
+# Extract LOSO performance per cohort for the best model 
+loso_performance <- outer_merged$detailed_performance$loso$OvR_Ensemble
 
 # Create dataframe with performance per cohort
 cohort_performance <- data.frame(
@@ -1857,139 +2806,8 @@ p_ped_adult <- ggplot(cohort_analysis_long,
   theme(legend.position = "none")
 
 print(p_ped_adult)
-ggsave("../writing/figures/pediatric_vs_adult_performance.png", p_ped_adult, 
+ggsave("../writing/figures_new/pediatric_vs_adult_performance.png", p_ped_adult, 
        width = 8, height = 5, dpi = 300)
-```
-
-## -- Bootstrap Analysis: Adult vs Pediatric Kappa Difference
-
-```{r}
-library(caret)
-
-# Extract all predictions and truth labels by cohort type
-pediatric_cohorts <- c("AAML0531", "AAML1031", "AAML03P1")
-adult_cohorts <- c("TCGA-LAML", "LEUCEGENE", "BEATAML1.0-COHORT", "100LUMC")
-
-# Initialize storage for predictions and truth
-adult_predictions <- c()
-adult_truth <- c()
-pediatric_predictions <- c()
-pediatric_truth <- c()
-
-# Extract sample-level predictions from LOSO results
-for (fold in names(loso_performance)) {
-  predictions <- loso_performance[[fold]]$predictions
-  truth <- loso_performance[[fold]]$truth
-  
-  if (fold %in% adult_cohorts) {
-    adult_predictions <- c(adult_predictions, predictions)
-    adult_truth <- c(adult_truth, truth)
-  } else if (fold %in% pediatric_cohorts) {
-    pediatric_predictions <- c(pediatric_predictions, predictions)
-    pediatric_truth <- c(pediatric_truth, truth)
-  }
-}
-
-# Apply class modifications to match the 16-class framework
-adult_predictions_mod <- modify_classes(adult_predictions)
-adult_truth_mod <- modify_classes(adult_truth)
-pediatric_predictions_mod <- modify_classes(pediatric_predictions)
-pediatric_truth_mod <- modify_classes(pediatric_truth)
-
-# Function to calculate Cohen's kappa
-calculate_kappa <- function(predictions, truth) {
-  # Get all unique classes
-  all_classes <- unique(c(predictions, truth))
-  
-  # Create confusion matrix
-  cm <- table(factor(predictions, levels = all_classes), 
-              factor(truth, levels = all_classes))
-  
-  # Calculate observed accuracy
-  n <- sum(cm)
-  observed_accuracy <- sum(diag(cm)) / n
-  
-  # Calculate expected accuracy
-  row_sums <- rowSums(cm)
-  col_sums <- colSums(cm)
-  expected_accuracy <- sum(row_sums * col_sums) / (n^2)
-  
-  # Calculate kappa
-  kappa <- (observed_accuracy - expected_accuracy) / (1 - expected_accuracy)
-  
-  return(kappa)
-}
-
-# Calculate observed kappa scores
-observed_adult_kappa <- calculate_kappa(adult_predictions_mod, adult_truth_mod)
-observed_pediatric_kappa <- calculate_kappa(pediatric_predictions_mod, pediatric_truth_mod)
-observed_diff <- observed_adult_kappa - observed_pediatric_kappa
-
-cat("Observed Sample-Level Performance:\n")
-cat("===================================\n")
-cat(sprintf("Adult samples: n=%d, Cohen's kappa=%.4f\n", length(adult_predictions), observed_adult_kappa))
-cat(sprintf("Pediatric samples: n=%d, Cohen's kappa=%.4f\n", length(pediatric_predictions), observed_pediatric_kappa))
-cat(sprintf("Observed difference (Adult - Pediatric): %.4f\n\n", observed_diff))
-
-# Bootstrap analysis for confidence intervals
-set.seed(42)  # For reproducibility
-n_bootstrap <- 1000
-
-boot_adult_kappa <- numeric(n_bootstrap)
-boot_ped_kappa <- numeric(n_bootstrap)
-bootstrap_diffs <- numeric(n_bootstrap)
-
-cat("Running bootstrap analysis with", n_bootstrap, "iterations...\n")
-
-for (i in 1:n_bootstrap) {
-  # Resample adult samples with replacement
-  adult_idx <- sample(1:length(adult_predictions_mod), replace = TRUE)
-  boot_adult_pred <- adult_predictions_mod[adult_idx]
-  boot_adult_truth <- adult_truth_mod[adult_idx]
-  
-  # Resample pediatric samples with replacement
-  ped_idx <- sample(1:length(pediatric_predictions_mod), replace = TRUE)
-  boot_ped_pred <- pediatric_predictions_mod[ped_idx]
-  boot_ped_truth <- pediatric_truth_mod[ped_idx]
-  
-  # Calculate kappa for this bootstrap sample
-  boot_adult_kappa[i] <- calculate_kappa(boot_adult_pred, boot_adult_truth)
-  boot_ped_kappa[i] <- calculate_kappa(boot_ped_pred, boot_ped_truth)
-  
-  # Store the difference
-  bootstrap_diffs[i] <- boot_adult_kappa[i] - boot_ped_kappa[i]
-}
-
-# Calculate confidence intervals
-ci_95 <- quantile(bootstrap_diffs, c(0.025, 0.975))
-ci_99 <- quantile(bootstrap_diffs, c(0.005, 0.995))
-
-cat("\nBootstrap Results (", n_bootstrap, " iterations):\n", sep = "")
-cat("===============================================\n")
-cat(sprintf("Mean bootstrap difference: %.4f\n", mean(bootstrap_diffs)))
-cat(sprintf("Bootstrap SE: %.4f\n", sd(bootstrap_diffs)))
-cat(sprintf("95%% CI: [%.4f, %.4f]\n", ci_95[1], ci_95[2]))
-cat(sprintf("99%% CI: [%.4f, %.4f]\n", ci_99[1], ci_99[2]))
-
-
-```
-
-```{r}
-# Visualization of bootstrap distribution 
-bootstrap_df <- data.frame(value = c(boot_adult_kappa, boot_ped_kappa), cohort_type = c(rep("Adult", n_bootstrap), rep("Pediatric", n_bootstrap)))
-ggplot(bootstrap_df, 
-                      aes(x = cohort_type, y = value, fill = cohort_type)) +
-  geom_boxplot(alpha = 0.7, outlier.shape = NA) +
-  geom_jitter(width = 0.2, size = 3, alpha = 0.6) +
-  scale_fill_manual(values = c("Adult" = "#7eb0d5", "Pediatric" = "#fd7f6f")) +
-  theme_bw() +
-  labs(
-    title = "LOSO Performance: Pediatric vs Adult Cohorts",
-    x = "Cohort Type",
-    y = "Performance",
-    fill = "Cohort Type"
-  ) +
-  theme(legend.position = "none")
 ```
 
 
@@ -2005,9 +2823,9 @@ loso_truth_list <- list()
 loso_fold_list <- list()
 loso_indices_list <- list()
 
-for (fold in names(outer_cv_results$detailed_performance$loso$Global_Optimized)) {
+for (fold in names(outer_merged$detailed_performance$loso$Global_Optimized)) {
   # Get sample indices for this fold
-  fold_prob_matrix <- outer_cv_results$ensemble_matrices$loso$global_ensemble[[fold]]
+  fold_prob_matrix <- outer_merged$ensemble_matrices$loso$global_ensemble[[fold]]
   # Extract saved predictions and truth vectors
   predictions <- apply(fold_prob_matrix[,!colnames(fold_prob_matrix) %in% c("y", "outer_fold", "sample_indices")], 1, which.max)
   predictions <- colnames(fold_prob_matrix)[!colnames(fold_prob_matrix) %in% c("y", "outer_fold", "sample_indices")][predictions]
@@ -2079,65 +2897,12 @@ cat(sprintf("Total samples: %d\n", nrow(sample_level_df)))
 cat(sprintf("Pediatric cohort samples: %d (%.1f%%)\n", 
             sum(sample_level_df$is_pediatric), 
             100 * mean(sample_level_df$is_pediatric)))
-cat(sprintf("\nOverall accuracy: %.3f\n", mean(sample_level_df$correct)))
+cat(sprintf("\nOverall accuracy: %.2f\n", mean(sample_level_df$correct)))
+
+# Create sample_level_age as alias for age-related analyses
+sample_level_age <- sample_level_df
 ```
-## -- Age Analysis: Continuous Age Effect
 
-```{r}
-# Remove samples with missing age
-sample_level_age <- sample_level_df[!is.na(sample_level_df$age_years), ]
-
-cat("\n\nAge Analysis:\n")
-cat("=============\n")
-cat(sprintf("Samples with age data: %d / %d (%.1f%%)\n", 
-            nrow(sample_level_age), nrow(sample_level_df),
-            100 * nrow(sample_level_age) / nrow(sample_level_df)))
-cat(sprintf("Age range: %.1f - %.1f years\n", 
-            min(sample_level_age$age_years, na.rm = TRUE),
-            max(sample_level_age$age_years, na.rm = TRUE)))
-cat(sprintf("Median age: %.1f years (IQR: %.1f - %.1f)\n",
-            median(sample_level_age$age_years, na.rm = TRUE),
-            quantile(sample_level_age$age_years, 0.25, na.rm = TRUE),
-            quantile(sample_level_age$age_years, 0.75, na.rm = TRUE)))
-
-# Test correlation between age and prediction correctness
-# Use logistic regression for binary outcome
-age_logit <- glm(correct ~ age_years, 
-                 data = sample_level_age, 
-                 family = binomial(link = "logit"))
-age_logit_summary <- summary(age_logit)
-
-cat("\nLogistic Regression: Prediction Correctness ~ Age\n")
-cat("==================================================\n")
-print(age_logit_summary$coefficients)
-
-# Calculate odds ratio
-age_or <- exp(coef(age_logit)["age_years"])
-age_or_ci <- exp(confint(age_logit)["age_years", ])
-
-cat(sprintf("\nOdds Ratio per year increase in age: %.3f (95%% CI: %.3f - %.3f)\n",
-            age_or, age_or_ci[1], age_or_ci[2]))
-
-# Calculate accuracy by age groups
-sample_level_age$age_group <- cut(sample_level_age$age_years,
-                                   breaks = c(0, 18, 40, 60, 100),
-                                   labels = c("Pediatric (<18y)", 
-                                             "Young Adult (18-40y)",
-                                             "Middle Age (40-60y)",
-                                             "Older Adult (>60y)"),
-                                   include.lowest = TRUE)
-
-age_group_accuracy <- sample_level_age %>%
-  group_by(age_group) %>%
-  summarise(
-    n = n(),
-    accuracy = mean(correct),
-    .groups = "drop"
-  )
-
-cat("\n\nAccuracy by Age Group:\n")
-print(age_group_accuracy)
-```
 
 ## -- Visualization: Age Effect on Performance
 
@@ -2194,7 +2959,7 @@ p_age_kappa <- ggplot(age_performance, aes(x = age_mid, y = kappa)) +
   theme(text = element_text(size = 12))
 
 print(p_age_kappa)
-ggsave("../writing/figures/age_effect_on_performance.png", p_age_kappa, 
+ggsave("../writing/figures_new/age_effect_on_performance.png", p_age_kappa, 
        width = 10, height = 6, dpi = 300)
 ```
 
@@ -2203,7 +2968,7 @@ ggsave("../writing/figures/age_effect_on_performance.png", p_age_kappa,
 ```{r}
 # Calculate F1 scores per subtype and age bin
 # Use same 5-year bins as the kappa visualization (0 to 90 in steps of 5)
-age_bins_5yr <- seq(0, 90, by = 10)
+age_bins_5yr <- seq(0, 90, by = 15)
 
 # Ensure prediction_display exists (apply same transformations as truth_display)
 if (!"prediction_display" %in% colnames(sample_level_age)) {
@@ -2270,22 +3035,6 @@ for (i in 1:(length(age_bins_5yr)-1)) {
     }
   }
 }
-
-# Show summary
-cat("\n\nF1 Scores by Age Bin and Subtype:\n")
-cat("==================================\n")
-cat("(Only showing subtype-age combinations with n≥3)\n\n")
-cat(sprintf("Total combinations: %d\n", nrow(f1_by_age_subtype)))
-print(head(f1_by_age_subtype[, c("age_bin", "truth_display", "n", "f1_score", "precision", "recall")], 20))
-
-# Identify subtypes with sufficient data across age ranges
-subtypes_multi_age <- f1_by_age_subtype %>%
-  group_by(truth_display) %>%
-  summarise(n_age_bins = n(), .groups = "drop") %>%
-  filter(n_age_bins >= 2)  # At least 2 age bins
-
-cat(sprintf("\n\nSubtypes with data across multiple age bins: %d\n", nrow(subtypes_multi_age)))
-print(subtypes_multi_age)
 ```
 
 ## -- Visualization: Subtype F1 by Age
@@ -2323,222 +3072,12 @@ p_f1_age_subtype_facet <- ggplot(f1_by_age_plot,
         legend.position = "bottom") +ylim(0.4,1)
 
 print(p_f1_age_subtype_facet)
-ggsave("../writing/figures/f1_by_age_and_subtype_faceted.png", p_f1_age_subtype_facet, 
+ggsave("../writing/figures_new/f1_by_age_and_subtype_faceted.png", p_f1_age_subtype_facet, 
        width = 14, height = 10, dpi = 300)
 ```
 
 
-## -- Logistic Regression: Predictors of Misclassification
 
-```{r}
-# Fit logistic regression model
-# DV: correct prediction (1 = correct, 0 = incorrect)
-# IVs: is_rare, is_pediatric, and their interaction
-
-logit_model <- glm(correct ~ age_years, 
-                   data = sample_level_df, 
-                   family = binomial(link = "logit"))
-
-logit_summary <- summary(logit_model)
-
-# Calculate odds ratios and confidence intervals
-or_results <- exp(cbind(OR = coef(logit_model), confint(logit_model)))
-
-cat("\nLogistic Regression Results:\n")
-cat("=============================\n")
-cat("Predicting correct classification (1 = correct, 0 = incorrect)\n\n")
-print(logit_summary$coefficients)
-
-cat("\n\nOdds Ratios (95% CI):\n")
-cat("=====================\n")
-print(round(or_results, 3))
-
-```
-
-## -- Stratified Accuracy by Group
-
-```{r}
-# Calculate accuracy for each combination
-accuracy_by_group <- sample_level_df %>%
-  group_by(is_rare, is_pediatric) %>%
-  summarise(
-    n_samples = n(),
-    n_correct = sum(correct),
-    accuracy = mean(correct),
-    .groups = "drop"
-  ) %>%
-  mutate(
-    group_label = case_when(
-      !is_rare & !is_pediatric ~ "Common, Adult",
-      !is_rare & is_pediatric ~ "Common, Pediatric",
-      is_rare & !is_pediatric ~ "Rare, Adult",
-      is_rare & is_pediatric ~ "Rare, Pediatric"
-    )
-  )
-
-cat("\nAccuracy by Sample Group:\n")
-cat("=========================\n")
-print(accuracy_by_group[, c("group_label", "n_samples", "accuracy")])
-```
-
-## -- Visualization: Sample-Level Accuracy
-
-```{r}
-# Bar plot of accuracy by group
-p_sample_accuracy <- ggplot(accuracy_by_group, 
-                            aes(x = group_label, y = accuracy, fill = is_pediatric)) +
-  geom_col(alpha = 0.8) +
-  geom_text(aes(label = sprintf("%.3f\n(n=%d)", accuracy, n_samples)), 
-            vjust = -0.5, size = 3.5) +
-  scale_fill_manual(values = c("FALSE" = "#7eb0d5", "TRUE" = "#fd7f6f"),
-                    labels = c("Adult", "Pediatric")) +
-  theme_bw() +
-  labs(
-    title = "Sample-Level Prediction Accuracy by Subtype Rarity and Cohort Type",
-    subtitle = "LOSO Cross-Validation Results",
-    x = "Sample Group",
-    y = "Accuracy",
-    fill = "Cohort Type"
-  ) +
-  ylim(0, 1) +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
-
-print(p_sample_accuracy)
-ggsave("../writing/figures/sample_level_accuracy.png", p_sample_accuracy, 
-       width = 8, height = 6, dpi = 300)
-```
-
-## -- Alternative Analysis: Stratified Performance on Common Subtypes Only
-
-```{r}
-# Filter to common subtypes only
-common_subtypes_df <- sample_level_df %>% filter(!is_rare)
-
-# Compare pediatric vs adult on common subtypes
-common_ped <- common_subtypes_df %>% filter(is_pediatric)
-common_adult <- common_subtypes_df %>% filter(!is_pediatric)
-
-# Convert correct to numeric for wilcox test
-wilcox_common <- wilcox.test(as.numeric(common_ped$correct), as.numeric(common_adult$correct))
-
-cat("\n\nStratified Analysis: Common Subtypes Only\n")
-cat("==========================================\n")
-cat(sprintf("Pediatric accuracy on common subtypes: %.3f (n=%d)\n", 
-            mean(common_ped$correct), nrow(common_ped)))
-cat(sprintf("Adult accuracy on common subtypes: %.3f (n=%d)\n", 
-            mean(common_adult$correct), nrow(common_adult)))
-cat(sprintf("Mann-Whitney U test: W = %.1f, p = %.3f\n", 
-            wilcox_common$statistic, wilcox_common$p.value))
-
-if (wilcox_common$p.value < 0.05) {
-  cat("\n→ INTERPRETATION: Even on common subtypes, performance differs between\n")
-  cat("  pediatric and adult cohorts, suggesting factors beyond rare subtypes.\n")
-} else {
-  cat("\n→ INTERPRETATION: No significant difference on common subtypes, suggesting\n")
-  cat("  that rare subtypes explain the pediatric vs adult performance difference.\n")
-}
-```
-
-
-
-
-
-
-
-## -- Statistical Test: Age Effect per Subtype
-
-```{r}
-# Test if age affects F1 for each subtype
-cat("\n\nAge Effect on F1 per Subtype:\n")
-cat("==============================\n")
-
-for (subtype in subtypes_multi_age$truth_display) {
-  subtype_data <- f1_by_age_plot[f1_by_age_plot$truth_display == subtype, ]
-  
-  if (nrow(subtype_data) >= 3) {  # Need at least 3 points for correlation
-    cor_test <- cor.test(subtype_data$age_mid, subtype_data$f1_score, method = "spearman")
-    
-    cat(sprintf("\n%s:\n", subtype))
-    cat(sprintf("  Age bins: %d, Total samples: %d\n", 
-                nrow(subtype_data), sum(subtype_data$n)))
-    cat(sprintf("  Spearman rho = %.3f, p = %.3f %s\n", 
-                cor_test$estimate, cor_test$p.value,
-                ifelse(cor_test$p.value < 0.05, "***", "")))
-    
-    if (cor_test$p.value < 0.05) {
-      if (cor_test$estimate > 0) {
-        cat("  → Performance IMPROVES with age\n")
-      } else {
-        cat("  → Performance DECREASES with age\n")
-      }
-    }
-  }
-}
-```
-
-## -- Age vs Cohort Type: Disentangling Effects
-
-```{r}
-# Multiple logistic regression: correct ~ age + rare + cohort_type
-# Note: is_rare is already defined in sample_level_df (inherited by sample_level_age)
-# Redefine is_pediatric based on age for this analysis (using age threshold instead of cohort)
-sample_level_age$is_pediatric <- sample_level_age$age_years < 18
-
-# Model 1: Age only
-age_model1 <- glm(correct ~ age_years, 
-                  data = sample_level_age, 
-                  family = binomial(link = "logit"))
-
-# Model 2: Age + rare subtypes
-age_model2 <- glm(correct ~ age_years + is_rare, 
-                  data = sample_level_age, 
-                  family = binomial(link = "logit"))
-
-# Model 3: Age + rare + pediatric binary
-age_model3 <- glm(correct ~ age_years + is_rare + is_pediatric, 
-                  data = sample_level_age, 
-                  family = binomial(link = "logit"))
-
-cat("\n\nComparing Age Models:\n")
-cat("=====================\n")
-cat("\nModel 1: Correct ~ Age\n")
-cat("AIC:", AIC(age_model1), "\n")
-
-cat("\nModel 2: Correct ~ Age + Rare_Subtype\n")
-cat("AIC:", AIC(age_model2), "\n")
-
-cat("\nModel 3: Correct ~ Age + Rare_Subtype + Is_Pediatric\n")
-cat("AIC:", AIC(age_model3), "\n")
-cat("(Note: Age and Is_Pediatric are highly correlated)\n")
-
-# ANOVA to compare models
-cat("\n\nLikelihood Ratio Tests:\n")
-anova_12 <- anova(age_model1, age_model2, test = "Chisq")
-cat("\nModel 1 vs Model 2 (adding Rare_Subtype):\n")
-print(anova_12)
-
-anova_23 <- anova(age_model2, age_model3, test = "Chisq")
-cat("\nModel 2 vs Model 3 (adding Is_Pediatric given Age):\n")
-print(anova_23)
-
-# Show final model coefficients
-cat("\n\nFinal Model (Age + Rare):\n")
-cat("=========================\n")
-print(summary(age_model2)$coefficients)
-
-age2_or <- exp(coef(age_model2))
-age2_or_ci <- exp(confint(age_model2))
-
-cat("\n\nOdds Ratios (95% CI):\n")
-cat(sprintf("Age (per year): OR = %.3f (%.3f - %.3f)\n",
-            age2_or["age_years"], 
-            age2_or_ci["age_years", 1], 
-            age2_or_ci["age_years", 2]))
-cat(sprintf("Rare Subtype: OR = %.3f (%.3f - %.3f)\n",
-            age2_or["is_rareTRUE"], 
-            age2_or_ci["is_rareTRUE", 1], 
-            age2_or_ci["is_rareTRUE", 2]))
-```
 
 ## -- Cohort-Level Age Analysis
 
@@ -2558,33 +3097,16 @@ cohort_age_stats <- sample_level_age %>%
 # Merge with cohort_analysis
 cohort_analysis_age <- merge(cohort_analysis, cohort_age_stats[, c("cohort", "mean_age", "median_age")],
                               by = "cohort", all.x = TRUE)
-
-# Test correlation between mean age and cohort performance
-cor_age_kappa <- cor.test(cohort_analysis_age$mean_age, 
-                           cohort_analysis_age$kappa, 
-                           method = "spearman")
-
-cat("\n\nCohort-Level Age Analysis:\n")
-cat("==========================\n")
-cat("Mean Age per Cohort:\n")
-print(cohort_age_stats[, c("cohort", "mean_age", "median_age", "accuracy")])
-
-cat(sprintf("\n\nCorrelation (Cohort Mean Age vs Kappa): rho = %.3f, p = %.3f\n",
-            cor_age_kappa$estimate, cor_age_kappa$p.value))
-
+cohort_analysis_age$cohort[grepl("BEAT", cohort_analysis_age$cohort)] <- "BEAT-AML"
 # Scatter plot
 p_cohort_age <- ggplot(cohort_analysis_age, 
                        aes(x = mean_age, y = kappa, label = cohort, color = cohort_type)) +
   geom_point(size = 4, alpha = 0.8) +
-  geom_smooth(method = "lm", se = TRUE, color = "gray30", linetype = "dashed",
-              formula = y ~ x) +
-  geom_text(hjust = -0.1, vjust = 0.5, size = 3, show.legend = FALSE) +
+  geom_text(hjust = -0.2, vjust = 0.5, size = 3, show.legend = FALSE) +
   scale_color_manual(values = c("Adult" = "#7eb0d5", "Pediatric" = "#fd7f6f")) +
   theme_bw() +
   labs(
     title = "Cohort Performance vs Mean Age",
-    subtitle = sprintf("Spearman rho = %.3f, p = %.3f", 
-                       cor_age_kappa$estimate, cor_age_kappa$p.value),
     x = "Mean Age of Cohort (years)",
     y = "Cohen's Kappa",
     color = "Cohort Type"
@@ -2593,7 +3115,7 @@ p_cohort_age <- ggplot(cohort_analysis_age,
   xlim(0, max(cohort_analysis_age$mean_age, na.rm = TRUE) * 1.15)
 
 print(p_cohort_age)
-ggsave("../writing/figures/cohort_age_correlation.png", p_cohort_age, 
+ggsave("../writing/figures_new/cohort_age_correlation.png", p_cohort_age, 
        width = 8, height = 6, dpi = 300)
 ```
 
@@ -2601,14 +3123,14 @@ ggsave("../writing/figures/cohort_age_correlation.png", p_cohort_age,
 
 ```{r}
 # Get F1 scores per subtype from the per-class summaries
-per_class_f1 <- outer_cv_results$per_class_summaries$cv %>%
+per_class_f1 <- outer_merged$per_class_summaries$cv %>%
   filter(Model == "Global_Optimized") %>%
   select(Class, Mean_F1)
 
 # Clean class names
 per_class_f1$Class <- gsub("Class: ", "", per_class_f1$Class)
 per_class_f1$Class <- fix_names(per_class_f1$Class)
-per_class_f1$Class[grepl("MDS", per_class_f1$Class)] <- "MDS.r/MECOM"
+#per_class_f1$Class[grepl("MDS", per_class_f1$Class)] <- "MDS.r/MECOM"
 
 # Analyze subtype distribution in pediatric vs adult samples
 subtype_enrichment <- sample_level_age %>%
@@ -2683,8 +3205,8 @@ subtype_enrichment$chi_sq_p_adj <- p.adjust(subtype_enrichment$chi_sq_p, method 
 # Classify subtypes
 subtype_enrichment$enrichment_class <- ifelse(
   subtype_enrichment$chi_sq_p_adj < 0.05,
-  ifelse(subtype_enrichment$enrichment_ratio > 1.5, "Pediatric-enriched",
-         ifelse(subtype_enrichment$enrichment_ratio < 0.67, "Adult-enriched", "Similar")),
+  ifelse(subtype_enrichment$enrichment_ratio > 1, "Pediatric-enriched",
+         ifelse(subtype_enrichment$enrichment_ratio < 1, "Adult-enriched", "Similar")),
   "Similar"
 )
 
@@ -2758,9 +3280,9 @@ if (nrow(ped_enriched) > 0 && (nrow(adult_enriched) + length(similar_subtypes)) 
     wilcox_enrichment <- wilcox.test(f1_ped_enriched, f1_not_ped_enriched)
     
     cat(sprintf("\n\nMann-Whitney U test on F1 scores (Pediatric-enriched vs Others):\n"))
-    cat(sprintf("W = %.1f, p = %.3f\n", wilcox_enrichment$statistic, wilcox_enrichment$p.value))
-    cat(sprintf("Pediatric-enriched mean F1: %.3f\n", mean(f1_ped_enriched)))
-    cat(sprintf("Other subtypes mean F1: %.3f\n", mean(f1_not_ped_enriched)))
+    cat(sprintf("W = %.1f, p = %.2f\n", wilcox_enrichment$statistic, wilcox_enrichment$p.value))
+    cat(sprintf("Pediatric-enriched mean F1: %.2f\n", mean(f1_ped_enriched)))
+    cat(sprintf("Other subtypes mean F1: %.2f\n", mean(f1_not_ped_enriched)))
   }
 }
 ```
@@ -2815,9 +3337,9 @@ for (enrich_class in unique(sample_level_age$subtype_enrichment)) {
     )
     
     cat(sprintf("\n%s subtypes:\n", enrich_class))
-    cat(sprintf("  Pediatric: n=%d, accuracy=%.3f\n", nrow(ped_data), mean(ped_data$correct)))
-    cat(sprintf("  Adult: n=%d, accuracy=%.3f\n", nrow(adult_data), mean(adult_data$correct)))
-    cat(sprintf("  Mann-Whitney U: W=%.1f, p=%.3f\n", 
+    cat(sprintf("  Pediatric: n=%d, accuracy=%.2f\n", nrow(ped_data), mean(ped_data$correct)))
+    cat(sprintf("  Adult: n=%d, accuracy=%.2f\n", nrow(adult_data), mean(adult_data$correct)))
+    cat(sprintf("  Mann-Whitney U: W=%.1f, p=%.2f\n", 
                 wilcox_within$statistic, wilcox_within$p.value))
   }
 }
@@ -2911,7 +3433,7 @@ p_kappa_enrichment <- ggplot(kappa_by_ped_and_enrichment,
   )
 
 print(p_kappa_enrichment)
-ggsave("../writing/figures/kappa_by_enrichment_cohort.png", p_kappa_enrichment, 
+ggsave("../writing/figures_new/kappa_by_enrichment_cohort.png", p_kappa_enrichment, 
        width = 10, height = 7, dpi = 300)
 ```
 
@@ -2933,9 +3455,9 @@ for (enrich_class in unique(kappa_by_ped_and_enrichment$subtype_enrichment)) {
     kappa_diff <- ped_kappa - adult_kappa
     
     cat(sprintf("\n%s subtypes:\n", enrich_class))
-    cat(sprintf("  Pediatric cohort: κ = %.3f\n", ped_kappa))
-    cat(sprintf("  Adult cohort: κ = %.3f\n", adult_kappa))
-    cat(sprintf("  Difference (Ped - Adult): %.3f\n", kappa_diff))
+    cat(sprintf("  Pediatric cohort: κ = %.2f\n", ped_kappa))
+    cat(sprintf("  Adult cohort: κ = %.2f\n", adult_kappa))
+    cat(sprintf("  Difference (Ped - Adult): %.2f\n", kappa_diff))
     
     if (kappa_diff < 0) {
       cat("  → Model performs BETTER on adult cohorts for these subtypes\n")
@@ -3134,7 +3656,7 @@ p_f1_per_class <- ggplot(
   )
 
 print(p_f1_per_class)
-ggsave("../writing/figures/f1_per_class_by_cohort_enriched.png", p_f1_per_class, 
+ggsave("../writing/figures_new/f1_per_class_by_cohort_enriched.png", p_f1_per_class, 
        width = 10, height = 10, dpi = 300)
 ```
 ```{r}
@@ -3222,7 +3744,7 @@ p_summary <- ggplot(summary_df,
             color = "black") +
   scale_fill_manual(values = c("Pediatric" = "#e67e62",
                                "Adult" = "#5a9acb"),
-                    name = "Cohort type") +
+                    name = "") +
   scale_y_continuous(limits = c(0, 1),
                      expand = expansion(mult = c(0, 0.1))) +
   labs(title = "Mean F1 score: pediatric vs adult cohorts",
@@ -3271,9 +3793,9 @@ if (nrow(adult_enriched) > 0) {
   if (length(adult_enr_ped) > 0 && length(adult_enr_adult) > 0) {
     wilcox_adult_enr <- wilcox.test(adult_enr_ped, adult_enr_adult, paired = FALSE)
     
-    cat(sprintf("Pediatric cohorts: median F1 = %.3f (n = %d)\n", 
+    cat(sprintf("Pediatric cohorts: median F1 = %.2f (n = %d)\n", 
                 median(adult_enr_ped), length(adult_enr_ped)))
-    cat(sprintf("Adult cohorts: median F1 = %.3f (n = %d)\n", 
+    cat(sprintf("Adult cohorts: median F1 = %.2f (n = %d)\n", 
                 median(adult_enr_adult), length(adult_enr_adult)))
     cat(sprintf("Mann-Whitney U: W = %.1f, p = %.4f\n", 
                 wilcox_adult_enr$statistic, wilcox_adult_enr$p.value))
@@ -3301,9 +3823,9 @@ if (nrow(ped_enriched) > 0) {
   if (length(ped_enr_ped) > 0 && length(ped_enr_adult) > 0) {
     wilcox_ped_enr <- wilcox.test(ped_enr_ped, ped_enr_adult, paired = FALSE)
     
-    cat(sprintf("Pediatric cohorts: median F1 = %.3f (n = %d)\n", 
+    cat(sprintf("Pediatric cohorts: median F1 = %.2f (n = %d)\n", 
                 median(ped_enr_ped), length(ped_enr_ped)))
-    cat(sprintf("Adult cohorts: median F1 = %.3f (n = %d)\n", 
+    cat(sprintf("Adult cohorts: median F1 = %.2f (n = %d)\n", 
                 median(ped_enr_adult), length(ped_enr_adult)))
     cat(sprintf("Mann-Whitney U: W = %.1f, p = %.4f\n", 
                 wilcox_ped_enr$statistic, wilcox_ped_enr$p.value))
@@ -3330,13 +3852,13 @@ cat("different from the pediatric-adult difference in pediatric-enriched?\n\n")
 if (exists("adult_enr_ped") && exists("adult_enr_adult") && 
     length(adult_enr_ped) > 0 && length(adult_enr_adult) > 0) {
   adult_enr_diff <- mean(adult_enr_ped) - mean(adult_enr_adult)
-  cat(sprintf("Adult-enriched: Ped-Adult difference = %.3f\n", adult_enr_diff))
+  cat(sprintf("Adult-enriched: Ped-Adult difference = %.2f\n", adult_enr_diff))
 }
 
 if (exists("ped_enr_ped") && exists("ped_enr_adult") && 
     length(ped_enr_ped) > 0 && length(ped_enr_adult) > 0) {
   ped_enr_diff <- mean(ped_enr_ped) - mean(ped_enr_adult)
-  cat(sprintf("Pediatric-enriched: Ped-Adult difference = %.3f\n", ped_enr_diff))
+  cat(sprintf("Pediatric-enriched: Ped-Adult difference = %.2f\n", ped_enr_diff))
 }
 ```
 
@@ -3374,7 +3896,7 @@ p_enrichment <- ggplot(subtype_enrichment,
   ylim(0.75, 1)
 
 print(p_enrichment)
-ggsave("../writing/figures/subtype_enrichment_performance.png", p_enrichment, 
+ggsave("../writing/figures_new/subtype_enrichment_performance.png", p_enrichment, 
        width = 10, height = 8, dpi = 300)
 ```
 
@@ -3403,7 +3925,7 @@ if (exists("f1_per_class_cohort")) {
       names_prefix = "f1_"
     ) %>%
     mutate(
-      f1_diff = f1_Adult - f1_Pediatric,
+      f1_diff =  f1_Pediatric - f1_Adult,
       f1_ratio = f1_Adult/f1_Pediatric
     )
   
@@ -3443,7 +3965,6 @@ p_enrichment_diff <- ggplot(performance_diff_data,
   theme_bw() +
   labs(
     title = "Subtype Enrichment vs Performance Gap (Adult - Pediatric Cohorts)",
-    subtitle = "Does the model perform better on adult cohorts for adult-enriched subtypes?",
     x = "Log2(Pediatric/Adult Enrichment Ratio)\n← Adult-enriched | Pediatric-enriched →",
     y = "Log2(F1 Adult/Pediatric Ratio)\n← Pediatric performance higher | Adult performance higher →"
   ) +
@@ -3454,7 +3975,7 @@ p_enrichment_diff <- ggplot(performance_diff_data,
        3)
 
 print(p_enrichment_diff)
-ggsave("../writing/figures/enrichment_vs_performance_gap.png", p_enrichment_diff, 
+ggsave("../writing/figures_new/enrichment_vs_performance_gap.png", p_enrichment_diff, 
        width = 11, height = 8, dpi = 300)
 ```
 
@@ -3464,7 +3985,7 @@ ggsave("../writing/figures/enrichment_vs_performance_gap.png", p_enrichment_diff
 
 ```{r}
 # Read global and OvR ensemble weights
-df_global <- read.csv("../data/out/inner_cv/ensemble_weights/ensemble_weights/cv/global_ensemble_weights_used.csv")
+df_global <- read.csv("../data/out/inner_cv/ensemble_weights_merged/cv/global_ensemble_weights_used.csv")
 
 # Select weight columns and fold info from global weights
 df_global_weights <- df_global %>%
@@ -3503,14 +4024,14 @@ p_weights_cv <- ggplot(df_long, aes(x = model, y = weight)) +
   ylim(0, 1)
 
 p_weights_cv
-ggsave('../writing/figures/weights_per_fold_cv.png', p_weights_cv, width = 10, height = 6, dpi = 300)
+ggsave('../writing/figures_new/weights_per_fold_cv.png', p_weights_cv, width = 10, height = 6, dpi = 300)
 ```
 
 ##  --LOSO Weights visualisation
 
 ```{r}
 # Read global and OvR ensemble weights
-df_global <- read.csv("../data/out/inner_cv/ensemble_weights/ensemble_weights/loso/global_ensemble_weights_used.csv")
+df_global <- read.csv("../data/out/inner_cv/ensemble_weights_merged/loso/ovr_ensemble_weights_used.csv")
 
 # Select weight columns and fold info from global weights
 df_global_weights <- df_global %>%
@@ -3549,7 +4070,7 @@ p_weights_loso <- ggplot(df_long, aes(x = model, y = weight)) +
   ylim(0, 1)
 
 p_weights_loso
-ggsave('../writing/figures/weights_per_fold_loso.png', p_weights_loso, width = 10, height = 6, dpi = 300)
+ggsave('../writing/figures_new/weights_per_fold_loso.png', p_weights_loso, width = 10, height = 6, dpi = 300)
 ```
 
 # Probability Cutoffs Analysis
@@ -3557,15 +4078,15 @@ ggsave('../writing/figures/weights_per_fold_loso.png', p_weights_loso, width = 1
 ###  --CV Rejection Summary
 
 ```{r}
-outer_cv_results$rejection_summary$cv$summary_stats
+outer_merged$rejection_summary$cv$summary_stats
 
-outer_cv_results$rejection_summary$loso$summary_stats
+outer_merged$rejection_summary$loso$summary_stats
 ```
 
 ###  --Cutoff Visualization
 
 ```{r}
-df_rej <- outer_cv_results$rejection_summary$cv$detailed_results
+df_rej <- outer_merged$rejection_summary$cv$detailed_results
 
 p_rej <- ggplot(df_rej) +
   geom_boxplot(aes(x = model, y = prob_cutoff)) +
@@ -3587,10 +4108,6 @@ p_rej
 ##  --Load and Process MLL Lab Data
 
 ```{r}
-MLL_lab <- read.csv("../data/MLL_lab/20231017_SampleMetadata.csv", sep = ";")
-MLL_lab_truth <- MLL_lab$ICC_2022
-MLL_lab_pred_df <- read.csv("../data/MLL_lab/STAR_AML_MLLlab_predictions/STAR_AML_MLLlab_Global_Ensemble_probability_matrix.csv")
-
 map_truth_to_canonical <- function(truth_labels) {
   mapping <- c(
     "AML-MR_cyto" = "AML with MDS-related cytogenetic abnormalities",
@@ -3603,8 +4120,8 @@ map_truth_to_canonical <- function(truth_labels) {
     "AML-RUNX1::RUNX1T1" = "AML with t(8;21)/RUNX1::RUNX1T1",
     "AML-KMT2A::MLLT3" = "AML with t(9;11)/MLLT3::KMT2A",
     "APL-PML::RARA" = "APL, t(15;17)/PML::RARA",
-    "AML-GATA2::MECOM" = "MECOM rearrangements",
-    "AML-otherMECOM" = "MECOM rearrangements"
+    "AML-GATA2::MECOM" = "MECOM fusion",
+    "AML-otherMECOM" = "MECOM fusion"
   )
   
   sapply(truth_labels, function(x) {
@@ -3615,19 +4132,38 @@ map_truth_to_canonical <- function(truth_labels) {
     }
   }, USE.NAMES = FALSE)
 }
+
+files <- list.files("../data/MLL_lab/STAR_AML_MLLlab_predictions", full.names = T)
+
+#get_kappa <- function(file){
+  MLL_lab <- read.csv("../data/MLL_lab/20231017_SampleMetadata.csv", sep = ";")
+MLL_lab_truth <- MLL_lab$ICC_2022
+MLL_lab_pred_df <- read.csv(files[1])
 MLL_lab_truth <- map_truth_to_canonical(MLL_lab_truth)
-MLL_lab_truth[grepl("MDS|MECOM|TP53", MLL_lab_truth)] <- "AML MDS or MECOM"
+#MLL_lab_truth[(MLL_lab$WHO_2022 == "AML-CEBPA" & MLL_lab$WHO_2017 == "AML with biallelic CEBPA" & MLL_lab$ICC_2022 != "AML-CEBPA")] <- "AML with in frame bZIP CEBPA"
+MLL_lab_truth[grepl("MDS|TP53", MLL_lab_truth)] <- "AML MDS"
 MLL_lab_truth[grepl("KMT2A",MLL_lab_truth) & !grepl("MLLT3", MLL_lab_truth)] <- "Other KMT2A"
 MLL_lab_truth <- make.names(MLL_lab_truth)
-MLL_lab_truth <- factor(MLL_lab_truth, levels = unique(MLL_lab_truth))
 
-MLL_lab_predictions <- colnames(MLL_lab_pred_df[,-1])[apply(MLL_lab_pred_df[,-1], 1, which.max)]
-MLL_lab_predictions[grepl("MDS|MECOM|TP53", MLL_lab_predictions)]<- "AML MDS or MECOM"
+
+MLL_lab_predictions <- MLL_lab_pred_df$prediction
+table(MLL_lab_predictions)
+MLL_lab_predictions[grepl("MDS|TP53", MLL_lab_predictions)]<- "AML MDS"
 MLL_lab_predictions[grepl("KMT2A",MLL_lab_predictions) & !grepl("MLLT3", MLL_lab_predictions)] <- "Other KMT2A"
-MLL_lab_predictions[grepl("KAT6A|ETV6|NUP98", MLL_lab_predictions)]<- "AML-other rare transloc"
+MLL_lab_predictions[grepl("KAT6A|ETV6|NUP98|CBFA2T3", MLL_lab_predictions)]<- "AML-other rare transloc"
 MLL_lab_predictions <- make.names(MLL_lab_predictions)
 MLL_lab_predictions <- gsub("_", ".", MLL_lab_predictions)
-MLL_lab_predictions <- factor(MLL_lab_predictions, levels = unique(MLL_lab_truth))
+
+levels <- unique(c(MLL_lab_predictions,MLL_lab_truth))
+MLL_lab_predictions <- factor(MLL_lab_predictions, levels = levels)
+MLL_lab_truth <- factor(MLL_lab_truth, levels = levels)
+
+res_MLL <- caret::confusionMatrix(MLL_lab_predictions[MLL_lab_truth != "AML..NOS"], MLL_lab_truth[MLL_lab_truth != "AML..NOS"])
+
+round(res_MLL$overall["Kappa"], 3)
+#}
+
+#test <- data.frame(files, kappa = unlist(lapply(files, get_kappa)))
 ```
 
 ##  --Table 2: MLL Lab Cohort Distribution
@@ -3688,7 +4224,7 @@ mll_table <- kable(MLL_lab_counts_with_total,
   #add_header_above(c(" " = 1, "Adult Cohort" = 1))
 
 mll_table
-save_kable(mll_table, "../writing/tables/table2.png", zoom = 2)
+save_kable(mll_table, "../writing/tables_new/table2.png", zoom = 2)
 ```
 
 ##  --MLL Lab Performance Metrics
@@ -3697,21 +4233,37 @@ save_kable(mll_table, "../writing/tables/table2.png", zoom = 2)
 
 ```{r}
 res_MLL <- caret::confusionMatrix(MLL_lab_predictions[MLL_lab_truth != "AML..NOS"], MLL_lab_truth[MLL_lab_truth != "AML..NOS"])
-n <- length(MLL_lab_truth[MLL_lab_truth != "AML..NOS"])
-n
+
 round(res_MLL$overall, 3)
 ```
 
-###  --Performance with Probability Cutoff (0.38)
+```{r}
+res_MLL$table
+```
+
 
 ```{r}
-cutoff <- read.csv("../data/out/final_train_test/cutoffs/train_test_cutoffs.csv")
-MLL_lab_predictions_passes <- apply(MLL_lab_pred_df[,-1], 1, function(x) max(x) > cutoff$prob_cutoff[cutoff$model == "Global_Optimized" & cutoff$source == "cv"])
+MLL_lab[which(MLL_lab_predictions == "AML.with.in.frame.bZIP.CEBPA" & MLL_lab_truth != "AML..NOS" & MLL_lab_truth != "AML.with.in.frame.bZIP.CEBPA"),]$WHO_2022
+```
+
+
+###  --Performance with Probability Cutoff 
+
+```{r}
+cutoff <- read.csv("../data/out/final_train_test/cutoffs_merged/train_test_cutoffs_merged.csv")
+MLL_lab_predictions_passes <- as.logical(MLL_lab_pred_df$prediction_passed_cutoff)
 
 res_MLL_cutoff <- caret::confusionMatrix(MLL_lab_predictions[MLL_lab_truth != "AML..NOS" & MLL_lab_predictions_passes], MLL_lab_truth[MLL_lab_truth != "AML..NOS" & MLL_lab_predictions_passes])
 
 perc_rej <- 100 - sum(MLL_lab_predictions_passes & MLL_lab_truth != "AML..NOS") / n * 100 
 round(perc_rej, 3)
 round(res_MLL_cutoff$overall, 3)
+```
+
+```{r}
+MLL_lab_truth[MLL_lab_truth != "AML..NOS" & !MLL_lab_predictions_passes]
+```
+```{r}
+caret::confusionMatrix(MLL_lab_predictions[MLL_lab_truth != "AML..NOS" & !MLL_lab_predictions_passes], MLL_lab_truth[MLL_lab_truth != "AML..NOS" & !MLL_lab_predictions_passes])
 ```
 

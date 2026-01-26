@@ -107,7 +107,6 @@ def load_cached_pipeline(n_genes, pipelines_dir):
     pipeline_path = os.path.join(pipelines_dir, pipeline_filename)
     
     if os.path.exists(pipeline_path):
-        print(f"  Loading cached pipeline for n_genes={n_genes}: {pipeline_path}")
         return joblib.load(pipeline_path)
     else:
         raise FileNotFoundError(f"Cached pipeline not found: {pipeline_path}")
@@ -124,9 +123,7 @@ def load_training_gene_order():
     """
     base_path = Path(__file__).resolve().parent.parent
     counts_file = base_path / "data" / "counts_20aug25.csv"
-    
-    print(f"Loading training gene order from {counts_file}")
-    
+        
     # Read just the first row to get gene names (column headers)
     # The training data has genes as rows, so we need the index
     df_header = pd.read_csv(counts_file, nrows=1)
@@ -159,9 +156,7 @@ def load_new_samples(input_file):
         Gene expression data (samples x genes) in training gene order
     sample_names : list
         Sample identifiers from row names
-    """
-    print(f"Loading new samples from {input_file}")
-    
+    """    
     # Load the CSV file
     df = pd.read_csv(input_file, index_col=0)
     
@@ -406,19 +401,23 @@ def load_ensemble_weights(weights_dir):
     """
     ensemble_weights = {}
     
-    # Load global ensemble weights
+    # Load global ensemble weights (CV only, not LOSO)
     global_weights_path = os.path.join(weights_dir, "cv", "global_ensemble_weights_used.csv")
     if os.path.exists(global_weights_path):
         global_weights = pd.read_csv(global_weights_path)
         ensemble_weights['global'] = global_weights
-        print("Loaded global ensemble weights")
+        print("Loaded global ensemble weights (CV)")
+    else:
+        print(f"WARNING: Global ensemble weights not found at {global_weights_path}")
     
-    # Load OvR ensemble weights
+    # Load OvR ensemble weights (CV only, not LOSO)
     ovr_weights_path = os.path.join(weights_dir, "cv", "ovr_ensemble_weights_used.csv")
     if os.path.exists(ovr_weights_path):
         ovr_weights = pd.read_csv(ovr_weights_path)
         ensemble_weights['ovr'] = ovr_weights
-        print("Loaded OvR ensemble weights")
+        print("Loaded OvR ensemble weights (CV)")
+    else:
+        print(f"WARNING: OvR ensemble weights not found at {ovr_weights_path}")
     
     return ensemble_weights
 
@@ -437,6 +436,10 @@ def load_cutoffs(cutoffs_path):
     cutoffs : dict
         Dictionary containing cutoffs for each model
     """
+    if not os.path.exists(cutoffs_path):
+        print(f"WARNING: Cutoffs file not found at {cutoffs_path}")
+        return {}
+    
     cutoffs_df = pd.read_csv(cutoffs_path)
     
     # Filter for CV source only
@@ -604,7 +607,6 @@ def predict_ovr_models(X, models, model_type, sample_names):
         # Process data once for this pipeline
         dummy_studies = np.zeros(X.shape[0])  # Assuming all samples from same study
         X_processed = pipeline.transform(X)
-        print(f"  Processed data for pipeline {pipeline_id} (used by {len(classes_with_models)} classes)")
         
         # Make predictions for all classes using this processed data
         for class_name, model in classes_with_models:
@@ -870,9 +872,12 @@ def predict_ensemble_ovr(individual_predictions, individual_prob_matrices, ensem
 
 def merge_probability_classes(prob_matrix_df):
     """
-    Merge specific classes in the probability matrix:
-    1. Sum probabilities for all classes with 'MDS', 'TP53', or 'Mecom' in their name to "MDS.r"
-    2. Sum all other KMT2A classes (excluding MLLT3 fusion) to "other.KMT2A"
+    Merge specific classes in the probability matrix using max probability method:
+    1. Use max probability for all classes with 'MDS' or 'TP53' in their name -> "MDS.r"
+    2. Use max probability for all other KMT2A classes (excluding MLLT3 fusion) -> "other.KMT2A"
+    
+    Uses max probability instead of summing to prevent merged classes from overpowering
+    other classes in predictions.
     
     Parameters:
     -----------
@@ -887,12 +892,12 @@ def merge_probability_classes(prob_matrix_df):
     # Get all column names except 'sample_name'
     class_columns = [col for col in prob_matrix_df.columns if col != 'sample_name']
     
-    # Identify classes to merge for MDS or MECOM
-    mds_mecom_classes = []
+    # Identify classes to merge for MDS 
+    mds_classes = []
     for col in class_columns:
         col_lower = col.lower()
-        if 'mds' in col_lower or 'tp53' in col_lower or 'mecom' in col_lower:
-            mds_mecom_classes.append(col)
+        if 'mds' in col_lower or 'tp53' in col_lower:
+            mds_classes.append(col)
     
     # Identify classes to merge for other KMT2A (excluding MLLT3)
     other_kmt2a_classes = []
@@ -902,17 +907,15 @@ def merge_probability_classes(prob_matrix_df):
         if 'kmt2a' in col_lower and 'mllt3' not in col_lower:
             other_kmt2a_classes.append(col)
     
-    if mds_mecom_classes:
-        print(f"  Merging {len(mds_mecom_classes)} classes to MDS.r: {mds_mecom_classes}")
-        # Sum probabilities for MDS/MECOM classes
-        prob_matrix_df['MDS.r'] = prob_matrix_df[mds_mecom_classes].sum(axis=1)
+    if mds_classes:
+        # Use max probability for MDS classes (not sum)
+        prob_matrix_df['MDS.r'] = prob_matrix_df[mds_classes].max(axis=1)
         # Remove individual classes
-        prob_matrix_df = prob_matrix_df.drop(columns=mds_mecom_classes)
+        prob_matrix_df = prob_matrix_df.drop(columns=mds_classes)
     
     if other_kmt2a_classes:
-        print(f"  Merging {len(other_kmt2a_classes)} classes to other.KMT2A: {other_kmt2a_classes}")
-        # Sum probabilities for other KMT2A classes
-        prob_matrix_df['other.KMT2A'] = prob_matrix_df[other_kmt2a_classes].sum(axis=1)
+        # Use max probability for other KMT2A classes (not sum)
+        prob_matrix_df['other.KMT2A'] = prob_matrix_df[other_kmt2a_classes].max(axis=1)
         # Remove individual classes
         prob_matrix_df = prob_matrix_df.drop(columns=other_kmt2a_classes)
     
@@ -960,7 +963,7 @@ def apply_cutoffs(predictions_dict, cutoffs):
     return predictions_dict
 
 
-def save_predictions(predictions_dict, prob_matrices_dict, output_dir, input_filename_prefix):
+def save_predictions(predictions_dict, prob_matrices_dict, output_dir, input_filename_prefix, merge_suffix=""):
     """
     Save prediction DataFrames and probability matrices to CSV files.
     
@@ -974,6 +977,8 @@ def save_predictions(predictions_dict, prob_matrices_dict, output_dir, input_fil
         Output directory path
     input_filename_prefix : str
         Prefix to prepend to output files (based on input filename)
+    merge_suffix : str
+        Suffix to append to filenames (e.g., "_merged" or "_unmerged")
     """
     print(f"Saving predictions to {output_dir}")
     
@@ -981,17 +986,89 @@ def save_predictions(predictions_dict, prob_matrices_dict, output_dir, input_fil
     
     # Save prediction summaries
     for model_name, df in predictions_dict.items():
-        filename = f"{input_filename_prefix}_{model_name}_predictions.csv"
+        filename = f"{input_filename_prefix}_{model_name}_predictions{merge_suffix}.csv"
         filepath = os.path.join(output_dir, filename)
         df.to_csv(filepath, index=False)
         print(f"Saved {model_name} predictions to {filename}")
     
     # Save full probability matrices
     for model_name, df in prob_matrices_dict.items():
-        filename = f"{input_filename_prefix}_{model_name}_probability_matrix.csv"
+        filename = f"{input_filename_prefix}_{model_name}_probability_matrix{merge_suffix}.csv"
         filepath = os.path.join(output_dir, filename)
         df.to_csv(filepath, index=False)
         print(f"Saved {model_name} probability matrix to {filename}")
+
+
+def run_predictions(X, sample_names, models, ensemble_weights, cutoffs, merge_classes=False):
+    """
+    Run prediction pipeline for a single version (merged or unmerged).
+    
+    Parameters:
+    -----------
+    X : np.ndarray
+        Input data (samples x genes)
+    sample_names : list
+        Sample identifiers
+    models : dict
+        Dictionary containing loaded models
+    ensemble_weights : dict
+        Dictionary containing ensemble weights
+    cutoffs : dict
+        Dictionary containing cutoffs for each model
+    merge_classes : bool
+        Whether to merge classes in probability matrices
+        
+    Returns:
+    --------
+    predictions : dict
+        Dictionary of prediction DataFrames
+    prob_matrices : dict
+        Dictionary of probability matrix DataFrames
+    """
+    print(f"\n{'='*60}")
+    print(f"Running predictions ({'MERGED' if merge_classes else 'UNMERGED'} classes)")
+    print(f"{'='*60}")
+    
+    # Make predictions with all models
+    predictions = {}
+    prob_matrices = {}
+    
+    # Individual model predictions
+    if 'NN' in models:
+        predictions['NN'], prob_matrices['NN'] = predict_nn_standard(X, models, sample_names)
+    
+    if 'SVM' in models:
+        predictions['SVM'], prob_matrices['SVM'] = predict_ovr_models(X, models, 'SVM', sample_names)
+    
+    if 'XGBOOST' in models:
+        predictions['XGBOOST'], prob_matrices['XGBOOST'] = predict_ovr_models(X, models, 'XGBOOST', sample_names)
+    
+    # Apply class merging to individual model probability matrices if requested
+    if merge_classes:
+        for model_name in prob_matrices.keys():
+            prob_matrices[model_name] = merge_probability_classes(prob_matrices[model_name].copy())
+    
+    # Ensemble predictions (reuse individual predictions and prob matrices to avoid redundant computation)
+    if 'global' in ensemble_weights:
+        predictions['Global_Ensemble'], prob_matrices['Global_Ensemble'] = predict_ensemble_global(
+            predictions, prob_matrices, ensemble_weights, sample_names
+        )
+    
+    if 'ovr' in ensemble_weights:
+        predictions['OvR_Ensemble'], prob_matrices['OvR_Ensemble'] = predict_ensemble_ovr(
+            predictions, prob_matrices, ensemble_weights, sample_names
+        )
+    
+    # Apply class merging to ensemble probability matrices if requested
+    if merge_classes:
+        for model_name in ['Global_Ensemble', 'OvR_Ensemble']:
+            if model_name in prob_matrices:
+                prob_matrices[model_name] = merge_probability_classes(prob_matrices[model_name].copy())
+    
+    # Apply cutoffs to predictions
+    predictions = apply_cutoffs(predictions, cutoffs)
+    
+    return predictions, prob_matrices
 
 
 def main():
@@ -999,24 +1076,26 @@ def main():
     parser.add_argument("--input_file", required=True, help="Path to input CSV file with new samples")
     parser.add_argument("--output_dir", required=True, help="Output directory for prediction results")
     parser.add_argument("--models_dir", default=None, help="Path to final_models directory")
-    parser.add_argument("--weights_dir", default=None, help="Path to ensemble_weights directory")
-    parser.add_argument("--cutoffs_file", default=None, help="Path to cutoffs CSV file")
+    parser.add_argument("--weights_dir", default=None, help="Path to final_train_test directory (will look for ensemble_weights_merged and ensemble_weights_unmerged subdirs)")
+    parser.add_argument("--cutoffs_file", default=None, help="Path to final_train_test directory (will look for cutoffs_merged and cutoffs_unmerged subdirs)")
     parser.add_argument("--pipelines_dir", default=None, help="Path to pipelines cache directory")
+    parser.add_argument("--merged_only", action="store_true", help="Only run merged predictions")
+    parser.add_argument("--unmerged_only", action="store_true", help="Only run unmerged predictions")
     
     args = parser.parse_args()
     
     # Set default paths if not provided
+    base_path = Path(__file__).resolve().parent.parent
+    
     if args.models_dir is None:
-        base_path = Path(__file__).resolve().parent.parent
         args.models_dir = base_path / "data" / "out" / "final_models"
     
     if args.weights_dir is None:
-        base_path = Path(__file__).resolve().parent.parent
-        args.weights_dir = base_path / "data" / "out" / "final_train_test" / "ensemble_weights" / "ensemble_weights"
+        args.weights_dir = base_path / "data" / "out" / "final_train_test"
     
     if args.cutoffs_file is None:
-        base_path = Path(__file__).resolve().parent.parent
-        args.cutoffs_file = base_path / "data" / "out" / "final_train_test" / "cutoffs" / "train_test_cutoffs.csv"
+        # Base directory for cutoffs (will append _merged or _unmerged)
+        args.cutoffs_file = base_path / "data" / "out" / "final_train_test"
     
     # Set up pipeline cache directory
     if args.pipelines_dir is None:
@@ -1036,63 +1115,79 @@ def main():
     print(f"Input filename: {input_filename}")
     print(f"Output directory: {output_dir}")
     print(f"Models directory: {args.models_dir}")
-    print(f"Weights directory: {args.weights_dir}")
-    print(f"Cutoffs file: {args.cutoffs_file}")
+    print(f"Weights base directory: {args.weights_dir}")
+    print(f"Cutoffs base directory: {args.cutoffs_file}")
     print(f"Pipelines directory: {pipelines_dir}")
     
-    # Load new samples
+    # Determine which versions to run
+    run_merged = not args.unmerged_only
+    run_unmerged = not args.merged_only
+    
+    if args.merged_only and args.unmerged_only:
+        print("ERROR: Cannot specify both --merged_only and --unmerged_only")
+        return
+    
+    # Load new samples (only need to load once)
     X, sample_names = load_new_samples(args.input_file)
     
-    # Load models and metadata with pipeline cache
+    # Load models and metadata with pipeline cache (only need to load once)
     models = load_models_and_metadata(args.models_dir, pipelines_dir)
     
-    # Load ensemble weights
-    ensemble_weights = load_ensemble_weights(args.weights_dir)
-    
-    # Load cutoffs
-    cutoffs = load_cutoffs(args.cutoffs_file)
-    
-    # Make predictions with all models
-    predictions = {}
-    prob_matrices = {}
-    
-    # Individual model predictions
-    if 'NN' in models:
-        predictions['NN'], prob_matrices['NN'] = predict_nn_standard(X, models, sample_names)
-    
-    if 'SVM' in models:
-        predictions['SVM'], prob_matrices['SVM'] = predict_ovr_models(X, models, 'SVM', sample_names)
-    
-    if 'XGBOOST' in models:
-        predictions['XGBOOST'], prob_matrices['XGBOOST'] = predict_ovr_models(X, models, 'XGBOOST', sample_names)
-    
-    # Merge probability classes BEFORE ensemble methods
-    # This ensures ensemble weights for merged classes (MDS.r, other.KMT2A) make sense
-    print("\n=== Merging probability classes ===")
-    for model_name in ['NN', 'SVM', 'XGBOOST']:
-        if model_name in prob_matrices:
-            print(f"\nMerging classes in {model_name} probability matrix:")
-            prob_matrices[model_name] = merge_probability_classes(prob_matrices[model_name])
-            print(f"  Final {model_name} classes: {len(prob_matrices[model_name].columns) - 1}")  # -1 for sample_name
-    
-    # Ensemble predictions (reuse individual predictions and prob matrices to avoid redundant computation)
-    if 'global' in ensemble_weights:
-        predictions['Global_Ensemble'], prob_matrices['Global_Ensemble'] = predict_ensemble_global(
-            predictions, prob_matrices, ensemble_weights, sample_names
+    # Run predictions for unmerged version
+    if run_unmerged:
+        print("\n" + "="*60)
+        print("UNMERGED VERSION")
+        print("="*60)
+        
+        # Load unmerged ensemble weights
+        # Structure: final_train_test/ensemble_weights_unmerged/cv/
+        weights_dir_unmerged = os.path.join(str(args.weights_dir), "ensemble_weights_unmerged")
+        print(f"\nLoading unmerged ensemble weights from: {weights_dir_unmerged}")
+        ensemble_weights_unmerged = load_ensemble_weights(weights_dir_unmerged)
+        
+        # Load unmerged cutoffs
+        # Structure: final_train_test/cutoffs_unmerged/train_test_cutoffs_unmerged.csv
+        cutoffs_file_unmerged = os.path.join(str(args.cutoffs_file), "cutoffs_unmerged", "train_test_cutoffs_unmerged.csv")
+        print(f"\nLoading unmerged cutoffs from: {cutoffs_file_unmerged}")
+        cutoffs_unmerged = load_cutoffs(cutoffs_file_unmerged)
+        
+        # Run predictions
+        predictions_unmerged, prob_matrices_unmerged = run_predictions(
+            X, sample_names, models, ensemble_weights_unmerged, cutoffs_unmerged, merge_classes=False
         )
+        
+        # Save unmerged predictions
+        save_predictions(predictions_unmerged, prob_matrices_unmerged, output_dir, input_filename, merge_suffix="_unmerged")
     
-    if 'ovr' in ensemble_weights:
-        predictions['OvR_Ensemble'], prob_matrices['OvR_Ensemble'] = predict_ensemble_ovr(
-            predictions, prob_matrices, ensemble_weights, sample_names
+    # Run predictions for merged version (using maxprob method)
+    if run_merged:
+        print("\n" + "="*60)
+        print("MERGED VERSION (MaxProb Method)")
+        print("="*60)
+        
+        # Load merged ensemble weights (maxprob method)
+        # Structure: final_train_test/ensemble_weights_merged_maxprob/cv/
+        weights_dir_merged = os.path.join(str(args.weights_dir), "ensemble_weights_merged_maxprob")
+        print(f"\nLoading merged ensemble weights (maxprob) from: {weights_dir_merged}")
+        ensemble_weights_merged = load_ensemble_weights(weights_dir_merged)
+        
+        # Load merged cutoffs (maxprob method)
+        # Structure: final_train_test/cutoffs_merged_maxprob/train_test_cutoffs_merged_maxprob.csv
+        cutoffs_file_merged = os.path.join(str(args.cutoffs_file), "cutoffs_merged_maxprob", "train_test_cutoffs_merged_maxprob.csv")
+        print(f"\nLoading merged cutoffs (maxprob) from: {cutoffs_file_merged}")
+        cutoffs_merged = load_cutoffs(cutoffs_file_merged)
+        
+        # Run predictions
+        predictions_merged, prob_matrices_merged = run_predictions(
+            X, sample_names, models, ensemble_weights_merged, cutoffs_merged, merge_classes=True
         )
-    
-    # Apply cutoffs to predictions
-    predictions = apply_cutoffs(predictions, cutoffs)
+        
+        # Save merged predictions
+        save_predictions(predictions_merged, prob_matrices_merged, output_dir, input_filename, merge_suffix="_merged_maxprob")
 
-    # Save predictions and probability matrices with input filename prefix
-    save_predictions(predictions, prob_matrices, output_dir, input_filename)
-
-    print("\nPrediction pipeline completed successfully!")
+    print("\n" + "="*60)
+    print("Prediction pipeline completed successfully!")
+    print("="*60)
 
 
 if __name__ == "__main__":

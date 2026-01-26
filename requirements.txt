@@ -5,6 +5,8 @@
 
 keras
 tensorflow
+tensorflow-macOS
+tensorflow-metal
 pandas
 polars
 pyarrow
