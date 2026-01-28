@@ -14,25 +14,28 @@ output:
 ```{r}
 setwd("~/leukem_ai/R")
 #source("inner_cv_analysis.R")
+readRDS("../data/out/inner_cv/inner_cv_results_26jan2025_unmerged_maxprob.rds")[["final_results"]]
+readRDS("../data/out/inner_cv/inner_cv_results_26jan2025_mds_only_maxprob.rds")[["final_results"]]
+readRDS("../data/out/inner_cv/inner_cv_results_26jan2025_merged_maxprob.rds")[["final_results"]]
 ```
 
 ```{r}
 #source("outer_cv_analysis.R")
-outer_merged <- readRDS("../data/out/outer_cv/outer_cv_results_5jan2025_merged.rds")
-outer_merged[["performance_summaries"]]
-outer_merged <- readRDS("../data/out/outer_cv/outer_cv_results_5jan2025_merged_maxprob.rds")
-outer_merged[["performance_summaries"]]
+#outer_cv_results_unmerged[["performance_summaries"]]
+outer_cv_results_merged[["performance_summaries"]]
+#outer_cv_results_mds_only[["performance_summaries"]]
 ```
+
 ```{r}
-outer_merged <- readRDS("../data/out/outer_cv/outer_cv_results_5jan2025_mds_only.rds")
-outer_merged[["performance_summaries"]]
+#outer_merged <- readRDS("../data/out/outer_cv/outer_cv_results_5jan2025_mds_only.rds")
+#outer_merged[["performance_summaries"]]
 outer_merged <- readRDS("../data/out/outer_cv/outer_cv_results_5jan2025_mds_only_maxprob.rds")
-outer_merged[["performance_summaries"]]
+outer_merged <- outer_cv_results_merged
 ```
 
 
 ```{r}
-outer_unmerged <- readRDS("../data/out/outer_cv/outer_cv_results_5jan2025_unmerged.rds")
+outer_unmerged <- readRDS("../data/out/outer_cv/outer_cv_results_26jan2025_unmerged_maxprob.rds")
 outer_unmerged[["performance_summaries"]]
 ```
 
