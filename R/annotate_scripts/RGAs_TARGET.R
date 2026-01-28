@@ -1,7 +1,29 @@
+library(readxl)
 TARGET_meta <- read.csv("/Users/jsevere2/Library/CloudStorage/OneDrive-UMCUtrecht/AML/data/TARGET/meta_TARGET_AML.csv")
 
 library(dplyr)
 library(purrr)
+#https://www.nature.com/articles/s41588-023-01640-3#MOESM4 ???!!!
+AAML1031_extra <- read_excel("/Users/jsevere2/Library/CloudStorage/OneDrive-UMCUtrecht/AML/data/TARGET_Newmaybe/41588_2023_1640_MOESM4_ESM(1).xlsx", sheet = 22, skip = 1)
+AAML1031_extra <- AAML1031_extra %>%
+  mutate(
+    KMT2A_fusions = ifelse(
+      `molecular category` == "KMT2Ar",
+      paste0("KMT2A::", `Subgroup_fusion (KMT2A, NUP98)`),
+      NA_character_
+    ),
+    NUP98_fusions = ifelse(
+      `molecular category` == "NUP98r",
+      paste0("NUP98::", `Subgroup_fusion (KMT2A, NUP98)`),
+      NA_character_
+    )
+  )
+AAML1031_extra <- AAML1031_extra[match(TARGET_meta$TARGET.USI, AAML1031_extra$TARGET.USI),]
+
+## https://onlinelibrary.wiley.com/doi/10.1002/pbc.30251
+pbc.30251 <- read_excel("/Users/jsevere2/Library/CloudStorage/OneDrive-UMCUtrecht/AML/data/TARGET_Newmaybe/pbc30251-sup-0003-tables1.xlsx")
+pbc.30251 <- pbc.30251[!apply(pbc.30251, 1, function(x) all(is.na(x))),]
+pbc.30251 <- pbc.30251[match(TARGET_meta$TARGET.USI, paste0("TARGET-20-",pbc.30251$`Unique Sample Identifier`)),]
 
 base_dir <- "/Users/jsevere2/Library/CloudStorage/OneDrive-UMCUtrecht/AML/data/TARGET_Newmaybe/mafs/gdc_download_20250210_103453.649248/"
 
@@ -34,7 +56,7 @@ combined_maf$TARGET.USI <- sub("^((?:[^-]+-){2}[^-]+).*", "\\1", combined_maf$Tu
 source("/Users/jsevere2/leukem_ai/R/regex_abnormalities_new.R")
 
 # New data from publication
-library(readxl)
+
 mcm <- read_excel("/Users/jsevere2/Library/CloudStorage/OneDrive-UMCUtrecht/AML/data/TARGET_Newmaybe/mmc2.xlsx", sheet = 2)
 patients <- TARGET_meta[,c("TARGET.USI", "Protocol")]
 patients$`Patient identifier` <- gsub("TARGET-..-","", patients$TARGET.USI)
@@ -60,7 +82,13 @@ fusion_vectors <- list(
   Primary_aberrations = mcm$`Primary aberrations`,
   Secondary_aberrations = mcm$`Secondary aberrations`,
   gene_fusion_mcm2 = mcm2$gene_fusion,
-  gene_fusion_mcm3 = mcm3$gene_fusion
+  gene_fusion_mcm3 = mcm3$gene_fusion,
+  AAML1031_extra$`molecular category`,
+  AAML1031_extra$KMT2A_fusions,
+  AAML1031_extra$NUP98_fusions,
+  pbc.30251$`2016 WHO Classification`,
+  pbc.30251$`Classification for statistics`,
+  pbc.30251$`Primary Fusion`
 )
 karyotype_vectors <- list(
   ISCN = TARGET_meta$ISCN
@@ -176,6 +204,7 @@ results[["mutated_NPM1"]] <- pmax(results[["mutated_NPM1"]],
 
 results[["mutated_NPM1"]][mcm$`Secondary aberrations` == "NPM1 mutation"] <- 1
 results[["mutated_NPM1"]][mcm3$NPM1 == 1] <- 1
+results[["mutated_NPM1"]][AAML1031_extra$`molecular category` == "NPM1"] <- 1
 
 # Process CEBPA mutations: only in-frame mutations affecting bZIP region (>=282)
 mutation_calls_CEBPA <- combined_maf %>%
@@ -189,6 +218,8 @@ results[["in_frame_bZIP_CEBPA"]] <- pmax(results[["in_frame_bZIP_CEBPA"]],
 table(results[["in_frame_bZIP_CEBPA"]])
 results[["in_frame_bZIP_CEBPA"]][mcm$`Primary aberrations` == "CEBPA mutation"] <- 1
 results[["in_frame_bZIP_CEBPA"]][mcm3$CEBPA_bZIP_in_frame_indel == 1] <- 1
+results[["in_frame_bZIP_CEBPA"]][AAML1031_extra$`molecular category` == "CEBPA"] <- 1
+
 table(results[["in_frame_bZIP_CEBPA"]])
 
 mutation_map <- c(
@@ -210,7 +241,42 @@ for (res_col in names(mutation_map)) {
   results[[res_col]][mcm3[[source_col]] == 1] <- 1
   results[[res_col]][mcm3[[source_col]] == 0] <- 0
 }
-table(results[["mutated_TP53"]])
-table(results$`t(9;11)/MLLT3::KMT2A`)
+
+# Mapping additional columns from TARGET_meta to results
+column_mapping <- list(
+  "NPM.mutation"       = "mutated_NPM1",
+  "CEBPA.mutation"     = "in_frame_bZIP_CEBPA",
+  "t.6.9."            = "t(6;9)/DEK::NUP214",
+  "t.8.21."           = "t(8;21)/RUNX1::RUNX1T1",
+  "t.3.5..q25.q34."    = "t(3;5)/NPM1::MLF1",
+  # "t.6.11..q27.q23."   = "t(6;11)/AFDN::KMT2A",
+  # "t.9.11..p22.q23."   = "t(9;11)/MLLT3::KMT2A",
+  # "t.10.11..p11.2.q23."= "t(10;11)/MLLT10::KMT2A",
+  # "t.11.19..q23.p13.1."= "t(11;19)(q23;p13.1)/KMT2A::ELL",
+  "inv.16."           = "inv(16)/t(16;16)/CBFB::MYH11",
+  "del5q"             = "del(5q)",
+  "del7q"             = "del(7q)",
+  "del9q"             = "del(9q)",
+  "monosomy.5"        = "monosomy_5",
+  "monosomy.7"        = "monosomy_7",
+  "trisomy.8"         = "trisomy_8",
+  "trisomy.21"        = "trisomy_21"
+)
+
+#Loop through the mapping and update the results.
+#We treat NA as 0 so that if either the regex (old result) or the mapped value equals 1,
+#the final value will be 1.
+for (col in names(column_mapping)) {
+  harmonized_name <- column_mapping[[col]]
+
+  if (col %in% names(TARGET_meta)) {
+    results[[harmonized_name]][TARGET_meta[[col]] == "Yes"] <- 1
+  } else {
+    warning(paste("Column", col, "is not in the TARGET_meta dataset."))
+  }
+}
+
+sum(results[,unlist(column_mapping)],na.rm = TRUE)
+table(results$`t(16;21)/RUNX1::CBFA2T2`)
 sum(results[,grepl("MECOM", colnames(results))], na.rm = TRUE)
 write.csv(results,"/Users/jsevere2/Library/CloudStorage/OneDrive-UMCUtrecht/AML/data/TARGET_Newmaybe/RGAs_TARGET_new.csv")

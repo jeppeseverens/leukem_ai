@@ -32,17 +32,17 @@ run_outer_cv() {
 
 # SVM experiments
 # echo "Running SVM outer CV experiments..."
-run_outer_cv "SVM" "OvR" "CV" "data/out/inner_cv/inner_cv_best_params/SVM_30dec25/SVM_best_param_cv.csv"
-run_outer_cv "SVM" "OvR" "loso" "data/out/inner_cv/inner_cv_best_params/SVM_30dec25/SVM_best_param_loso.csv"
+#run_outer_cv "SVM" "OvR" "CV" "data/out/inner_cv/inner_cv_best_params/SVM_26jan26/SVM_best_param_cv.csv"
+#run_outer_cv "SVM" "OvR" "loso" "data/out/inner_cv/inner_cv_best_params/SVM_26jan26/SVM_best_param_loso.csv"
 
 # # XGBOOST experiments
 # echo "Running XGBOOST outer CV experiments..."
-run_outer_cv "XGBOOST" "OvR" "CV" "data/out/inner_cv/inner_cv_best_params/XGBOOST_30dec25/XGBOOST_best_param_cv.csv"
-run_outer_cv "XGBOOST" "OvR" "loso" "data/out/inner_cv/inner_cv_best_params/XGBOOST_30dec25/XGBOOST_best_param_loso.csv"
+#run_outer_cv "XGBOOST" "OvR" "CV" "data/out/inner_cv/inner_cv_best_params/XGBOOST_26jan26/XGBOOST_best_param_cv.csv"
+#run_outer_cv "XGBOOST" "OvR" "loso" "data/out/inner_cv/inner_cv_best_params/XGBOOST_26jan26/XGBOOST_best_param_loso.csv"
 
 echo "Running NN outer CV experiments..."
-run_outer_cv "NN" "standard" "CV" "data/out/inner_cv/inner_cv_best_params/NN_30dec25/NEURAL_NET_best_param_cv.csv"
-run_outer_cv "NN" "standard" "loso" "data/out/inner_cv/inner_cv_best_params/NN_30dec25/NEURAL_NET_best_param_loso.csv"
+run_outer_cv "NN" "standard" "CV" "data/out/inner_cv/inner_cv_best_params/NN_26jan26/NEURAL_NET_best_param_cv.csv"
+run_outer_cv "NN" "standard" "loso" "data/out/inner_cv/inner_cv_best_params/NN_26jan26/NEURAL_NET_best_param_loso.csv"
 
 echo "All outer CV experiments completed!"
 echo "=================================="

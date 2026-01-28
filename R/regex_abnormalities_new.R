@@ -92,7 +92,16 @@ abnormalities_fusion <- list(
   "t(7;12)/ETV6::MNX1" = "(?:ETV6\\s*[-:_]{1,2}\\s*MNX1)|(?:MNX1\\s*[-:_]{1,2}\\s*ETV6)",
   "t(16;21)/FUS::ERG" = "(?:FUS\\s*[-:_]{1,2}\\s*ERG)|(?:ERG\\s*[-:_]{1,2}\\s*FUS)",
   "t(16;21)/RUNX1::CBFA2T3" = "(?:RUNX1\\s*[-:_]{1,2}\\s*CBFA2T3)|(?:CBFA2T3\\s*[-:_]{1,2}\\s*RUNX1)",
+  "t(20;21)/RUNX1::CBFA2T2" = "(?:RUNX1\\s*[-:_]{1,2}\\s*CBFA2T2)|(?:CBFA2T2\\s*[-:_]{1,2}\\s*RUNX1)",
   "inv(16)/CBFA2T3::GLIS2" = "(?:CBFA2T3\\s*[-:_]{1,2}\\s*GLIS2)|(?:GLIS2\\s*[-:_]{1,2}\\s*CBFA2T3)",
+  "MYB::GATA1" = paste0(
+    "MYB\\s*", FUSION_SEP, "\\s*GATA1",
+    "|GATA1\\s*", FUSION_SEP, "\\s*MYB"
+  ),
+  "CBFA2T3::GLIS3" = paste0(
+    "CBFA2T3\\s*", FUSION_SEP, "\\s*GLIS3",
+    "|GLIS3\\s*", FUSION_SEP, "\\s*CBFA2T3"
+  ),
   "ZEB2::BCL11B" = "(?:ZEB2\\s*[-:_]{1,2}\\s*BCL11B)|(?:BCL11B\\s*[-:_]{1,2}\\s*ZEB2)"
 )
 
@@ -218,12 +227,18 @@ abnormalities_karyotype <- list(
   # ===== Other rare fusions =====
   # MNX1 at 7q36, ETV6 at 12p13
   "t(7;12)/ETV6::MNX1" = "t\\(7[;:]12\\)\\(q36(?:\\.\\d+)?[;:]p13(?:\\.\\d+)?\\)|t\\(12[;:]7\\)\\(p13(?:\\.\\d+)?[;:]q36(?:\\.\\d+)?\\)",
+  # MYB at 6q23, GATA1 at Xp11
+  "t(X;6)/MYB::GATA1" = "t\\(X[;:]6\\)\\(p11(?:\\.\\d+)?[;:]q23(?:\\.\\d+)?\\)|t\\(6[;:]X\\)\\(q23(?:\\.\\d+)?[;:]p11(?:\\.\\d+)?\\)",
   # FUS at 16p11, ERG at 21q22
   "t(16;21)/FUS::ERG" = "t\\(16[;:]21\\)\\(p11(?:\\.\\d+)?[;:]q22(?:\\.\\d+)?\\)|t\\(21[;:]16\\)\\(q22(?:\\.\\d+)?[;:]p11(?:\\.\\d+)?\\)",
   # RUNX1 at 21q22, CBFA2T3 at 16q24
   "t(16;21)/RUNX1::CBFA2T3" = "t\\(16[;:]21\\)\\(q24(?:\\.\\d+)?[;:]q22(?:\\.\\d+)?\\)|t\\(21[;:]16\\)\\(q22(?:\\.\\d+)?[;:]q24(?:\\.\\d+)?\\)",
+  # RUNX1 at 21q22, CBFA2T2 at 20q11
+  "t(20;21)/RUNX1::CBFA2T2" = "t\\(20[;:]21\\)\\(q11(?:\\.\\d+)?[;:]q22(?:\\.\\d+)?\\)|t\\(21[;:]20\\)\\(q22(?:\\.\\d+)?[;:]q11(?:\\.\\d+)?\\)",
   # CBFA2T3 at 16q24, GLIS2 at 16p13
   "inv(16)/CBFA2T3::GLIS2" = "inv\\(16\\)\\(p13(?:\\.\\d+)?q24(?:\\.\\d+)?\\)",
+  # CBFA2T3 at 16q24, GLIS3 at 9p24
+  "t(9;16)/CBFA2T3::GLIS3" = "t\\(9[;:]16\\)\\(p24(?:\\.\\d+)?[;:]q24(?:\\.\\d+)?\\)|t\\(16[;:]9\\)\\(q24(?:\\.\\d+)?[;:]p24(?:\\.\\d+)?\\)",
   
   # ===== Cytogenetic abnormalities (karyotype-only) =====
   "del(5q)" = "del\\(5\\)\\(q\\d+.*?\\)",
