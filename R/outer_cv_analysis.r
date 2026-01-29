@@ -16,22 +16,22 @@ OUTER_MODEL_CONFIGS <- list(
   svm = list(
     classification_type = "OvR",
     file_paths = list(
-      cv = "../data/out/outer_cv/SVM_n10/SVM_outer_cv_CV_OvR_20260127_1420.csv",
-      loso = "../data/out/outer_cv/SVM_n10/SVM_outer_cv_loso_OvR_20260127_1424.csv"
+      cv = "../data/out/outer_cv/SVM_n10/SVM_outer_cv_CV_OvR_20260129_0923.csv",
+      loso = "../data/out/outer_cv/SVM_n10/SVM_outer_cv_loso_OvR_20260129_0926.csv"
     )
   ),
   xgboost = list(
     classification_type = "OvR",
     file_paths = list(
-      cv = "../data/out/outer_cv/XGBOOST_n10/XGBOOST_outer_cv_CV_OvR_20260127_1428.csv",
-      loso = "../data/out/outer_cv/XGBOOST_n10/XGBOOST_outer_cv_loso_OvR_20260127_1434.csv"
+      cv = "../data/out/outer_cv/XGBOOST_n10/XGBOOST_outer_cv_CV_OvR_20260129_0929.csv",
+      loso = "../data/out/outer_cv/XGBOOST_n10/XGBOOST_outer_cv_loso_OvR_20260129_0934.csv"
     )
   ),
   neural_net = list(
     classification_type = "standard",
     file_paths = list(
-      cv = "../data/out/outer_cv/NN_n10/NN_outer_cv_CV_standard_20260127_1738.csv",
-      loso = "../data/out/outer_cv/NN_n10/NN_outer_cv_loso_standard_20260127_1814.csv"
+      cv = "../data/out/outer_cv/NN_n10/NN_outer_cv_CV_standard_20260129_0840.csv",
+      loso = "../data/out/outer_cv/NN_n10/NN_outer_cv_loso_standard_20260129_0939.csv"
     )
   )
 )
@@ -1438,16 +1438,12 @@ main_outer_cv <- function(merge_classes = FALSE, merge_mds_only = FALSE) {
   outer_cv_results$merge_classes <- merge_classes  # Store merge status in results
   outer_cv_results$merge_mds_only <- merge_mds_only  # Store merge_mds_only status in results
 
-  saveRDS(outer_cv_results, paste0("../data/out/outer_cv/outer_cv_results_26jan2025", merge_suffix, ".rds"))
+  saveRDS(outer_cv_results, paste0("../data/out/outer_cv/outer_cv_results_28jan2025", merge_suffix, ".rds"))
 
 
   return(outer_cv_results)
 }
 
 outer_cv_results_unmerged <- main_outer_cv(merge_classes = FALSE, merge_mds_only = FALSE)
-  # Run merged and MDS-only merged versions (maxprob method)
-  cat("=== Running Outer CV Analysis (Merged - MaxProb Method) ===\n")
-  outer_cv_results_merged <- main_outer_cv(merge_classes = TRUE, merge_mds_only = FALSE)
-
-  cat("=== Running Outer CV Analysis (MDS Only Merged - MaxProb Method) ===\n")
-  outer_cv_results_mds_only <- main_outer_cv(merge_classes = TRUE, merge_mds_only = TRUE)
+outer_cv_results_merged <- main_outer_cv(merge_classes = TRUE, merge_mds_only = FALSE)
+outer_cv_results_mds_only <- main_outer_cv(merge_classes = TRUE, merge_mds_only = TRUE)
