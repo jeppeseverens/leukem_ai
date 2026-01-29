@@ -1336,7 +1336,7 @@ main_inner_cv <- function(merge_classes = FALSE, merge_mds_only = FALSE){
   inner_cv_results$merge_classes <- merge_classes  # Store merge status in results
   inner_cv_results$merge_mds_only <- merge_mds_only  # Store merge_mds_only status in results
   print(inner_cv_results$final_results)
-  saveRDS(inner_cv_results, paste0("../data/out/inner_cv/inner_cv_results_26jan2025", merge_suffix, ".rds"))
+  saveRDS(inner_cv_results, paste0("../data/out/inner_cv/inner_cv_results_28jan2025", merge_suffix, ".rds"))
 
   # Save filtering statistics to CSV for easy inspection
   if (length(filtering_statistics) > 0) {
@@ -1357,10 +1357,10 @@ main_inner_cv <- function(merge_classes = FALSE, merge_mds_only = FALSE){
 
 # Run merged and MDS-only merged versions (maxprob method)
 cat("=== Running Inner CV Analysis (Merged - MaxProb Method) ===\n")
-inner_cv_results_merged <- main_inner_cv(merge_classes = FALSE, merge_mds_only = FALSE)
+inner_cv_results_unmerged <- main_inner_cv(merge_classes = FALSE, merge_mds_only = FALSE)
 
 cat("=== Running Inner CV Analysis (MDS Only Merged - MaxProb Method) ===\n")
 inner_cv_results_mds_only <- main_inner_cv(merge_classes = TRUE, merge_mds_only = TRUE)
 
 cat("=== Running Inner CV Analysis (MDS Only Merged - MaxProb Method) ===\n")
-inner_cv_results_mds_only <- main_inner_cv(merge_classes = TRUE, merge_mds_only = FALSE)
+inner_cv_results_merged <- main_inner_cv(merge_classes = TRUE, merge_mds_only = FALSE)
