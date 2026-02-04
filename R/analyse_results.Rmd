@@ -12,22 +12,26 @@ output:
 ## -- Load Analyses
 
 ```{r}
-# setwd("~/leukem_ai/R")
-# source("inner_cv_analysis.R")
+#setwd("~/leukem_ai/R")
+#source("inner_cv_analysis.R")
+
+inner_cv_results_unmerged$final_results
+inner_cv_results_merged$final_results
+inner_cv_results_mds_only$final_results
 ```
 
 
 
 ```{r}
-#source("outer_cv_analysis.R")
-# outer_cv_results_unmerged[["performance_summaries"]]
-# outer_cv_results_merged[["performance_summaries"]]
-# outer_cv_results_mds_only[["performance_summaries"]]
+source("outer_cv_analysis.R")
+outer_cv_results_unmerged[["performance_summaries"]]
+outer_cv_results_merged[["performance_summaries"]]
+outer_cv_results_mds_only[["performance_summaries"]]
 ```
 
 ```{r}
-outer_unmerged <-  readRDS("../data/out/outer_cv/outer_cv_results_28jan2025_unmerged_maxprob.rds")
-outer_merged <- readRDS("../data/out/outer_cv/outer_cv_results_28jan2025_merged_maxprob.rds")
+outer_unmerged <-  readRDS("../data/out/outer_cv/outer_cv_results_28jan2025_nomdspaed_unmerged_maxprob.rds")
+outer_merged <- readRDS("../data/out/outer_cv/outer_cv_results_28jan2025_nomdspaed_merged_maxprob.rds")
 ```
 
 
@@ -73,7 +77,7 @@ DATA_FILTERS <- list(
 label_mapping <- read.csv("../data/label_mapping_all.csv")
 
 # Load leukemia subtype data
-leukemia_subtypes <- read.csv("../data/rgas_26jan26.csv")$ICC_Subtype
+leukemia_subtypes <- read.csv("../data/rgas_28jan26.csv")$ICC_Subtype
 
 # Load study metadata
 meta <- read.csv("../data/meta_20aug25.csv")
@@ -187,7 +191,7 @@ rare_tx_subtypes <- c(
   "KAT6A::CREBBP",         "KAT6A..CREBBP",
   "ETV6::MNX1",            "ETV6..MNX1",
   "FUS::ERG", "RBM15::MRTF1", "NUP98::NSD1",
-  "NUP98, other partners", "NUP98..other.partners"
+  "NUP98, other partners", "NUP98..other.partners", "PICALM::MLLT10", "PICALM..MLLT10"
 )
 
 # Map these to a single merged group
@@ -870,6 +874,7 @@ order_AML <- c(
     "NPM1::MLF1",
     "KAT6A::CREBBP",
     "RBM15::MRTF1",
+    "NUP98::NSD1",                                 # NUP98::NSD1
     "NUP98::KDM5A",
     "NUP98, other partners",
     "ETV6::MNX1",
@@ -877,13 +882,13 @@ order_AML <- c(
     "FUS::ERG",
     "RUNX1::CBFA2T3",
     "CBFA2T3::GLIS2",
-    "NUP98::NSD1",                                 # NUP98::NSD1
     "Mutated NPM1",                                # AML with mutated NPM1
     "CEBPA bZIP in-frame",                         # AML with in-frame bZIP CEBPA
     "MDS-related",          # MDS-related
     "MDS-related, gene mutations",
-    "MDS-related, cytogenetic abnormalities",
-    "MDS-related, TP53 mutated"
+        "MDS-related, TP53 mutated",
+    "MDS-related, cytogenetic abnormalities"
+
   )
 # Global_Optimized is best
 fix_names <- function(x){
@@ -999,8 +1004,8 @@ per_class <- apply(per_class, 2, function(x) round(x, 2))
   rownames(total_conf) <- fix_names(rownames(total_conf))
   colnames(total_conf) <- fix_names(colnames(total_conf))
   total_conf <- total_conf[rownames(per_class), rownames(per_class)]
-
-  total_conf_norm <- apply(total_conf, 1, normalise)
+  
+  total_conf_norm <- apply(total_conf, 2, normalise)
 
   total_conf_palette_fun <- circlize::colorRamp2(c(0, 1), c("white", "purple3"))
   ht_table <- Heatmap(
@@ -2820,9 +2825,9 @@ loso_truth_list <- list()
 loso_fold_list <- list()
 loso_indices_list <- list()
 
-for (fold in names(outer_merged$detailed_performance$loso$Global_Optimized)) {
+for (fold in names(outer_merged$detailed_performance$loso$svm)) {
   # Get sample indices for this fold
-  fold_prob_matrix <- outer_merged$ensemble_matrices$loso$global_ensemble[[fold]]
+  fold_prob_matrix <- outer_merged$outer_probability_matrices$svm$loso[[fold]]
   # Extract saved predictions and truth vectors
   predictions <- apply(fold_prob_matrix[,!colnames(fold_prob_matrix) %in% c("y", "outer_fold", "sample_indices")], 1, which.max)
   predictions <- colnames(fold_prob_matrix)[!colnames(fold_prob_matrix) %in% c("y", "outer_fold", "sample_indices")][predictions]
@@ -3982,7 +3987,7 @@ ggsave("../writing/figures_new/enrichment_vs_performance_gap.png", p_enrichment_
 
 ```{r}
 # Read global and OvR ensemble weights
-df_global <- read.csv("../data/out/inner_cv/ensemble_weights_merged/cv/global_ensemble_weights_used.csv")
+df_global <- read.csv("../data/out/inner_cv/ensemble_weights_mds_only_maxprob/cv/")
 
 # Select weight columns and fold info from global weights
 df_global_weights <- df_global %>%

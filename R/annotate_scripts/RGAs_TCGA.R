@@ -41,14 +41,14 @@ sample_has_any_fusion <- check_any_fusion_match(fusion_vectors)
 # Key: if a sample has ANY fusion match, we don't fall back to karyotype for any pattern
 for (abn in get_all_abnormality_names()) {
   matched <- match_abnormality_with_precedence(
-    abn, fusion_vectors, karyotype_vectors, 
+    abn, fusion_vectors, karyotype_vectors,
     diagnosis_vectors = fusion_vectors,
     sample_has_any_fusion = sample_has_any_fusion
   )
   # Check if all data is NA
   all_na <- is.na(TCGA_meta2$Cytogenetics) &
             is.na(TCGA_meta2$`Molecular Classification`) &
-            is.na(TCGA_meta2$`Other in -frame fusions`) & 
+            is.na(TCGA_meta2$`Other in -frame fusions`) &
             is.na(TCGA_meta2$`Inferred genomic rearrangement (from RNA-Seq fusion)`)
   results[[abn]] <- ifelse(all_na, NA, as.integer(matched))
 }
@@ -57,20 +57,20 @@ for (abn in get_all_abnormality_names()) {
 all_vectors <- c(fusion_vectors, karyotype_vectors)
 for (abn in names(abnormalities_perl)) {
   pattern <- abnormalities_perl[[abn]]
-  
+
   hits <- sapply(all_vectors, function(v) {
     grepl(pattern, v, ignore.case = TRUE, perl = TRUE)
   })
-  
+
   all_na <- is.na(TCGA_meta2$Cytogenetics) &
             is.na(TCGA_meta2$`Molecular Classification`) &
-            is.na(TCGA_meta2$`Other in -frame fusions`) & 
+            is.na(TCGA_meta2$`Other in -frame fusions`) &
             is.na(TCGA_meta2$`Inferred genomic rearrangement (from RNA-Seq fusion)`)
-  
+
   results[[abn]] <- ifelse(all_na, NA, as.integer(rowSums(hits, na.rm = TRUE) > 0))
 }
 
-mapping_NPM1 <- ifelse(grepl("NPMc Positive",TCGA_meta1$molecular_abnormality_results), 1, 
+mapping_NPM1 <- ifelse(grepl("NPMc Positive",TCGA_meta1$molecular_abnormality_results), 1,
                        ifelse(grepl("NPMc Negative",TCGA_meta1$molecular_abnormality_results), 0, NA))
 results$mutated_NPM1 <- mapping_NPM1
 
@@ -146,5 +146,9 @@ results$Case.ID <- TCGA_meta1$bcr_patient_barcode
 
 table(results$`t(9;11)/MLLT3::KMT2A`)
 sum(results[,grepl("MECOM", colnames(results))], na.rm = TRUE)
+
+# Only add to results if not all primary RGAS have no data. I dont want fallback only on karyotyping
+results$all_primary_data_na <-ifelse(Reduce(`&`, lapply(c(fusion_vectors), is.na)), 1, 0)
+
 
 write.csv(results,"/Users/jsevere2/Library/CloudStorage/OneDrive-UMCUtrecht/AML/data/TCGA/RGAs_TCGA.csv")

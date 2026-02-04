@@ -33,6 +33,6 @@ python python/run_final_selection_array.py \
     --k_folds 5 \
     --n_max_param 96 \
     --fold_type "CV" \
-    --run_name "final_cv_svm"
+    --run_name "final_cv_svm_28jan26"
 
 deactivate

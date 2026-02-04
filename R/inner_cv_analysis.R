@@ -1105,7 +1105,7 @@ main_inner_cv <- function(merge_classes = FALSE, merge_mds_only = FALSE){
   label_mapping <- read.csv("../data/label_mapping_all.csv")
 
   # Load leukemia subtype data
-  leukemia_subtypes <- read.csv("../data/rgas_26jan26.csv")$ICC_Subtype
+  leukemia_subtypes <- read.csv("../data/rgas_28jan26.csv")$ICC_Subtype
 
   # Load study metadata
   meta <- read.csv("../data/meta_20aug25.csv")
@@ -1133,26 +1133,26 @@ main_inner_cv <- function(merge_classes = FALSE, merge_mds_only = FALSE){
     svm = list(
       classification_type = "OvR",
       file_paths = list(
-        cv = "../data/out/inner_cv/SVM_array/cv_26jan26_all/",
-        loso = "../data/out/inner_cv/SVM_array/loso_26jan26_all/"
+        cv = "../data/out/inner_cv/SVM_array/cv_28jan26_all/",
+        loso = "../data/out/inner_cv/SVM_array/loso_28jan26_all/"
       ),
-      output_dir = "../data/out/inner_cv/inner_cv_best_params/SVM_26jan26"
+      output_dir = "../data/out/inner_cv/inner_cv_best_params/SVM_28jan26"
     ),
     xgboost = list(
       classification_type = "OvR",
       file_paths = list(
-        cv = "../data/out/inner_cv/XGBOOST_array/cv_26jan26_all/",
-        loso = "../data/out/inner_cv/XGBOOST_array/loso_26jan26_all/"
+        cv = "../data/out/inner_cv/XGBOOST_array/cv_28jan26_all/",
+        loso = "../data/out/inner_cv/XGBOOST_array/loso_28jan26_all/"
       ),
-      output_dir = "../data/out/inner_cv/inner_cv_best_params/XGBOOST_26jan26"
+      output_dir = "../data/out/inner_cv/inner_cv_best_params/XGBOOST_28jan26"
     ),
     neural_net = list(
       classification_type = "standard",
       file_paths = list(
-        cv = "../data/out/inner_cv/NN_array/cv_26jan26_all/",
-        loso = "../data/out/inner_cv/NN_array/loso_26jan26_all/"
+        cv = "../data/out/inner_cv/NN_array/cv_28jan26_all/",
+        loso = "../data/out/inner_cv/NN_array/loso_28jan26_all/"
       ),
-      output_dir = "../data/out/inner_cv/inner_cv_best_params/NN_26jan26"
+      output_dir = "../data/out/inner_cv/inner_cv_best_params/NN_28jan26"
     )
   )
 
@@ -1336,7 +1336,7 @@ main_inner_cv <- function(merge_classes = FALSE, merge_mds_only = FALSE){
   inner_cv_results$merge_classes <- merge_classes  # Store merge status in results
   inner_cv_results$merge_mds_only <- merge_mds_only  # Store merge_mds_only status in results
   print(inner_cv_results$final_results)
-  saveRDS(inner_cv_results, paste0("../data/out/inner_cv/inner_cv_results_28jan2025", merge_suffix, ".rds"))
+  saveRDS(inner_cv_results, paste0("../data/out/inner_cv/inner_cv_results_28jan2025_nopaedmds", merge_suffix, ".rds"))
 
   # Save filtering statistics to CSV for easy inspection
   if (length(filtering_statistics) > 0) {

@@ -83,17 +83,16 @@ fusion_vectors <- list(
   Secondary_aberrations = mcm$`Secondary aberrations`,
   gene_fusion_mcm2 = mcm2$gene_fusion,
   gene_fusion_mcm3 = mcm3$gene_fusion,
-  AAML1031_extra$`molecular category`,
-  AAML1031_extra$KMT2A_fusions,
-  AAML1031_extra$NUP98_fusions,
-  pbc.30251$`2016 WHO Classification`,
-  pbc.30251$`Classification for statistics`,
-  pbc.30251$`Primary Fusion`
+  AAML1031_1 = AAML1031_extra$`molecular category`,
+  AAML1031_2 = AAML1031_extra$KMT2A_fusions,
+  AAML1031_3 = AAML1031_extra$NUP98_fusions,
+  pbc1 = pbc.30251$`2016 WHO Classification`,
+  pbc2 = pbc.30251$`Classification for statistics`,
+  pbc3 = pbc.30251$`Primary Fusion`
 )
 karyotype_vectors <- list(
   ISCN = TARGET_meta$ISCN
 )
-
 # Initialize results
 results <- data.frame(Sample.ID = TARGET_meta$TARGET.USI)
 
@@ -276,7 +275,8 @@ for (col in names(column_mapping)) {
   }
 }
 
-sum(results[,unlist(column_mapping)],na.rm = TRUE)
-table(results$`t(16;21)/RUNX1::CBFA2T2`)
-sum(results[,grepl("MECOM", colnames(results))], na.rm = TRUE)
+
+# Only add to results if not all primary RGAS have no data. I dont want fallback only on karyotyping
+results$all_primary_data_na <-ifelse(Reduce(`&`, lapply(c(fusion_vectors), is.na)), 1, 0)
+
 write.csv(results,"/Users/jsevere2/Library/CloudStorage/OneDrive-UMCUtrecht/AML/data/TARGET_Newmaybe/RGAs_TARGET_new.csv")

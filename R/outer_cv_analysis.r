@@ -16,22 +16,22 @@ OUTER_MODEL_CONFIGS <- list(
   svm = list(
     classification_type = "OvR",
     file_paths = list(
-      cv = "../data/out/outer_cv/SVM_n10/SVM_outer_cv_CV_OvR_20260129_0923.csv",
-      loso = "../data/out/outer_cv/SVM_n10/SVM_outer_cv_loso_OvR_20260129_0926.csv"
+      cv = "../data/out/outer_cv/SVM_n10/SVM_outer_cv_CV_OvR_20260201_1125.csv",
+      loso = "../data/out/outer_cv/SVM_n10/SVM_outer_cv_loso_OvR_20260201_1128.csv"
     )
   ),
   xgboost = list(
     classification_type = "OvR",
     file_paths = list(
-      cv = "../data/out/outer_cv/XGBOOST_n10/XGBOOST_outer_cv_CV_OvR_20260129_0929.csv",
-      loso = "../data/out/outer_cv/XGBOOST_n10/XGBOOST_outer_cv_loso_OvR_20260129_0934.csv"
+      cv = "../data/out/outer_cv/XGBOOST_n10/XGBOOST_outer_cv_CV_OvR_20260201_1132.csv",
+      loso = "../data/out/outer_cv/XGBOOST_n10/XGBOOST_outer_cv_loso_OvR_20260201_1136.csv"
     )
   ),
   neural_net = list(
     classification_type = "standard",
     file_paths = list(
-      cv = "../data/out/outer_cv/NN_n10/NN_outer_cv_CV_standard_20260129_0840.csv",
-      loso = "../data/out/outer_cv/NN_n10/NN_outer_cv_loso_standard_20260129_0939.csv"
+      cv = "../data/out/outer_cv/NN_n10/NN_outer_cv_CV_standard_20260201_1141.csv",
+      loso = "../data/out/outer_cv/NN_n10/NN_outer_cv_loso_standard_20260201_1212.csv"
     )
   )
 )
@@ -52,7 +52,7 @@ DATA_FILTERS <- list(
 )
 # Base directory for ensemble weights (will be updated based on merge_classes parameter)
 # Using maxprob suffix to distinguish from summed method
-WEIGHTS_BASE_DIR_UNMERGED <- "../data/out/inner_cv/ensemble_weights_unmerged_maxprob"
+WEIGHTS_BASE_DIR_UNMERGED <- "../data/out/inner_cv/cutoffs_unmerged_maxprob"
 WEIGHTS_BASE_DIR_MERGED <- "../data/out/inner_cv/ensemble_weights_merged_maxprob"
 WEIGHTS_BASE_DIR_MDS_ONLY <- "../data/out/inner_cv/ensemble_weights_mds_only_maxprob"
 
@@ -1153,7 +1153,7 @@ main_outer_cv <- function(merge_classes = FALSE, merge_mds_only = FALSE) {
   }
 
   # Load leukemia subtype data
-  leukemia_subtypes <- safe_read_file("../data/rgas_26jan26.csv", function(f) read.csv(f)$ICC_Subtype)
+  leukemia_subtypes <- safe_read_file("../data/rgas_28jan26.csv", function(f) read.csv(f)$ICC_Subtype)
   if (is.null(leukemia_subtypes)) {
     stop("Failed to load leukemia subtype data")
   }
@@ -1438,7 +1438,7 @@ main_outer_cv <- function(merge_classes = FALSE, merge_mds_only = FALSE) {
   outer_cv_results$merge_classes <- merge_classes  # Store merge status in results
   outer_cv_results$merge_mds_only <- merge_mds_only  # Store merge_mds_only status in results
 
-  saveRDS(outer_cv_results, paste0("../data/out/outer_cv/outer_cv_results_28jan2025", merge_suffix, ".rds"))
+  saveRDS(outer_cv_results, paste0("../data/out/outer_cv/outer_cv_results_28jan2025_nomdspaed", merge_suffix, ".rds"))
 
 
   return(outer_cv_results)

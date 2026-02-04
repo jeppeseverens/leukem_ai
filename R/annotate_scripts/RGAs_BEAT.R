@@ -33,7 +33,7 @@ sample_has_any_fusion <- check_any_fusion_match(fusion_vectors)
 # Key: if a sample has ANY fusion match, we don't fall back to karyotype for any pattern
 for (abn in get_all_abnormality_names()) {
   matched <- match_abnormality_with_precedence(
-    abn, fusion_vectors, karyotype_vectors, 
+    abn, fusion_vectors, karyotype_vectors,
     diagnosis_vectors = fusion_vectors,
     sample_has_any_fusion = sample_has_any_fusion
   )
@@ -144,6 +144,13 @@ fusions$combined <- paste(
   sep = " "
 )
 results$Case.ID <- BEAT_meta$dbgap_subject_id
+
+
+# Only add to results if not all primary RGAS have no data. I dont want fallback only on karyotyping
+results$all_primary_data_na <-ifelse(Reduce(`&`, lapply(c(fusion_vectors), is.na)), 1, 0)
+
+
+
 write.csv(results,"/Users/jsevere2/Library/CloudStorage/OneDrive-UMCUtrecht/AML/data/BEAT/RGAs_BEAT.csv")
 
 table(results$`t(9;11)/MLLT3::KMT2A`)
