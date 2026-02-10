@@ -15,18 +15,18 @@ output:
 #setwd("~/leukem_ai/R")
 #source("inner_cv_analysis.R")
 
-inner_cv_results_unmerged$final_results
-inner_cv_results_merged$final_results
-inner_cv_results_mds_only$final_results
+# inner_cv_results_unmerged$final_results
+# inner_cv_results_merged$final_results
+# inner_cv_results_mds_only$final_results
 ```
 
 
 
 ```{r}
-source("outer_cv_analysis.R")
-outer_cv_results_unmerged[["performance_summaries"]]
-outer_cv_results_merged[["performance_summaries"]]
-outer_cv_results_mds_only[["performance_summaries"]]
+# source("outer_cv_analysis.R")
+# outer_cv_results_unmerged[["performance_summaries"]]
+# outer_cv_results_merged[["performance_summaries"]]
+# outer_cv_results_mds_only[["performance_summaries"]]
 ```
 
 ```{r}
@@ -108,6 +108,11 @@ dir.create("../writing/figures_new")
 ```
 
 # Training Cohort Tables
+```{r}
+length(unique(filtered_leukemia_subtypes))
+
+table(filtered_leukemia_subtypes, meta$Studies)
+```
 
 ## -- Supplementary Table 1: All Subtypes (Included and Excluded)
 
@@ -489,6 +494,118 @@ included_simple_perc$class <- gsub("</span>", "", included_simple_perc$class)
 included_simple_perc
 ```
 
+## -- patients and classes per age catagory
+```{r}
+# Convert age to years and create 1-year bins
+meta$age_years <- meta$age_days / 365.25
+max_age <- ceiling(max(meta$age_years, na.rm = TRUE))
+age_bins <- seq(0, max_age, by = 1)
+
+# Assign each patient to an age bin
+meta$age_bin <- cut(meta$age_years, breaks = age_bins, right = FALSE,
+                    labels = paste0(head(age_bins, -1), "-", tail(age_bins, -1)))
+
+# Calculate patients and unique classes per age bin
+age_summary <- meta %>%
+  filter(!is.na(age_bin)) %>%
+  group_by(age_bin) %>%
+  summarise(
+    n_patients = n(),
+    n_classes = n_distinct(classes),
+    .groups = "drop"
+  ) %>%
+  mutate(age_midpoint = as.numeric(gsub("-.*", "", as.character(age_bin))) + 0.5)
+
+# Simple histogram: patients per 1-year age bin
+p_patients <- ggplot(meta %>% filter(!is.na(age_years)), aes(x = age_years)) +
+  geom_histogram(breaks = age_bins, fill = "#7eb0d5", color = "white", alpha = 0.8) +
+  geom_vline(xintercept = 18, linetype = "dashed", color = "gray40") +
+  annotate("text", x = 18, y = Inf, label = "18y", vjust = 2, hjust = -0.2, 
+           size = 3, color = "gray40") +
+  theme_bw() +
+  labs(
+    title = "Patient Distribution by Age",
+    subtitle = "1-year bins",
+    x = "Age (years)",
+    y = "Number of Patients"
+  ) +
+  scale_x_continuous(breaks = seq(0, max(age_bins), by = 10)) +
+  theme(text = element_text(size = 11))
+
+print(p_patients)
+```
+
+```{r}
+# Combined plot: patients and unique classes per age bin
+# Reshape data for faceted plot
+age_summary_long <- age_summary %>%
+  tidyr::pivot_longer(
+    cols = c(n_patients, n_classes),
+    names_to = "metric",
+    values_to = "count"
+  ) %>%
+  mutate(metric = factor(metric, 
+                         levels = c("n_patients", "n_classes"),
+                         labels = c("Patients", "Unique Classes")))
+
+p_combined <- ggplot(age_summary_long, aes(x = age_midpoint, y = count, fill = metric)) +
+  geom_col(color = "white", width = 0.9) +
+  geom_vline(xintercept = 18, linetype = "dashed", color = "gray40") +
+  facet_wrap(~ metric, scales = "free_y", ncol = 2) +
+  scale_fill_manual(values = c("Patients" = "#7eb0d5", "Unique Classes" = "#fd7f6f")) +
+  theme_bw() +
+  labs(
+    title = "Patient and Class Distribution by Age",
+    subtitle = sprintf("Total: %d patients, %d unique classes (1-year bins)", 
+                       nrow(meta), n_distinct(meta$classes)),
+    x = "Age (years)",
+    y = "Count"
+  ) +
+  scale_x_continuous(breaks = seq(0, max(age_bins), by = 10)) +
+  theme(
+    text = element_text(size = 11),
+    legend.position = "none",
+    strip.background = element_rect(fill = "gray95"),
+    strip.text = element_text(face = "bold")
+  )
+
+print(p_combined)
+
+age_summary_long %>% filter(metric == "Unique Classes") %>% summarize(mean(as.numeric(count), na.rm = TRUE))
+```
+
+```{r fig.width=8, fig.height=5}
+# Alternative: overlaid bar chart with dual y-axis
+# Scale factor to align the two metrics visually
+scale_factor <- max(age_summary$n_patients) / max(age_summary$n_classes)
+
+p_dual <- ggplot(age_summary, aes(x = age_midpoint)) +
+  geom_col(aes(y = n_patients), fill = "#7eb0d5", alpha = 0.7, width = 0.9) +
+  geom_line(aes(y = n_classes * scale_factor), color = "#fd7f6f", linewidth = 1.2) +
+  geom_point(aes(y = n_classes * scale_factor), color = "#fd7f6f", size = 2.5) +
+  geom_vline(xintercept = 18, linetype = "dashed", color = "gray40") +
+  scale_y_continuous(
+    name = "Number of Patients",
+    sec.axis = sec_axis(~ . / scale_factor, name = "Unique Classes")
+  ) +
+  scale_x_continuous(breaks = seq(0, max(age_bins), by = 10)) +
+  theme_bw() +
+  labs(
+    title = "Patient Count and Class Diversity by Age",
+    subtitle = "Bars: patients | Line: unique classes (1-year bins)",
+    x = "Age (years)"
+  ) +
+  theme(
+    text = element_text(size = 11),
+    axis.title.y.left = element_text(color = "#7eb0d5"),
+    axis.title.y.right = element_text(color = "#fd7f6f"),
+    axis.text.y.right = element_text(color = "#fd7f6f")
+  )
+
+print(p_dual)
+```
+
+
 
 ##  --Performance Boxplots
 
@@ -800,7 +917,7 @@ performance_table_kable <- kable(
   ) %>%
   column_spec(1, bold = TRUE) %>%
   add_header_above(c(" " = 1, "Full" = 1, "Collapsed" = 1, "Full" = 1, "Collapsed" = 1, "Full" = 1, "Collapsed" = 1, "Full" = 1, "Collapsed" = 1)) %>%
-  add_header_above(c(" " = 1, "Kappa" = 2, "Accuracy" = 2, "Kappa" = 2, "Accuracy" = 2)) %>%
+  add_header_above(c(" " = 1, "Kappa (Mean ± SD)" = 2, "Accuracy (Mean ± SD)" = 2, "Kappa (Mean ± SD)" = 2, "Accuracy (Mean ± SD)" = 2)) %>%
   add_header_above(c(" " = 1, "Standard CV" = 4, "LOSO" = 4)) 
   
 
@@ -886,7 +1003,7 @@ order_AML <- c(
     "CEBPA bZIP in-frame",                         # AML with in-frame bZIP CEBPA
     "MDS-related",          # MDS-related
     "MDS-related, gene mutations",
-        "MDS-related, TP53 mutated",
+    "MDS-related, TP53 mutated",
     "MDS-related, cytogenetic abnormalities"
 
   )
@@ -913,7 +1030,7 @@ fix_names <- function(x){
 make_cm_fig <- function(res_obj, type, label_set) {
   # All per-class summaries for a given result object (full vs collapsed)
   per_class <- res_obj$per_class_summaries[[type]]
-  per_class <- per_class[per_class$Model == "OvR_Ensemble", ]
+  per_class <- per_class[per_class$Model == "svm", ]
   rownames(per_class) <- gsub("Class: ", "", per_class$Class)
 
   # Apply pretty names to per-class row labels
@@ -921,6 +1038,9 @@ make_cm_fig <- function(res_obj, type, label_set) {
 
   # Get subtypes that exist in both per_class and order_AML, preserving order_AML order
   available_subtypes <- intersect(order_AML, rownames(per_class))
+  # if (length(available_subtypes) < lenght(order_AML)){
+  #   print("SOmething wrong with n classes")
+  # }
   per_class <- per_class[available_subtypes, c(
     "Mean_F1",
     "Mean_Sensitivity",
@@ -929,9 +1049,10 @@ make_cm_fig <- function(res_obj, type, label_set) {
     "Mean_Recall"
   )]
   colnames(per_class) <- gsub("Mean_", "", colnames(per_class))
-
-  to_remove <- apply(per_class, 1, function(x) any(is.na(x)))
-  per_class <- per_class[!to_remove, ]
+  print(sum(per_class$F1 > 0.8, na.rm = T))
+  print(sum(per_class$F1 > 0.9, na.rm = T))
+  #to_remove <- apply(per_class, 1, function(x) any(is.na(x)))
+  #per_class <- per_class[!to_remove, ]
 per_class <- apply(per_class, 2, function(x) round(x, 2))
   normalise <- function(x) {
     (x - min(x)) / (max(x) - min(x))
@@ -979,7 +1100,7 @@ per_class <- apply(per_class, 2, function(x) round(x, 2))
   # Confusion matrices across folds for the same result object
   conf_table <- list()
   for (fold in names(res_obj$detailed_performance[[type]]$Global_Optimized)) {
-      conf_table[[fold]] <- res_obj$detailed_performance[[type]]$OvR_Ensemble[[fold]]$confusion_matrix$table
+      conf_table[[fold]] <- res_obj$detailed_performance[[type]]$svm[[fold]]$confusion_matrix$table
   }
 
   # Get all unique classes across all folds
@@ -1124,7 +1245,7 @@ library(gridExtra)
 # Panel A: F1 Scores Comparison (Full vs Merged)
 # Extract F1 scores for full and merged classes
 f1_full <- outer_unmerged$per_class_summaries$cv %>%
-  filter(Model == "OvR_Ensemble") %>%
+  filter(Model == "svm") %>%
   mutate(Class = gsub("Class: ", "", Class),
          Class = fix_names(Class),
          Type = "Full",
@@ -1132,7 +1253,7 @@ f1_full <- outer_unmerged$per_class_summaries$cv %>%
   select(Class, F1, Type)
 
 f1_merged <- outer_merged$per_class_summaries$cv %>%
-  filter(Model == "OvR_Ensemble") %>%
+  filter(Model == "svm") %>%
   mutate(Class = gsub("Class: ", "", Class),
          Class = fix_names(Class),
          Type = "Merged",
@@ -1140,8 +1261,7 @@ f1_merged <- outer_merged$per_class_summaries$cv %>%
   select(Class, F1, Type)
 
 # Combine and create comparison data
-f1_comparison <- bind_rows(f1_full, f1_merged) %>%
-  filter(!is.na(F1))
+f1_comparison <- bind_rows(f1_full, f1_merged) 
 
 # Define merge mapping for connecting lines
 merge_mapping <- list(
@@ -1153,8 +1273,8 @@ merge_mapping <- list(
 f1_comparison <- f1_comparison %>%
   mutate(
     Category = case_when(
-      Class %in% c("PML::RARA", "RUNX1::RUNX1T1", "CBFB::MYH11", "DEK::NUP214", "MECOM rearrangement") ~ "Major rearrangements",
-      Class %in% c("MLLT3::KMT2A", "Other KMT2A rearrangements", "KMT2A::ELL", "KMT2A::MLLT10", "KMT2A::MLLT4", "KMT2A::SEPT6") ~ "KMT2A rearrangements",
+      Class %in% c("PML::RARA", "RUNX1::RUNX1T1", "CBFB::MYH11", "DEK::NUP214", "MECOM rearrangement", "MLLT3::KMT2A") ~ "Major rearrangements",
+      Class %in% c("Other KMT2A rearrangements", "KMT2A::ELL", "KMT2A::MLLT10", "KMT2A::MLLT1","KMT2A::MLLT4", "KMT2A::SEPT6") ~ "Other KMT2A rearrangements",
       Class %in% c("MDS-related", "MDS-related, gene mutations", "MDS-related, cytogenetic abnormalities", "MDS-related, TP53 mutated", "MDS.r") ~ "MDS-related",
       Class %in% c("Mutated NPM1", "CEBPA bZIP in-frame") ~ "Major mutations",
       Class %in% c("PRDM16::RPN1", "NPM1::MLF1", "KAT6A::CREBBP", "RBM15::MRTF1", "ETV6::MNX1", "PICALM::MLLT10", "FUS::ERG", "RUNX1::CBFA2T3", "CBFA2T3::GLIS2", "NUP98::NSD1", "NUP98::KDM5A", "NUP98, other partners") ~ "Rare translocations",
@@ -1163,33 +1283,57 @@ f1_comparison <- f1_comparison %>%
   )
 
 # Order classes consistently
-all_classes_ordered <- c(
-  "PML::RARA", "RUNX1::RUNX1T1", "CBFB::MYH11",
-  "MLLT3::KMT2A", "Other KMT2A rearrangements", "KMT2A::ELL", "KMT2A::MLLT1", "KMT2A::MLLT10", "KMT2A::MLLT4", "KMT2A::SEPT6",
-  "DEK::NUP214", "MECOM rearrangement", "BCR::ABL1",
-  "PRDM16::RPN1", "NPM1::MLF1", "KAT6A::CREBBP", "RBM15::MRTF1", "NUP98::KDM5A", "NUP98, other partners",
-  "ETV6::MNX1", "PICALM::MLLT10", "FUS::ERG", "RUNX1::CBFA2T3", "CBFA2T3::GLIS2",
-  "NUP98::NSD1", "Mutated NPM1", "CEBPA bZIP in-frame",
-  "MDS-related", "MDS-related, gene mutations", "MDS-related, cytogenetic abnormalities", "MDS-related, TP53 mutated", "MDS.r"
-)
+all_classes_ordered <- order_AML 
 
 f1_comparison$Class <- factor(f1_comparison$Class, levels = rev(all_classes_ordered))
 
 # Create color palette for categories
 category_colors <- c(
   "Major rearrangements" = "#1f77b4",
-  "KMT2A" = "#ff7f0e",
+  "Other KMT2A rearrangements" = "#ff7f0e",
   "Major mutations" = "#2ca02c",
-  "MDS-related" = "#d62728",
-  "Rare translocations" = "#9467bd"
+  "Rare translocations" = "#9467bd",
+  "MDS-related" = "#d62728"
 )
 
 # Panel A: F1 Comparison Plot
+library(ggtext)
+
+# Get the actual y-axis levels as they appear on the plot (bottom to top)
+axis_class_levels <- levels(f1_comparison$Class)
+# Filter to only classes present in the data
+axis_class_levels <- axis_class_levels[axis_class_levels %in% unique(f1_comparison$Class)]
+
+# Create axis text colors based on category (MDS-related and KMT2A get their group colors)
+axis_text_colors <- sapply(axis_class_levels, function(cls) {
+  if (cls %in% c("MDS-related", "MDS-related, gene mutations", 
+                 "MDS-related, cytogenetic abnormalities", "MDS-related, TP53 mutated", "MDS.r")) {
+    "#d62728"  # MDS-related color
+  } else if (cls %in% c("Other KMT2A rearrangements", 
+                        "KMT2A::ELL", "KMT2A::MLLT1", "KMT2A::MLLT10", "KMT2A::MLLT4", 
+                        "KMT2A::SEPT6", "KMT2A::SEPT9")) {
+    "#ff7f0e"  # KMT2A color
+  } else {
+    "black"
+  }
+})
+
+# Create labels with bold formatting for merged classes
+axis_labels <- sapply(axis_class_levels, function(cls) {
+  if (cls %in% c("Other KMT2A rearrangements", "MDS-related")) {
+    paste0("**", cls, "**")
+  } else {
+    cls
+  }
+})
+names(axis_labels) <- axis_class_levels
+
 panel_a <- ggplot(f1_comparison, aes(x = F1, y = Class, color = Category, shape = Type)) +
   geom_point(size = 2.5, alpha = 0.8, position = position_dodge(width = 0.5)) +
-  geom_vline(xintercept = 0.9, linetype = "dashed", color = "gray50", alpha = 0.5) +
+  geom_vline(xintercept = 0.8, linetype = "dashed", color = "gray50", alpha = 0.5) +
   scale_color_manual(values = category_colors, name = "Category") +
-  scale_shape_manual(values = c("Full" = 16, "Merged" = 17), name = "Type") +
+  scale_shape_manual(values = c("Merged" = 17, "Full" = 16), name = "Type") +
+  scale_y_discrete(labels = axis_labels) +
   labs(
     x = "F1 Score",
     y = "",
@@ -1198,13 +1342,13 @@ panel_a <- ggplot(f1_comparison, aes(x = F1, y = Class, color = Category, shape 
   theme_bw() +
   theme(
     plot.title = element_text(face = "bold", size = 11),
-    axis.text.y = element_text(size = 8),
+    axis.text.y = element_markdown(size = 8, color = axis_text_colors),
     axis.text.x = element_text(size = 9),
     legend.position = "right",
     legend.text = element_text(size = 8),
     legend.title = element_text(size = 9)
   ) +
-  xlim(0.4, 1.0)
+  xlim(0, 1.0)
 panel_a
 ```
 ```{r}
@@ -1215,14 +1359,7 @@ get_error_heatmap <- function(res_obj, type, label_set, focus_groups) {
   conf_table <- list()
   
   # Determine model name - check what's available
-  available_models <- names(res_obj$detailed_performance[[type]])
-  model_name <- if ("OvR_Ensemble" %in% available_models) {
-    "OvR_Ensemble"
-  } else if ("Global_Optimized" %in% available_models) {
-    "Global_Optimized"
-  } else {
-    available_models[1]  # Use first available model
-  }
+  model_name <- "svm"
   
   if (is.null(model_name) || !model_name %in% names(res_obj$detailed_performance[[type]])) {
     return(NULL)
@@ -1266,16 +1403,8 @@ get_error_heatmap <- function(res_obj, type, label_set, focus_groups) {
   rownames(total_conf) <- fix_names(rownames(total_conf))
   colnames(total_conf) <- fix_names(colnames(total_conf))
   
-  # Debug: Print available classes and focus groups
-  cat(sprintf("\n%s - Available classes after fix_names:\n", label_set))
-  cat(paste(rownames(total_conf), collapse = ", "), "\n")
-  cat(sprintf("Focus groups:\n"))
-  cat(paste(focus_groups, collapse = ", "), "\n")
-  
   # Filter to focus groups - show square matrix of focus classes
   focus_classes <- intersect(focus_groups, rownames(total_conf))
-  cat(sprintf("Matched focus classes:\n"))
-  cat(paste(focus_classes, collapse = ", "), "\n\n")
   
   if (length(focus_classes) == 0) {
     return(NULL)
@@ -1284,17 +1413,10 @@ get_error_heatmap <- function(res_obj, type, label_set, focus_groups) {
   # Show square matrix: focus classes as both rows and columns
   # This shows errors between the focus classes themselves
   conf_focused <- total_conf[focus_classes, focus_classes, drop = FALSE]
-  
-  # Debug: Print the full confusion matrix and focused subset
-  cat(sprintf("%s - Full confusion matrix dimensions: %d x %d\n", label_set, nrow(total_conf), ncol(total_conf)))
-  cat(sprintf("%s - Focused confusion matrix (counts):\n", label_set))
-  print(conf_focused)
-  
+
   # Check for off-diagonal errors
   off_diag <- conf_focused
   diag(off_diag) <- 0
-  cat(sprintf("%s - Off-diagonal errors (sum): %d\n", label_set, sum(off_diag)))
-  cat("\n")
   
   # Calculate row percentages (error rates)
   row_sums <- rowSums(conf_focused)
@@ -1309,53 +1431,60 @@ get_error_heatmap <- function(res_obj, type, label_set, focus_groups) {
 }
 
 # Define focus groups for KMT2A and MDS
-# Full classes that will be shown
-kmt2a_groups_full <- c("KMT2A::ELL", "KMT2A::MLLT10", "KMT2A::MLLT4", "KMT2A::SEPT6", "MLLT3::KMT2A")
-kmt2a_groups_merged <- c("Other KMT2A rearrangements", "MLLT3::KMT2A")
+# Panel B: Full classes shown separately
+kmt2a_mllt3 <- "MLLT3::KMT2A"
+kmt2a_other_full <- c("KMT2A::ELL", "KMT2A::MLLT10", "KMT2A::MLLT1", "KMT2A::MLLT4", "KMT2A::SEPT6")
+mds_groups_full <- c("MDS-related, gene mutations", "MDS-related, TP53 mutated", "MDS-related, cytogenetic abnormalities")
 
-mds_groups_full <- c("MDS-related, gene mutations", "MDS-related, cytogenetic abnormalities", 
-                     "MDS-related, TP53 mutated", "MDS-related")
-mds_groups_merged <- c("MDS-related")
+# Panel C: KMT2A::MLLT3 separate, other KMT2A combined, MDS combined
+kmt2a_other_merged <- "Other KMT2A rearrangements"
+mds_merged <- "MDS-related"
 
-# Note: "MDS.r" maps to "MDS-related" so we use "MDS-related" in both
+# Combine groups for each panel
+focus_groups_panel_b <- c(kmt2a_mllt3, kmt2a_other_full, mds_groups_full)
+focus_groups_panel_c <- c(kmt2a_mllt3, kmt2a_other_merged, mds_merged)
 
-# Combine groups
-focus_groups_full <- c(kmt2a_groups_full, mds_groups_full)
-focus_groups_merged <- c(kmt2a_groups_merged, mds_groups_merged)
+# Get error heatmaps from appropriate result objects
+# Panel B uses full classes (outer_unmerged), Panel C uses collapsed classes (outer_merged)
+error_panel_b <- get_error_heatmap(outer_unmerged, "cv", "Full", focus_groups_panel_b)
+error_panel_c <- get_error_heatmap(outer_merged, "cv", "Collapsed", focus_groups_panel_c)
 
-# Get error heatmaps
-error_before <- get_error_heatmap(outer_unmerged, "cv", "Full", focus_groups_full)
-error_after <- get_error_heatmap(outer_merged, "cv", "Merged", focus_groups_merged)
-
-# Create heatmap function
-create_error_heatmap <- function(error_data, title, kmt2a_groups) {
+# Create heatmap function with group annotations
+create_error_heatmap <- function(error_data, title, other_kmt2a_classes, mds_classes) {
   if (is.null(error_data)) {
     return(NULL)
   }
   
   conf_percent <- error_data$percentages
   
-  # Create annotation for groups
-  # Check which groups are present
-  present_kmt2a <- intersect(rownames(conf_percent), kmt2a_groups)
-  group_anno <- ifelse(
-    rownames(conf_percent) %in% present_kmt2a,
-    "KMT2A",
-    "MDS-related"
-  )
+  # Create annotation for groups: MLLT3::KMT2A, Other KMT2A, MDS-related
+  group_anno <- sapply(rownames(conf_percent), function(name) {
+    if (name == "MLLT3::KMT2A") {
+      return("KMT2A::MLLT3")
+    } else if (name %in% other_kmt2a_classes) {
+      return("Other KMT2A")
+    } else if (name %in% mds_classes) {
+      return("MDS-related")
+    } else {
+      return("Other")
+    }
+  })
+  
+  # Set factor order for consistent display
+  group_anno <- factor(group_anno, levels = c("KMT2A::MLLT3", "Other KMT2A", "MDS-related"))
   
   ha <- rowAnnotation(
     Group = group_anno,
-    col = list(Group = c("KMT2A" = "#ff7f0e", "MDS-related" = "#d62728")),
+    col = list(Group = c("KMT2A::MLLT3" = "#1f77b4", "Other KMT2A" = "#ff7f0e", "MDS-related" = "#d62728")),
     annotation_legend_param = list(title = "Group", title_gp = gpar(fontsize = 9))
   )
   
-  # Color function for percentages (white to red for errors)
+  # Color function for percentages (white to purple for errors)
   col_fun <- colorRamp2(c(0, 100), c("white", "purple3"))
   
   ht <- Heatmap(
     conf_percent,
-    name = "Error %",
+    name = "n samples",
     col = col_fun,
     cluster_rows = FALSE,
     cluster_columns = FALSE,
@@ -1371,21 +1500,15 @@ create_error_heatmap <- function(error_data, title, kmt2a_groups) {
         # Diagonal: correct predictions
         grid.text(sprintf("%.0f", count), x, y, gp = gpar(fontsize = 8, fontface = "bold"))
       } else if (count > 0) {
-        # Off-diagonal: errors (show all non-zero errors, not just > 5%)
-        if (val > 1) {
-          # Show percentage if > 1%
-          grid.text(sprintf("%.0f\n(%.1f%%)", count, val), x, y, gp = gpar(fontsize = 7))
-        } else {
-          # Just show count for very small percentages
-          grid.text(sprintf("%.0f", count), x, y, gp = gpar(fontsize = 7))
-        }
+        # Off-diagonal: errors
+        grid.text(sprintf("%.0f", count), x, y, gp = gpar(fontsize = 7))
       }
     },
     column_title = title,
     column_title_gp = gpar(fontsize = 11, fontface = "bold"),
     left_annotation = ha,
     heatmap_legend_param = list(
-      title = "Error %",
+      title = "n samples",
       title_gp = gpar(fontsize = 9),
       labels_gp = gpar(fontsize = 8)
     )
@@ -1394,958 +1517,24 @@ create_error_heatmap <- function(error_data, title, kmt2a_groups) {
   return(ht)
 }
 
-# Create heatmaps
-ht_before <- create_error_heatmap(error_before, "B. Error Analysis: Full Classes", 
-                                   kmt2a_groups = kmt2a_groups_full)
-ht_after <- create_error_heatmap(error_after, "C. Error Analysis: Merged Classes",
-                                  kmt2a_groups = kmt2a_groups_merged)
-
-# Convert heatmaps to ggplot objects
-panel_b <- ggplotify::as.ggplot(function() {
-  draw(ht_before, padding = unit(c(5, 3, 5, 50), "mm"))
-})
-
-panel_c <- ggplotify::as.ggplot(function() {
-  draw(ht_after, padding = unit(c(5, 3, 5, 50), "mm"))
-})
-
-# Combine panels
-library(cowplot)
-three_panel_figure <- plot_grid(
-  panel_a,
-  panel_b,
-  panel_c,
-  ncol = 3,
-  align = "h",
-  rel_widths = c(1.2, 1, 1),
-  labels = NULL
+# Create Panel B: Full classes (MLLT3::KMT2A separate, other KMT2A separate, MDS separate)
+create_error_heatmap(
+  error_panel_b, 
+  "B. Error Analysis: Full Classes",
+  other_kmt2a_classes = kmt2a_other_full,
+  mds_classes = mds_groups_full
 )
 
-# Save figure
-ggsave(
-  "../writing/figures_new/f1_comparison_error_analysis.png",
-  three_panel_figure,
-  width = 450,
-  height = 200,
-  units = "mm",
-  dpi = 300
+# Create Panel C: Collapsed classes (MLLT3::KMT2A separate, Other KMT2A combined, MDS combined)
+create_error_heatmap(
+  error_panel_c, 
+  "C. Error Analysis: Collapsed Classes",
+  other_kmt2a_classes = kmt2a_other_merged,
+  mds_classes = mds_merged
 )
-
-print(three_panel_figure)
 ```
 
-## -- Error Reduction Analysis: Full vs Merged Classes
 
-```{r}
-# Function to extract full confusion matrix (not just focus groups)
-get_full_confusion_matrix <- function(res_obj, type) {
-  conf_table <- list()
-  
-  # Determine model name
-  available_models <- names(res_obj$detailed_performance[[type]])
-  model_name <- if ("OvR_Ensemble" %in% available_models) {
-    "OvR_Ensemble"
-  } else if ("Global_Optimized" %in% available_models) {
-    "Global_Optimized"
-  } else {
-    available_models[1]
-  }
-  
-  if (is.null(model_name) || !model_name %in% names(res_obj$detailed_performance[[type]])) {
-    return(NULL)
-  }
-  
-  for (fold in names(res_obj$detailed_performance[[type]][[model_name]])) {
-    cm_obj <- res_obj$detailed_performance[[type]][[model_name]][[fold]]$confusion_matrix
-    if (!is.null(cm_obj) && !is.null(cm_obj$table)) {
-      conf_table[[fold]] <- cm_obj$table
-    }
-  }
-  
-  if (length(conf_table) == 0) {
-    return(NULL)
-  }
-  
-  # Get all unique classes
-  all_classes <- unique(unlist(lapply(conf_table, function(x) c(rownames(x), colnames(x)))))
-  
-  if (length(all_classes) == 0) {
-    return(NULL)
-  }
-  
-  # Pad each confusion matrix
-  conf_table_padded <- lapply(conf_table, function(mat) {
-    padded_mat <- matrix(
-      0,
-      nrow = length(all_classes),
-      ncol = length(all_classes),
-      dimnames = list(all_classes, all_classes)
-    )
-    padded_mat[rownames(mat), colnames(mat)] <- mat
-    padded_mat
-  })
-  
-  # Sum across folds
-  total_conf <- Reduce("+", conf_table_padded)
-  total_conf <- t(total_conf)
-  
-  # Apply pretty names
-  rownames(total_conf) <- fix_names(rownames(total_conf))
-  colnames(total_conf) <- fix_names(colnames(total_conf))
-  
-  return(total_conf)
-}
-
-# Extract full confusion matrices
-conf_full <- get_full_confusion_matrix(outer_unmerged, "cv")
-conf_merged <- get_full_confusion_matrix(outer_merged, "cv")
-
-# Calculate error statistics
-calculate_error_stats <- function(conf_matrix, label) {
-  if (is.null(conf_matrix)) {
-    return(NULL)
-  }
-  
-  total_samples <- sum(conf_matrix)
-  correct_predictions <- sum(diag(conf_matrix))
-  total_errors <- total_samples - correct_predictions
-  error_rate <- (total_errors / total_samples) * 100
-  
-  # Off-diagonal errors
-  off_diag <- conf_matrix
-  diag(off_diag) <- 0
-  off_diag_errors <- sum(off_diag)
-  
-  # Number of classes
-  n_classes <- nrow(conf_matrix)
-  
-  # Average errors per class
-  avg_errors_per_class <- total_errors / n_classes
-  
-  # Classes with high error rates (>10%)
-  class_error_rates <- (rowSums(off_diag) / rowSums(conf_matrix)) * 100
-  high_error_classes <- sum(class_error_rates > 10)
-  
-  # Largest error pairs
-  off_diag_df <- as.data.frame(as.table(off_diag))
-  off_diag_df <- off_diag_df[off_diag_df$Freq > 0, ]
-  off_diag_df <- off_diag_df[order(-off_diag_df$Freq), ]
-  colnames(off_diag_df) <- c("True_Class", "Predicted_Class", "Count")
-  
-  return(list(
-    label = label,
-    total_samples = total_samples,
-    correct_predictions = correct_predictions,
-    total_errors = total_errors,
-    error_rate = error_rate,
-    off_diag_errors = off_diag_errors,
-    n_classes = n_classes,
-    avg_errors_per_class = avg_errors_per_class,
-    high_error_classes = high_error_classes,
-    class_error_rates = class_error_rates,
-    top_errors = head(off_diag_df, 10)
-  ))
-}
-
-# Calculate statistics
-stats_full <- calculate_error_stats(conf_full, "Full Classes")
-stats_merged <- calculate_error_stats(conf_merged, "Merged Classes")
-
-# Create comparison data frame
-comparison_df <- data.frame(
-  Metric = c(
-    "Total Samples",
-    "Total Errors",
-    "Correct Predictions",
-    "Error Rate (%)",
-    "Number of Classes",
-    "Average Errors per Class",
-    "Classes with >10% Error Rate"
-  ),
-  Full = c(
-    stats_full$total_samples,
-    stats_full$total_errors,
-    stats_full$correct_predictions,
-    round(stats_full$error_rate, 2),
-    stats_full$n_classes,
-    round(stats_full$avg_errors_per_class, 2),
-    stats_full$high_error_classes
-  ),
-  Merged = c(
-    stats_merged$total_samples,
-    stats_merged$total_errors,
-    stats_merged$correct_predictions,
-    round(stats_merged$error_rate, 2),
-    stats_merged$n_classes,
-    round(stats_merged$avg_errors_per_class, 2),
-    stats_merged$high_error_classes
-  )
-)
-
-# Calculate reductions
-comparison_df$Reduction <- comparison_df$Full - comparison_df$Merged
-comparison_df$Reduction_Percent <- round((comparison_df$Reduction / comparison_df$Full) * 100, 1)
-comparison_df$Reduction_Percent[comparison_df$Metric == "Total Samples"] <- NA
-comparison_df$Reduction_Percent[comparison_df$Metric == "Number of Classes"] <- NA
-
-# Print summary table
-cat("\n=== ERROR REDUCTION SUMMARY ===\n\n")
-print(comparison_df)
-cat("\n")
-
-# Visualization 1: Bar chart comparing key metrics
-library(ggplot2)
-library(tidyr)
-
-# Prepare data for visualization
-viz_data <- comparison_df %>%
-  filter(Metric %in% c("Total Errors", "Error Rate (%)", "Average Errors per Class")) %>%
-  select(Metric, Full, Merged) %>%
-  pivot_longer(cols = c(Full, Merged), names_to = "Type", values_to = "Value")
-
-viz1 <- ggplot(viz_data, aes(x = Metric, y = Value, fill = Type)) +
-  geom_bar(stat = "identity", position = "dodge", width = 0.7) +
-  scale_fill_manual(values = c("Full" = "#d62728", "Merged" = "#2ca02c"), 
-                    labels = c("Full Classes", "Merged Classes")) +
-  labs(
-    title = "Error Metrics: Full vs Merged Classes",
-    x = "",
-    y = "Value",
-    fill = "Type"
-  ) +
-  theme_bw() +
-  theme(
-    plot.title = element_text(face = "bold", size = 12),
-    axis.text.x = element_text(angle = 45, hjust = 1),
-    legend.position = "bottom"
-  )
-
-print(viz1)
-ggsave("../writing/figures_new/error_reduction_bar.png", viz1, width = 8, height = 6, dpi = 300)
-
-# Visualization 2: Error reduction percentage
-reduction_data <- comparison_df %>%
-  filter(!is.na(Reduction_Percent)) %>%
-  mutate(Metric = factor(Metric, levels = Metric))
-
-viz2 <- ggplot(reduction_data, aes(x = Metric, y = Reduction_Percent)) +
-  geom_bar(stat = "identity", fill = "#2ca02c", width = 0.7) +
-  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
-  labs(
-    title = "Error Reduction After Merging (%)",
-    x = "",
-    y = "Reduction (%)"
-  ) +
-  theme_bw() +
-  theme(
-    plot.title = element_text(face = "bold", size = 12),
-    axis.text.x = element_text(angle = 45, hjust = 1)
-  ) +
-  coord_cartesian(ylim = c(0, max(reduction_data$Reduction_Percent) * 1.1))
-
-print(viz2)
-ggsave("../writing/figures_new/error_reduction_percent.png", viz2, width = 8, height = 6, dpi = 300)
-
-# Visualization 3: Error count comparison with breakdown
-error_comparison <- data.frame(
-  Type = c("Full Classes", "Merged Classes"),
-  Total_Errors = c(stats_full$total_errors, stats_merged$total_errors),
-  Correct_Predictions = c(stats_full$correct_predictions, stats_merged$correct_predictions)
-) %>%
-  pivot_longer(cols = c(Total_Errors, Correct_Predictions), 
-               names_to = "Category", values_to = "Count")
-
-viz3 <- ggplot(error_comparison, aes(x = Type, y = Count, fill = Category)) +
-  geom_bar(stat = "identity", position = "stack", width = 0.6) +
-  scale_fill_manual(values = c("Total_Errors" = "#d62728", "Correct_Predictions" = "#2ca02c"),
-                    labels = c("Correct Predictions", "Errors")) +
-  labs(
-    title = "Prediction Accuracy: Full vs Merged Classes",
-    x = "",
-    y = "Number of Predictions",
-    fill = "Outcome"
-  ) +
-  theme_bw() +
-  theme(
-    plot.title = element_text(face = "bold", size = 12),
-    legend.position = "bottom"
-  ) +
-  geom_text(aes(label = Count), position = position_stack(vjust = 0.5), color = "white", fontface = "bold")
-
-print(viz3)
-ggsave("../writing/figures_new/error_comparison_stacked.png", viz3, width = 8, height = 6, dpi = 300)
-
-# Visualization 4: Top error pairs before and after
-# Top errors in full classes
-top_errors_full <- stats_full$top_errors %>%
-  mutate(Error_Pair = paste(True_Class, "→", Predicted_Class),
-         Type = "Full Classes") %>%
-  head(10)
-
-# Top errors in merged classes
-top_errors_merged <- stats_merged$top_errors %>%
-  mutate(Error_Pair = paste(True_Class, "→", Predicted_Class),
-         Type = "Merged Classes") %>%
-  head(10)
-
-top_errors_combined <- bind_rows(top_errors_full, top_errors_merged) %>%
-  mutate(Error_Pair = factor(Error_Pair, levels = unique(c(top_errors_full$Error_Pair, top_errors_merged$Error_Pair))))
-
-viz4 <- ggplot(top_errors_combined, aes(x = Error_Pair, y = Count, fill = Type)) +
-  geom_bar(stat = "identity", position = "dodge", width = 0.7) +
-  scale_fill_manual(values = c("Full Classes" = "#d62728", "Merged Classes" = "#2ca02c")) +
-  labs(
-    title = "Top 10 Error Pairs: Full vs Merged Classes",
-    x = "Error Pair (True → Predicted)",
-    y = "Number of Errors",
-    fill = "Type"
-  ) +
-  theme_bw() +
-  theme(
-    plot.title = element_text(face = "bold", size = 12),
-    axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
-    legend.position = "bottom"
-  )
-
-print(viz4)
-ggsave("../writing/figures_new/top_errors_comparison.png", viz4, width = 12, height = 6, dpi = 300)
-
-# Visualization 5: Error rate distribution by class
-class_error_full <- data.frame(
-  Class = names(stats_full$class_error_rates),
-  Error_Rate = stats_full$class_error_rates,
-  Type = "Full Classes"
-)
-
-class_error_merged <- data.frame(
-  Class = names(stats_merged$class_error_rates),
-  Error_Rate = stats_merged$class_error_rates,
-  Type = "Merged Classes"
-)
-
-class_error_combined <- bind_rows(class_error_full, class_error_merged)
-
-viz5 <- ggplot(class_error_combined, aes(x = Error_Rate, fill = Type)) +
-  geom_histogram(alpha = 0.7, bins = 20, position = "identity") +
-  scale_fill_manual(values = c("Full Classes" = "#d62728", "Merged Classes" = "#2ca02c")) +
-  labs(
-    title = "Distribution of Error Rates by Class",
-    x = "Error Rate (%)",
-    y = "Number of Classes",
-    fill = "Type"
-  ) +
-  theme_bw() +
-  theme(
-    plot.title = element_text(face = "bold", size = 12),
-    legend.position = "bottom"
-  ) +
-  geom_vline(xintercept = 10, linetype = "dashed", color = "gray50", alpha = 0.7)
-
-print(viz5)
-ggsave("../writing/figures_new/error_rate_distribution.png", viz5, width = 10, height = 6, dpi = 300)
-
-# Visualization 6: Summary comparison with key numbers
-summary_numbers <- data.frame(
-  Metric = c("Total Errors", "Error Rate", "Classes"),
-  Full = c(stats_full$total_errors, paste0(round(stats_full$error_rate, 1), "%"), stats_full$n_classes),
-  Merged = c(stats_merged$total_errors, paste0(round(stats_merged$error_rate, 1), "%"), stats_merged$n_classes),
-  Reduction = c(
-    paste0("-", stats_full$total_errors - stats_merged$total_errors, " (", 
-           round((stats_full$total_errors - stats_merged$total_errors) / stats_full$total_errors * 100, 1), "%)"),
-    paste0("-", round(stats_full$error_rate - stats_merged$error_rate, 1), "%"),
-    paste0("-", stats_full$n_classes - stats_merged$n_classes)
-  )
-)
-
-# Create a simple text-based summary
-cat("\n=== KEY FINDINGS ===\n\n")
-cat(sprintf("Total Errors Reduced: %d → %d (Reduction: %d, %.1f%%)\n",
-            stats_full$total_errors, stats_merged$total_errors,
-            stats_full$total_errors - stats_merged$total_errors,
-            (stats_full$total_errors - stats_merged$total_errors) / stats_full$total_errors * 100))
-cat(sprintf("Error Rate Reduced: %.2f%% → %.2f%% (Reduction: %.2f%%)\n",
-            stats_full$error_rate, stats_merged$error_rate,
-            stats_full$error_rate - stats_merged$error_rate))
-cat(sprintf("Number of Classes: %d → %d (Reduction: %d)\n",
-            stats_full$n_classes, stats_merged$n_classes,
-            stats_full$n_classes - stats_merged$n_classes))
-cat(sprintf("Average Errors per Class: %.2f → %.2f (Reduction: %.2f)\n",
-            stats_full$avg_errors_per_class, stats_merged$avg_errors_per_class,
-            stats_full$avg_errors_per_class - stats_merged$avg_errors_per_class))
-cat(sprintf("Classes with >10%% Error Rate: %d → %d (Reduction: %d)\n",
-            stats_full$high_error_classes, stats_merged$high_error_classes,
-            stats_full$high_error_classes - stats_merged$high_error_classes))
-cat("\n")
-
-# Additional Visualizations
-# Visualization 7: Side-by-side comparison with annotations
-comparison_summary <- data.frame(
-  Metric = rep(c("Total Errors", "Error Rate (%)", "Avg Errors/Class"), 2),
-  Value = c(
-    stats_full$total_errors,
-    stats_full$error_rate,
-    stats_full$avg_errors_per_class,
-    stats_merged$total_errors,
-    stats_merged$error_rate,
-    stats_merged$avg_errors_per_class
-  ),
-  Type = rep(c("Full", "Merged"), each = 3)
-)
-
-viz7 <- ggplot(comparison_summary, aes(x = Metric, y = Value, fill = Type)) +
-  geom_bar(stat = "identity", position = "dodge", width = 0.7) +
-  scale_fill_manual(values = c("Full" = "#d62728", "Merged" = "#2ca02c")) +
-  labs(
-    title = "Error Metrics Comparison",
-    subtitle = paste0("Total Errors: ", stats_full$total_errors, " → ", stats_merged$total_errors, 
-                     " (", round((stats_full$total_errors - stats_merged$total_errors) / stats_full$total_errors * 100, 1), "% reduction)"),
-    x = "",
-    y = "Value",
-    fill = "Type"
-  ) +
-  theme_bw() +
-  theme(
-    plot.title = element_text(face = "bold", size = 12),
-    plot.subtitle = element_text(size = 10),
-    axis.text.x = element_text(angle = 45, hjust = 1),
-    legend.position = "bottom"
-  ) +
-  geom_text(aes(label = round(Value, 1)), 
-            position = position_dodge(width = 0.7), 
-            vjust = -0.5, size = 3)
-
-print(viz7)
-ggsave("../writing/figures_new/error_comparison_annotated.png", viz7, width = 8, height = 6, dpi = 300)
-
-# Visualization 8: Error reduction waterfall-style
-waterfall_data <- data.frame(
-  Stage = c("Full Classes\n(Total Errors)", "Merged Classes\n(Total Errors)", "Reduction"),
-  Value = c(stats_full$total_errors, stats_merged$total_errors, 
-            -(stats_full$total_errors - stats_merged$total_errors)),
-  Type = c("Before", "After", "Reduction")
-)
-
-viz8 <- ggplot(waterfall_data, aes(x = Stage, y = Value, fill = Type)) +
-  geom_bar(stat = "identity", width = 0.6) +
-  scale_fill_manual(values = c("Before" = "#d62728", "After" = "#2ca02c", "Reduction" = "#1f77b4"),
-                    guide = "none") +
-  labs(
-    title = "Error Reduction: Waterfall View",
-    x = "",
-    y = "Number of Errors"
-  ) +
-  theme_bw() +
-  theme(
-    plot.title = element_text(face = "bold", size = 12)
-  ) +
-  geom_text(aes(label = Value), vjust = ifelse(waterfall_data$Value > 0, -0.5, 1.5), 
-            fontface = "bold", size = 4) +
-  geom_hline(yintercept = 0, linetype = "solid", color = "black")
-
-print(viz8)
-ggsave("../writing/figures_new/error_waterfall.png", viz8, width = 8, height = 6, dpi = 300)
-
-# Visualization 9: Error rate comparison with arrows showing improvement
-improvement_data <- data.frame(
-  Metric = c("Error Rate", "Avg Errors per Class"),
-  Full = c(stats_full$error_rate, stats_full$avg_errors_per_class),
-  Merged = c(stats_merged$error_rate, stats_merged$avg_errors_per_class),
-  Improvement = c(
-    stats_full$error_rate - stats_merged$error_rate,
-    stats_full$avg_errors_per_class - stats_merged$avg_errors_per_class
-  )
-)
-
-viz9 <- ggplot(improvement_data, aes(x = Metric)) +
-  geom_segment(aes(xend = Metric, y = Full, yend = Merged), 
-               arrow = arrow(length = unit(0.3, "cm"), type = "closed"),
-               color = "#2ca02c", size = 1.5) +
-  geom_point(aes(y = Full), color = "#d62728", size = 4) +
-  geom_point(aes(y = Merged), color = "#2ca02c", size = 4) +
-  labs(
-    title = "Error Reduction: Before → After",
-    x = "",
-    y = "Value"
-  ) +
-  theme_bw() +
-  theme(
-    plot.title = element_text(face = "bold", size = 12)
-  ) +
-  geom_text(aes(y = Full, label = round(Full, 2)), vjust = -1, color = "#d62728", fontface = "bold") +
-  geom_text(aes(y = Merged, label = round(Merged, 2)), vjust = 2, color = "#2ca02c", fontface = "bold")
-
-print(viz9)
-ggsave("../writing/figures_new/error_improvement_arrows.png", viz9, width = 8, height = 6, dpi = 300)
-
-# Create a comprehensive summary table with formatting
-library(knitr)
-library(kableExtra)
-
-summary_table <- comparison_df %>%
-  mutate(
-    Full_Formatted = case_when(
-      Metric == "Total Samples" ~ format(Full, big.mark = ","),
-      Metric == "Total Errors" ~ format(Full, big.mark = ","),
-      Metric == "Correct Predictions" ~ format(Full, big.mark = ","),
-      Metric == "Error Rate (%)" ~ paste0(Full, "%"),
-      Metric == "Number of Classes" ~ as.character(Full),
-      Metric == "Average Errors per Class" ~ sprintf("%.2f", Full),
-      TRUE ~ as.character(Full)
-    ),
-    Merged_Formatted = case_when(
-      Metric == "Total Samples" ~ format(Merged, big.mark = ","),
-      Metric == "Total Errors" ~ format(Merged, big.mark = ","),
-      Metric == "Correct Predictions" ~ format(Merged, big.mark = ","),
-      Metric == "Error Rate (%)" ~ paste0(Merged, "%"),
-      Metric == "Number of Classes" ~ as.character(Merged),
-      Metric == "Average Errors per Class" ~ sprintf("%.2f", Merged),
-      TRUE ~ as.character(Merged)
-    ),
-    Reduction_Formatted = case_when(
-      Metric == "Total Samples" ~ "",
-      Metric == "Total Errors" ~ paste0(format(Reduction, big.mark = ","), 
-                                       " (", Reduction_Percent, "%)"),
-      Metric == "Correct Predictions" ~ paste0(format(Reduction, big.mark = ",")),
-      Metric == "Error Rate (%)" ~ paste0(Reduction, "% (", Reduction_Percent, "%)"),
-      Metric == "Number of Classes" ~ as.character(Reduction),
-      Metric == "Average Errors per Class" ~ paste0(sprintf("%.2f", Reduction), 
-                                                    " (", Reduction_Percent, "%)"),
-      TRUE ~ ""
-    )
-  ) %>%
-  select(Metric, Full_Formatted, Merged_Formatted, Reduction_Formatted)
-
-kable_summary <- kable(summary_table, 
-                      col.names = c("Metric", "Full Classes", "Merged Classes", "Reduction"),
-                      align = c("l", "r", "r", "r")) %>%
-  kable_styling(bootstrap_options = c("striped", "hover"), 
-                full_width = FALSE,
-                position = "center") %>%
-  column_spec(1, bold = TRUE) %>%
-  column_spec(4, color = "#2ca02c", bold = TRUE) %>%
-  add_header_above(c(" " = 1, "Full Classes" = 1, "Merged Classes" = 1, "Reduction" = 1))
-
-print(kable_summary)
-```
-
-## -- Error Reduction Analysis: KMT2A and MDS-Related Classes Separately
-
-```{r}
-# Function to calculate error statistics for specific groups
-calculate_group_error_stats <- function(conf_matrix, group_classes, group_name) {
-  if (is.null(conf_matrix)) {
-    return(NULL)
-  }
-  
-  # Find classes that match the group
-  matching_classes <- intersect(group_classes, rownames(conf_matrix))
-  
-  if (length(matching_classes) == 0) {
-    return(NULL)
-  }
-  
-  # Get subset of confusion matrix for this group
-  group_conf <- conf_matrix[matching_classes, matching_classes, drop = FALSE]
-  
-  # Calculate statistics
-  total_samples_group <- sum(group_conf)
-  correct_predictions_group <- sum(diag(group_conf))
-  total_errors_group <- total_samples_group - correct_predictions_group
-  error_rate_group <- (total_errors_group / total_samples_group) * 100
-  
-  # Off-diagonal errors (errors within the group)
-  off_diag_group <- group_conf
-  diag(off_diag_group) <- 0
-  within_group_errors <- sum(off_diag_group)
-  
-  # Errors where group classes are predicted as other classes (outside group)
-  group_conf_full_rows <- conf_matrix[matching_classes, , drop = FALSE]
-  outside_group_errors <- sum(group_conf_full_rows[, !colnames(group_conf_full_rows) %in% matching_classes, drop = FALSE])
-  
-  # Total errors involving this group
-  total_errors_involving_group <- total_errors_group
-  
-  # Average errors per class in group
-  n_classes_group <- length(matching_classes)
-  avg_errors_per_class <- total_errors_group / n_classes_group
-  
-  # Classes with high error rates (>10%)
-  class_error_rates <- (rowSums(off_diag_group) / rowSums(group_conf)) * 100
-  class_error_rates[is.nan(class_error_rates)] <- 0
-  high_error_classes <- sum(class_error_rates > 10)
-  
-  # Top error pairs within group
-  off_diag_df <- as.data.frame(as.table(off_diag_group))
-  off_diag_df <- off_diag_df[off_diag_df$Freq > 0, ]
-  off_diag_df <- off_diag_df[order(-off_diag_df$Freq), ]
-  colnames(off_diag_df) <- c("True_Class", "Predicted_Class", "Count")
-  
-  return(list(
-    group_name = group_name,
-    matching_classes = matching_classes,
-    n_classes = n_classes_group,
-    total_samples = total_samples_group,
-    correct_predictions = correct_predictions_group,
-    total_errors = total_errors_group,
-    error_rate = error_rate_group,
-    within_group_errors = within_group_errors,
-    outside_group_errors = outside_group_errors,
-    avg_errors_per_class = avg_errors_per_class,
-    high_error_classes = high_error_classes,
-    class_error_rates = class_error_rates,
-    top_errors = head(off_diag_df, 10)
-  ))
-}
-
-# Define groups
-kmt2a_classes_full <- c("KMT2A::ELL", "KMT2A::MLLT10", "KMT2A::MLLT4", "KMT2A::SEPT6", "MLLT3::KMT2A")
-kmt2a_classes_merged <- c("Other KMT2A rearrangements", "MLLT3::KMT2A")
-
-mds_classes_full <- c("MDS-related, gene mutations", "MDS-related, cytogenetic abnormalities", 
-                     "MDS-related, TP53 mutated", "MDS-related")
-mds_classes_merged <- c("MDS-related")
-
-# Calculate statistics for each group
-kmt2a_stats_full <- calculate_group_error_stats(conf_full, kmt2a_classes_full, "KMT2A (Full)")
-kmt2a_stats_merged <- calculate_group_error_stats(conf_merged, kmt2a_classes_merged, "KMT2A (Merged)")
-
-mds_stats_full <- calculate_group_error_stats(conf_full, mds_classes_full, "MDS-related (Full)")
-mds_stats_merged <- calculate_group_error_stats(conf_merged, mds_classes_merged, "MDS-related (Merged)")
-
-# Create comparison data frames
-kmt2a_comparison <- data.frame(
-  Metric = c("Number of Classes", "Total Samples", "Total Errors", "Error Rate (%)", 
-             "Within-Group Errors", "Average Errors per Class", "Classes with >10% Error Rate"),
-  Full = c(
-    kmt2a_stats_full$n_classes,
-    kmt2a_stats_full$total_samples,
-    kmt2a_stats_full$total_errors,
-    round(kmt2a_stats_full$error_rate, 2),
-    kmt2a_stats_full$within_group_errors,
-    round(kmt2a_stats_full$avg_errors_per_class, 2),
-    kmt2a_stats_full$high_error_classes
-  ),
-  Merged = c(
-    kmt2a_stats_merged$n_classes,
-    kmt2a_stats_merged$total_samples,
-    kmt2a_stats_merged$total_errors,
-    round(kmt2a_stats_merged$error_rate, 2),
-    kmt2a_stats_merged$within_group_errors,
-    round(kmt2a_stats_merged$avg_errors_per_class, 2),
-    kmt2a_stats_merged$high_error_classes
-  )
-)
-
-kmt2a_comparison$Reduction <- kmt2a_comparison$Full - kmt2a_comparison$Merged
-kmt2a_comparison$Reduction_Percent <- round((kmt2a_comparison$Reduction / kmt2a_comparison$Full) * 100, 1)
-kmt2a_comparison$Reduction_Percent[kmt2a_comparison$Metric == "Number of Classes"] <- NA
-kmt2a_comparison$Reduction_Percent[kmt2a_comparison$Metric == "Total Samples"] <- NA
-
-mds_comparison <- data.frame(
-  Metric = c("Number of Classes", "Total Samples", "Total Errors", "Error Rate (%)", 
-             "Within-Group Errors", "Average Errors per Class", "Classes with >10% Error Rate"),
-  Full = c(
-    mds_stats_full$n_classes,
-    mds_stats_full$total_samples,
-    mds_stats_full$total_errors,
-    round(mds_stats_full$error_rate, 2),
-    mds_stats_full$within_group_errors,
-    round(mds_stats_full$avg_errors_per_class, 2),
-    mds_stats_full$high_error_classes
-  ),
-  Merged = c(
-    mds_stats_merged$n_classes,
-    mds_stats_merged$total_samples,
-    mds_stats_merged$total_errors,
-    round(mds_stats_merged$error_rate, 2),
-    mds_stats_merged$within_group_errors,
-    round(mds_stats_merged$avg_errors_per_class, 2),
-    mds_stats_merged$high_error_classes
-  )
-)
-
-mds_comparison$Reduction <- mds_comparison$Full - mds_comparison$Merged
-mds_comparison$Reduction_Percent <- round((mds_comparison$Reduction / mds_comparison$Full) * 100, 1)
-mds_comparison$Reduction_Percent[mds_comparison$Metric == "Number of Classes"] <- NA
-mds_comparison$Reduction_Percent[mds_comparison$Metric == "Total Samples"] <- NA
-
-# Print summaries
-cat("\n=== KMT2A CLASSES ERROR REDUCTION ===\n\n")
-print(kmt2a_comparison)
-cat("\n")
-
-cat("\n=== MDS-RELATED CLASSES ERROR REDUCTION ===\n\n")
-print(mds_comparison)
-cat("\n")
-
-# Key findings
-cat("\n=== KEY FINDINGS BY GROUP ===\n\n")
-cat("KMT2A Classes:\n")
-cat(sprintf("  Total Errors: %d → %d (Reduction: %d, %.1f%%)\n",
-            kmt2a_stats_full$total_errors, kmt2a_stats_merged$total_errors,
-            kmt2a_stats_full$total_errors - kmt2a_stats_merged$total_errors,
-            (kmt2a_stats_full$total_errors - kmt2a_stats_merged$total_errors) / kmt2a_stats_full$total_errors * 100))
-cat(sprintf("  Within-Group Errors: %d → %d (Reduction: %d, %.1f%%)\n",
-            kmt2a_stats_full$within_group_errors, kmt2a_stats_merged$within_group_errors,
-            kmt2a_stats_full$within_group_errors - kmt2a_stats_merged$within_group_errors,
-            ifelse(kmt2a_stats_full$within_group_errors > 0,
-                   (kmt2a_stats_full$within_group_errors - kmt2a_stats_merged$within_group_errors) / kmt2a_stats_full$within_group_errors * 100,
-                   0)))
-cat(sprintf("  Error Rate: %.2f%% → %.2f%% (Reduction: %.2f%%)\n",
-            kmt2a_stats_full$error_rate, kmt2a_stats_merged$error_rate,
-            kmt2a_stats_full$error_rate - kmt2a_stats_merged$error_rate))
-
-cat("\nMDS-Related Classes:\n")
-cat(sprintf("  Total Errors: %d → %d (Reduction: %d, %.1f%%)\n",
-            mds_stats_full$total_errors, mds_stats_merged$total_errors,
-            mds_stats_full$total_errors - mds_stats_merged$total_errors,
-            (mds_stats_full$total_errors - mds_stats_merged$total_errors) / mds_stats_full$total_errors * 100))
-cat(sprintf("  Within-Group Errors: %d → %d (Reduction: %d, %.1f%%)\n",
-            mds_stats_full$within_group_errors, mds_stats_merged$within_group_errors,
-            mds_stats_full$within_group_errors - mds_stats_merged$within_group_errors,
-            ifelse(mds_stats_full$within_group_errors > 0,
-                   (mds_stats_full$within_group_errors - mds_stats_merged$within_group_errors) / mds_stats_full$within_group_errors * 100,
-                   0)))
-cat(sprintf("  Error Rate: %.2f%% → %.2f%% (Reduction: %.2f%%)\n",
-            mds_stats_full$error_rate, mds_stats_merged$error_rate,
-            mds_stats_full$error_rate - mds_stats_merged$error_rate))
-cat("\n")
-
-# Visualizations for group-specific error reduction
-# Visualization 1: KMT2A error reduction
-kmt2a_viz_data <- kmt2a_comparison %>%
-  filter(Metric %in% c("Total Errors", "Error Rate (%)", "Within-Group Errors")) %>%
-  select(Metric, Full, Merged) %>%
-  pivot_longer(cols = c(Full, Merged), names_to = "Type", values_to = "Value")
-
-viz_kmt2a <- ggplot(kmt2a_viz_data, aes(x = Metric, y = Value, fill = Type)) +
-  geom_bar(stat = "identity", position = "dodge", width = 0.7) +
-  scale_fill_manual(values = c("Full" = "#ff7f0e", "Merged" = "#2ca02c"),
-                    labels = c("Full KMT2A Classes", "Merged KMT2A Classes")) +
-  labs(
-    title = "KMT2A Classes: Error Reduction After Merging",
-    subtitle = paste0("Total Errors: ", kmt2a_stats_full$total_errors, " → ", kmt2a_stats_merged$total_errors,
-                     " (", round((kmt2a_stats_full$total_errors - kmt2a_stats_merged$total_errors) / kmt2a_stats_full$total_errors * 100, 1), "% reduction)"),
-    x = "",
-    y = "Value",
-    fill = "Type"
-  ) +
-  theme_bw() +
-  theme(
-    plot.title = element_text(face = "bold", size = 12),
-    plot.subtitle = element_text(size = 10),
-    axis.text.x = element_text(angle = 45, hjust = 1),
-    legend.position = "bottom"
-  ) +
-  geom_text(aes(label = round(Value, 1)), 
-            position = position_dodge(width = 0.7), 
-            vjust = -0.5, size = 3)
-
-print(viz_kmt2a)
-ggsave("../writing/figures_new/kmt2a_error_reduction.png", viz_kmt2a, width = 8, height = 6, dpi = 300)
-
-# Visualization 2: MDS-related error reduction
-mds_viz_data <- mds_comparison %>%
-  filter(Metric %in% c("Total Errors", "Error Rate (%)", "Within-Group Errors")) %>%
-  select(Metric, Full, Merged) %>%
-  pivot_longer(cols = c(Full, Merged), names_to = "Type", values_to = "Value")
-
-viz_mds <- ggplot(mds_viz_data, aes(x = Metric, y = Value, fill = Type)) +
-  geom_bar(stat = "identity", position = "dodge", width = 0.7) +
-  scale_fill_manual(values = c("Full" = "#d62728", "Merged" = "#2ca02c"),
-                    labels = c("Full MDS Classes", "Merged MDS Classes")) +
-  labs(
-    title = "MDS-Related Classes: Error Reduction After Merging",
-    subtitle = paste0("Total Errors: ", mds_stats_full$total_errors, " → ", mds_stats_merged$total_errors,
-                     " (", round((mds_stats_full$total_errors - mds_stats_merged$total_errors) / mds_stats_full$total_errors * 100, 1), "% reduction)"),
-    x = "",
-    y = "Value",
-    fill = "Type"
-  ) +
-  theme_bw() +
-  theme(
-    plot.title = element_text(face = "bold", size = 12),
-    plot.subtitle = element_text(size = 10),
-    axis.text.x = element_text(angle = 45, hjust = 1),
-    legend.position = "bottom"
-  ) +
-  geom_text(aes(label = round(Value, 1)), 
-            position = position_dodge(width = 0.7), 
-            vjust = -0.5, size = 3)
-
-print(viz_mds)
-ggsave("../writing/figures_new/mds_error_reduction.png", viz_mds, width = 8, height = 6, dpi = 300)
-
-# Visualization 3: Side-by-side comparison of both groups
-combined_group_data <- bind_rows(
-  kmt2a_comparison %>% 
-    filter(Metric %in% c("Total Errors", "Error Rate (%)", "Within-Group Errors")) %>%
-    mutate(Group = "KMT2A"),
-  mds_comparison %>% 
-    filter(Metric %in% c("Total Errors", "Error Rate (%)", "Within-Group Errors")) %>%
-    mutate(Group = "MDS-related")
-) %>%
-  select(Metric, Group, Full, Merged, Reduction, Reduction_Percent) %>%
-  pivot_longer(cols = c(Full, Merged), names_to = "Type", values_to = "Value")
-
-viz_groups_combined <- ggplot(combined_group_data, aes(x = Metric, y = Value, fill = interaction(Group, Type))) +
-  geom_bar(stat = "identity", position = "dodge", width = 0.7) +
-  scale_fill_manual(
-    values = c(
-      "KMT2A.Full" = "#ff7f0e",
-      "KMT2A.Merged" = "#2ca02c",
-      "MDS-related.Full" = "#d62728",
-      "MDS-related.Merged" = "#2ca02c"
-    ),
-    labels = c("KMT2A (Full)", "KMT2A (Merged)", "MDS-related (Full)", "MDS-related (Merged)")
-  ) +
-  labs(
-    title = "Error Reduction: KMT2A vs MDS-Related Classes",
-    x = "",
-    y = "Value",
-    fill = "Group & Type"
-  ) +
-  theme_bw() +
-  theme(
-    plot.title = element_text(face = "bold", size = 12),
-    axis.text.x = element_text(angle = 45, hjust = 1),
-    legend.position = "bottom"
-  )
-
-print(viz_groups_combined)
-ggsave("../writing/figures_new/groups_error_reduction_combined.png", viz_groups_combined, width = 10, height = 6, dpi = 300)
-
-# Visualization 4: Reduction percentage comparison
-reduction_comparison <- data.frame(
-  Group = rep(c("KMT2A", "MDS-related"), each = 3),
-  Metric = rep(c("Total Errors", "Error Rate (%)", "Within-Group Errors"), 2),
-  Reduction_Percent = c(
-    kmt2a_comparison$Reduction_Percent[kmt2a_comparison$Metric == "Total Errors"],
-    kmt2a_comparison$Reduction_Percent[kmt2a_comparison$Metric == "Error Rate (%)"],
-    kmt2a_comparison$Reduction_Percent[kmt2a_comparison$Metric == "Within-Group Errors"],
-    mds_comparison$Reduction_Percent[mds_comparison$Metric == "Total Errors"],
-    mds_comparison$Reduction_Percent[mds_comparison$Metric == "Error Rate (%)"],
-    mds_comparison$Reduction_Percent[mds_comparison$Metric == "Within-Group Errors"]
-  )
-)
-
-viz_reduction_pct <- ggplot(reduction_comparison, aes(x = Metric, y = Reduction_Percent, fill = Group)) +
-  geom_bar(stat = "identity", position = "dodge", width = 0.7) +
-  scale_fill_manual(values = c("KMT2A" = "#ff7f0e", "MDS-related" = "#d62728")) +
-  labs(
-    title = "Error Reduction Percentage by Group",
-    x = "",
-    y = "Reduction (%)",
-    fill = "Group"
-  ) +
-  theme_bw() +
-  theme(
-    plot.title = element_text(face = "bold", size = 12),
-    axis.text.x = element_text(angle = 45, hjust = 1),
-    legend.position = "bottom"
-  ) +
-  geom_text(aes(label = paste0(round(Reduction_Percent, 1), "%")), 
-            position = position_dodge(width = 0.7), 
-            vjust = -0.5, size = 3)
-
-print(viz_reduction_pct)
-ggsave("../writing/figures_new/groups_reduction_percentage.png", viz_reduction_pct, width = 8, height = 6, dpi = 300)
-
-# Create formatted tables for each group
-kmt2a_table <- kmt2a_comparison %>%
-  mutate(
-    Full_Formatted = case_when(
-      Metric == "Total Samples" ~ format(Full, big.mark = ","),
-      Metric == "Total Errors" ~ format(Full, big.mark = ","),
-      Metric == "Within-Group Errors" ~ format(Full, big.mark = ","),
-      Metric == "Error Rate (%)" ~ paste0(Full, "%"),
-      Metric == "Number of Classes" ~ as.character(Full),
-      Metric == "Average Errors per Class" ~ sprintf("%.2f", Full),
-      TRUE ~ as.character(Full)
-    ),
-    Merged_Formatted = case_when(
-      Metric == "Total Samples" ~ format(Merged, big.mark = ","),
-      Metric == "Total Errors" ~ format(Merged, big.mark = ","),
-      Metric == "Within-Group Errors" ~ format(Merged, big.mark = ","),
-      Metric == "Error Rate (%)" ~ paste0(Merged, "%"),
-      Metric == "Number of Classes" ~ as.character(Merged),
-      Metric == "Average Errors per Class" ~ sprintf("%.2f", Merged),
-      TRUE ~ as.character(Merged)
-    ),
-    Reduction_Formatted = case_when(
-      Metric == "Total Samples" ~ "",
-      Metric == "Total Errors" ~ paste0(format(Reduction, big.mark = ","), 
-                                        " (", Reduction_Percent, "%)"),
-      Metric == "Within-Group Errors" ~ paste0(format(Reduction, big.mark = ","), 
-                                               " (", Reduction_Percent, "%)"),
-      Metric == "Error Rate (%)" ~ paste0(Reduction, "% (", Reduction_Percent, "%)"),
-      Metric == "Number of Classes" ~ as.character(Reduction),
-      Metric == "Average Errors per Class" ~ paste0(sprintf("%.2f", Reduction), 
-                                                    " (", Reduction_Percent, "%)"),
-      TRUE ~ ""
-    )
-  ) %>%
-  select(Metric, Full_Formatted, Merged_Formatted, Reduction_Formatted)
-
-kable_kmt2a <- kable(kmt2a_table, 
-                     col.names = c("Metric", "Full Classes", "Merged Classes", "Reduction"),
-                     caption = "KMT2A Classes: Error Reduction Summary") %>%
-  kable_styling(bootstrap_options = c("striped", "hover"), 
-                full_width = FALSE,
-                position = "center") %>%
-  column_spec(1, bold = TRUE) %>%
-  column_spec(4, color = "#2ca02c", bold = TRUE) %>%
-  add_header_above(c(" " = 1, "Full Classes" = 1, "Merged Classes" = 1, "Reduction" = 1))
-
-print(kable_kmt2a)
-
-mds_table <- mds_comparison %>%
-  mutate(
-    Full_Formatted = case_when(
-      Metric == "Total Samples" ~ format(Full, big.mark = ","),
-      Metric == "Total Errors" ~ format(Full, big.mark = ","),
-      Metric == "Within-Group Errors" ~ format(Full, big.mark = ","),
-      Metric == "Error Rate (%)" ~ paste0(Full, "%"),
-      Metric == "Number of Classes" ~ as.character(Full),
-      Metric == "Average Errors per Class" ~ sprintf("%.2f", Full),
-      TRUE ~ as.character(Full)
-    ),
-    Merged_Formatted = case_when(
-      Metric == "Total Samples" ~ format(Merged, big.mark = ","),
-      Metric == "Total Errors" ~ format(Merged, big.mark = ","),
-      Metric == "Within-Group Errors" ~ format(Merged, big.mark = ","),
-      Metric == "Error Rate (%)" ~ paste0(Merged, "%"),
-      Metric == "Number of Classes" ~ as.character(Merged),
-      Metric == "Average Errors per Class" ~ sprintf("%.2f", Merged),
-      TRUE ~ as.character(Merged)
-    ),
-    Reduction_Formatted = case_when(
-      Metric == "Total Samples" ~ "",
-      Metric == "Total Errors" ~ paste0(format(Reduction, big.mark = ","), 
-                                       " (", Reduction_Percent, "%)"),
-      Metric == "Within-Group Errors" ~ paste0(format(Reduction, big.mark = ","), 
-                                               " (", Reduction_Percent, "%)"),
-      Metric == "Error Rate (%)" ~ paste0(Reduction, "% (", Reduction_Percent, "%)"),
-      Metric == "Number of Classes" ~ as.character(Reduction),
-      Metric == "Average Errors per Class" ~ paste0(sprintf("%.2f", Reduction), 
-                                                    " (", Reduction_Percent, "%)"),
-      TRUE ~ ""
-    )
-  ) %>%
-  select(Metric, Full_Formatted, Merged_Formatted, Reduction_Formatted)
-
-kable_mds <- kable(mds_table, 
-                   col.names = c("Metric", "Full Classes", "Merged Classes", "Reduction"),
-                   caption = "MDS-Related Classes: Error Reduction Summary") %>%
-  kable_styling(bootstrap_options = c("striped", "hover"), 
-                full_width = FALSE,
-                position = "center") %>%
-  column_spec(1, bold = TRUE) %>%
-  column_spec(4, color = "#2ca02c", bold = TRUE) %>%
-  add_header_above(c(" " = 1, "Full Classes" = 1, "Merged Classes" = 1, "Reduction" = 1))
-
-print(kable_mds)
-```
 
 ## -- Faceted Confusion Matrices per Fold
 
@@ -2354,17 +1543,17 @@ print(kable_mds)
 # Function to create faceted confusion matrices per fold
 make_faceted_cm <- function(type) {
   # Get all folds for this type
-  folds <- names(outer_merged$detailed_performance[[type]]$OvR_Ensemble)
+  folds <- names(outer_merged$detailed_performance[[type]]$svm)
   # Per class
   per_class_list <- list()
   # Collect confusion matrices for all folds
   conf_matrices <- list()
   for (fold in folds) {
-    per_class <- outer_unmerged$detailed_performance[[type]]$OvR_Ensemble[[fold]]$confusion_matrix$byClass
+    per_class <- outer_unmerged$detailed_performance[[type]]$svm[[fold]]$confusion_matrix$byClass
     rownames(per_class) <- gsub("Class: ", "", rownames(per_class))
     rownames(per_class) <- fix_names(rownames(per_class))
     
-    cm <- outer_unmerged$detailed_performance[[type]]$OvR_Ensemble[[fold]]$confusion_matrix$table
+    cm <- outer_unmerged$detailed_performance[[type]]$svm[[fold]]$confusion_matrix$table
     cm <- t(cm)  # Transpose to match convention (rows = reference, cols = prediction)
     
     
@@ -2376,9 +1565,9 @@ make_faceted_cm <- function(type) {
     all_classes <- intersect(order_AML, unique(c(
       rownames(per_class))))
     per_class <- per_class[all_classes, c("F1", "Sensitivity", "Specificity", "Precision", "Recall")]
-    to_remove <- apply(per_class, 1, function(x)
-      any(is.na(x)))
-    per_class <- per_class[!to_remove, ]
+    #to_remove <- apply(per_class, 1, function(x)
+    #  any(is.na(x)))
+    #per_class <- per_class[!to_remove, ]
     cm <- cm[rownames(per_class), rownames(per_class), drop = FALSE]
     
     normalise <- function(x) {
@@ -2563,6 +1752,7 @@ cat("Faceted confusion matrices saved!\n")
 ```
 
 # Performance stratification
+
 ##  --Performance by Fold
 
 ```{r}
@@ -2571,101 +1761,71 @@ pediatric_cohorts <- c("AAML0531", "AAML1031", "AAML03P1")
 
 # Helper function to order folds by mean kappa and create color vector for x-axis labels
 prepare_fold_data <- function(data_subset) {
-  # Calculate mean kappa per fold
   fold_means <- data_subset %>% filter(model == "OvR Ensemble") %>%
     group_by(fold) %>%
     summarise(mean_kappa = mean(kappa), .groups = "drop") %>%
     arrange(mean_kappa)
   
-  # Reorder factor levels from low to high mean kappa
   data_subset$fold <- factor(data_subset$fold, levels = fold_means$fold)
-  
-  # Create color vector for x-axis labels (pediatric = red, adult = blue)
   fold_order <- levels(data_subset$fold)
   label_colors <- ifelse(fold_order %in% pediatric_cohorts, "#fd7f6f", "#7eb0d5")
   
   return(list(data = data_subset, label_colors = label_colors))
 }
 
-# CV: Full subtypes - keep folds in order 0-4, no coloring
+# CV: Full subtypes
 cv_full_data <- results_per_fold[results_per_fold$type == "cv" & results_per_fold$label_set == "Full subtypes", ]
-# Ensure folds are ordered 0-4 (convert to numeric for proper sorting)
 cv_full_data$fold <- factor(cv_full_data$fold, levels = sort(unique(as.character(cv_full_data$fold))))
 pa <- ggplot(cv_full_data, aes(x = fold, y = kappa, color = model, group = model)) +
   geom_line(linewidth = 1) +
   geom_point(size = 3) +
   theme_bw() + 
-  theme(
-    axis.text.x = element_text(angle = 45, hjust = 1),
-    legend.position = "none"
-  ) +
-  labs(
-    title = "CV: Full subtypes",
-    x = "Fold",
-    y = "Cohen's Kappa",
-    color = "Model"
-  ) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none") +
+  labs(title = "CV: Full subtypes", x = "Fold", y = "Cohen's Kappa", color = "Model") + 
   scale_color_manual(values = colours, breaks = rev(names(colours)), limits = rev(names(colours))) + 
   ylim(0.75, 1)
 
-# CV: Collapsed classes - keep folds in order 0-4, no coloring
+# CV: Collapsed classes
 cv_collapsed_data <- results_per_fold[results_per_fold$type == "cv" & results_per_fold$label_set == "Collapsed classes", ]
-# Ensure folds are ordered 0-4 (convert to numeric for proper sorting)
 cv_collapsed_data$fold <- factor(cv_collapsed_data$fold, levels = sort(unique(as.character(cv_collapsed_data$fold))))
 pb <- ggplot(cv_collapsed_data, aes(x = fold, y = kappa, color = model, group = model)) +
   geom_line(linewidth = 1) +
   geom_point(size = 3) +
   theme_bw() + 
-  theme(
-    axis.text.x = element_text(angle = 45, hjust = 1),
-    legend.position = "none"
-  ) +
-  labs(
-    title = "CV: Collapsed classes",
-    x = "Fold",
-    y = "Cohen's Kappa",
-    color = "Model"
-  ) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none") +
+  labs(title = "CV: Collapsed classes", x = "Fold", y = "Cohen's Kappa", color = "Model") + 
   scale_color_manual(values = colours, breaks = rev(names(colours)), limits = rev(names(colours))) + 
   ylim(0.75, 1)
 
 # LOSO: Full subtypes - order by mean kappa
 loso_full_data <- results_per_fold[results_per_fold$type == "loso" & results_per_fold$label_set == "Full subtypes", ]
-loso_full_prep <- prepare_fold_data(loso_full_data)
+
+loso_full_data %>% filter(model == "SVM") %>% mutate(type = ifelse(fold %in% pediatric_cohorts, "Paediatric", "Adult")) %>% group_by(type) %>% summarise(mean_kappa = mean(kappa))
+
+loso_full_prep <- prepare_fold_data(loso_full_data) 
 pc <- ggplot(loso_full_prep$data, aes(x = fold, y = kappa, color = model, group = model)) +
   geom_line(linewidth = 1) +
   geom_point(size = 3) +
   theme_bw() + 
-  theme(
-    axis.text.x = element_text(angle = 45, hjust = 1, colour = loso_full_prep$label_colors),
-    legend.position = "none"
-  ) +
-  labs(
-    title = "LOSO: Full subtypes",
-    x = "Cohort (Fold)",
-    y = "Cohen's Kappa",
-    color = "Model"
-  ) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, colour = loso_full_prep$label_colors),
+        legend.position = "none") +
+  labs(title = "LOSO: Full subtypes", x = "Cohort (Fold)", y = "Cohen's Kappa", color = "Model") + 
   scale_color_manual(values = colours, breaks = rev(names(colours)), limits = rev(names(colours))) + 
   ylim(0.75, 1)
 
 # LOSO: Collapsed classes - order by mean kappa
 loso_collapsed_data <- results_per_fold[results_per_fold$type == "loso" & results_per_fold$label_set == "Collapsed classes", ]
+
+loso_collapsed_data %>% filter(model == "SVM") %>% mutate(type = ifelse(fold %in% pediatric_cohorts, "Paediatric", "Adult")) %>% group_by(type) %>% summarise(mean_kappa = mean(kappa))
+
 loso_collapsed_prep <- prepare_fold_data(loso_collapsed_data)
 pd <- ggplot(loso_collapsed_prep$data, aes(x = fold, y = kappa, color = model, group = model)) +
   geom_line(linewidth = 1) +
   geom_point(size = 3) +
   theme_bw() + 
-  theme(
-    axis.text.x = element_text(angle = 45, hjust = 1, colour = loso_collapsed_prep$label_colors),
-    legend.position = "right"
-  ) +
-  labs(
-    title = "LOSO: Collapsed classes",
-    x = "Cohort (Fold)",
-    y = "Cohen's Kappa",
-    color = "Model"
-  ) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, colour = loso_collapsed_prep$label_colors),
+        legend.position = "right") +
+  labs(title = "LOSO: Collapsed classes", x = "Cohort (Fold)", y = "Cohen's Kappa", color = "Model") + 
   scale_color_manual(values = colours, breaks = rev(names(colours)), limits = rev(names(colours))) + 
   ylim(0.75, 1)
 
@@ -2674,66 +1834,37 @@ library(patchwork)
 library(cowplot)
 library(grid)
 
-# Create a dummy plot for pediatric/adult legend (invisible, just for legend)
-ped_adult_legend_data <- data.frame(
-  cohort_type = c("Pediatric", "Adult"),
-  x = 1:2,
-  y = 1:2
-)
+# Dummy plot for pediatric/adult legend
+ped_adult_legend_data <- data.frame(cohort_type = c("Pediatric", "Adult"), x = 1:2, y = 1:2)
 ped_adult_legend_plot <- ggplot(ped_adult_legend_data, aes(x = x, y = y, fill = cohort_type)) +
   geom_bar(stat = "identity", width = 0.5) +
   scale_fill_manual(values = c("Adult" = "#7eb0d5", "Pediatric" = "#fd7f6f"), name = "Cohort Type") +
   theme_void() +
-  theme(legend.position = "right",
-        legend.title = element_text(size = 10),
-        legend.text = element_text(size = 9),
-        legend.key = element_rect(fill = "white", color = NA),
+  theme(legend.position = "right", legend.title = element_text(size = 10),
+        legend.text = element_text(size = 9), legend.key = element_rect(fill = "white", color = NA),
         plot.margin = margin(0, 0, 0, 0)) +
-  xlim(0, 0) + ylim(0, 0)  # Hide the actual bars by setting limits to 0
+  xlim(0, 0) + ylim(0, 0)
 
-# Create plots without individual legends
-pa_no_legend <- pa + theme(legend.position = "none")
-pb_no_legend <- pb + theme(legend.position = "none")
-pc_no_legend <- pc + theme(legend.position = "none")
-pd_no_legend <- pd + theme(legend.position = "none")
-
-# Combine plots in 2x2 grid
-plots_grid <- (pa_no_legend + pb_no_legend) / (pc_no_legend + pd_no_legend)
-
-# Extract model legend from one of the plots (they all have the same model legend)
+# Combine in 2x2 grid with legends
+plots_grid <- (pa + theme(legend.position = "none") + pb + theme(legend.position = "none")) / 
+              (pc + theme(legend.position = "none") + pd + theme(legend.position = "none"))
 model_legend <- get_legend(pa + theme(legend.position = "right"))
-
-# Extract pediatric/adult legend
 ped_adult_legend <- get_legend(ped_adult_legend_plot)
-
-# Combine legends vertically
-combined_legends <- plot_grid(
-  model_legend,
-  ped_adult_legend,
-  ncol = 1,
-  align = "v"
-)
-
-# Combine plots and legends
-final_plot <- plot_grid(
-  plots_grid,
-  combined_legends,
-  ncol = 2,
-  rel_widths = c(4, 0.6)
-)
+combined_legends <- plot_grid(model_legend, ped_adult_legend, ncol = 1, align = "v")
+final_plot <- plot_grid(plots_grid, combined_legends, ncol = 2, rel_widths = c(4, 0.6))
 
 print(final_plot)
 ```
+
 ## -- Cohort-Level Performance
 
 ```{r}
 library(ggplot2)
 library(dplyr)
 
-# Extract LOSO performance per cohort for the best model 
-loso_performance <- outer_merged$detailed_performance$loso$OvR_Ensemble
+# Extract LOSO performance per cohort
+loso_performance <- outer_merged$detailed_performance$loso$svm
 
-# Create dataframe with performance per cohort
 cohort_performance <- data.frame(
   cohort = names(loso_performance),
   kappa = sapply(loso_performance, function(x) x$kappa),
@@ -2742,93 +1873,56 @@ cohort_performance <- data.frame(
   stringsAsFactors = FALSE
 )
 
-# Calculate proportion of rare subtypes per cohort
+# Cohort subtype distribution
 cohort_subtype_dist <- data.frame(
   cohort = filtered_study_names,
   subtype = filtered_leukemia_subtypes,
   stringsAsFactors = FALSE
 )
-
-# Apply the class modifications
 cohort_subtype_dist$subtype_merged <- modify_classes(cohort_subtype_dist$subtype)
-
-# Map to display names
 cohort_subtype_dist$subtype_display <- fix_names(cohort_subtype_dist$subtype_merged)
 
-# Merge performance and rare subtype data
+# Merge and add pediatric/adult classification
 cohort_analysis <- cohort_performance
-
-# Add pediatric/adult classification
 cohort_analysis$cohort_type <- ifelse(
-  cohort_analysis$cohort %in% c("AAML0531", "AAML1031", "AAML03P1"),
-  "Pediatric",
-  "Adult"
+  cohort_analysis$cohort %in% c("AAML0531", "AAML1031", "AAML03P1"), "Pediatric", "Adult"
 )
 
-# Display the analysis table
 print(cohort_analysis)
-
 cohort_analysis %>% group_by(cohort_type) %>% summarise(mean = mean(kappa), sd = sd(kappa))
 ```
 
 ```{r}
-# Specify the two cohort labels
-A <- "Adult"
-B <- "Pediatric"
-
-xA <- cohort_analysis$kappa[cohort_analysis$cohort_type == A]
-xB <- cohort_analysis$kappa[cohort_analysis$cohort_type == B]
-
-mean(xA) - mean(xB)
-```
-
-
-```{r}
-# Boxplot comparison
+# Boxplot: pediatric vs adult performance
 cohort_analysis_long <- cohort_analysis %>%
-  tidyr::pivot_longer(cols = c(kappa, accuracy), 
-                      names_to = "metric", 
-                      values_to = "value")
+  tidyr::pivot_longer(cols = c(kappa, accuracy), names_to = "metric", values_to = "value")
 
-p_ped_adult <- ggplot(cohort_analysis_long, 
-                      aes(x = cohort_type, y = value, fill = cohort_type)) +
+p_ped_adult <- ggplot(cohort_analysis_long, aes(x = cohort_type, y = value, fill = cohort_type)) +
   geom_boxplot(alpha = 0.7, outlier.shape = NA) +
   geom_jitter(width = 0.2, size = 3, alpha = 0.6) +
   facet_wrap(~metric, scales = "free_y", 
-             labeller = labeller(metric = c(kappa = "Cohen's Kappa", 
-                                            accuracy = "Accuracy"))) +
+             labeller = labeller(metric = c(kappa = "Cohen's Kappa", accuracy = "Accuracy"))) +
   scale_fill_manual(values = c("Adult" = "#7eb0d5", "Pediatric" = "#fd7f6f")) +
   theme_bw() +
-  labs(
-    title = "LOSO Performance: Pediatric vs Adult Cohorts",
-    x = "Cohort Type",
-    y = "Performance",
-    fill = "Cohort Type"
-  ) +
+  labs(title = "LOSO Performance: Pediatric vs Adult Cohorts", x = "Cohort Type", 
+       y = "Performance", fill = "Cohort Type") +
   theme(legend.position = "none")
 
 print(p_ped_adult)
-ggsave("../writing/figures_new/pediatric_vs_adult_performance.png", p_ped_adult, 
-       width = 8, height = 5, dpi = 300)
+ggsave("../writing/figures_new/pediatric_vs_adult_performance.png", p_ped_adult, width = 8, height = 5, dpi = 300)
 ```
 
-
-## -- Sample-Level Accuracy Analysis (needed for downstream analyses)
+## -- Data Preparation: Sample-Level Analysis
 
 ```{r}
-# Build sample-level dataframe with predictions and metadata
-# We'll use LOSO predictions since we're interested in cross-cohort effects
-
-# Extract predictions from LOSO results
+# Build sample-level dataframe with LOSO predictions and metadata
 loso_predictions_list <- list()
 loso_truth_list <- list()
 loso_fold_list <- list()
 loso_indices_list <- list()
 
 for (fold in names(outer_merged$detailed_performance$loso$svm)) {
-  # Get sample indices for this fold
   fold_prob_matrix <- outer_merged$outer_probability_matrices$svm$loso[[fold]]
-  # Extract saved predictions and truth vectors
   predictions <- apply(fold_prob_matrix[,!colnames(fold_prob_matrix) %in% c("y", "outer_fold", "sample_indices")], 1, which.max)
   predictions <- colnames(fold_prob_matrix)[!colnames(fold_prob_matrix) %in% c("y", "outer_fold", "sample_indices")][predictions]
   truth <- as.character(fold_prob_matrix$y)
@@ -2840,108 +1934,64 @@ for (fold in names(outer_merged$detailed_performance$loso$svm)) {
   loso_indices_list[[fold]] <- sample_indices
 }
 
-# Combine all predictions
-all_loso_predictions <- unlist(loso_predictions_list)
-all_loso_truth <- unlist(loso_truth_list)
-all_loso_folds <- unlist(loso_fold_list)
-all_loso_indices <- unlist(loso_indices_list)
-
-# Create sample-level analysis dataframe
+# Combine predictions
 sample_level_df <- data.frame(
-  prediction = all_loso_predictions,
-  truth = all_loso_truth,
-  cohort = all_loso_folds,
-  sample_index = all_loso_indices,
-  correct = all_loso_predictions == all_loso_truth,
+  prediction = unlist(loso_predictions_list),
+  truth = unlist(loso_truth_list),
+  cohort = unlist(loso_fold_list),
+  sample_index = unlist(loso_indices_list),
   stringsAsFactors = FALSE
 )
+sample_level_df$correct <- sample_level_df$prediction == sample_level_df$truth
 
-# Add age information from filtered meta
-# Note: sample_index refers to the filtered dataset (after applying inclusion criteria)
-
+# Add age and apply class transformations
 sample_level_df$age_days <- meta$age_days[sample_level_df$sample_index + 1]
 sample_level_df$age_years <- sample_level_df$age_days / 365.25
-
-# Apply modifications and fix names to BOTH truth and prediction labels
 sample_level_df$truth_merged <- modify_classes(sample_level_df$truth)
 sample_level_df$truth_display <- fix_names(sample_level_df$truth_merged)
-
 sample_level_df$prediction_merged <- modify_classes(sample_level_df$prediction)
 sample_level_df$prediction_display <- fix_names(sample_level_df$prediction_merged)
-
-# Add metadata
 sample_level_df$is_pediatric <- sample_level_df$cohort %in% c("AAML0531", "AAML1031", "AAML03P1")
 
-# Define rare subtypes based on sample count threshold
+# Define rare subtypes
 subtype_counts <- table(sample_level_df$truth_display)
-rare_subtypes <- names(subtype_counts[subtype_counts < 50])  # Subtypes with < 30 samples are considered rare
+rare_subtypes <- names(subtype_counts[subtype_counts < 50])
 sample_level_df$is_rare <- sample_level_df$truth_display %in% rare_subtypes
 
-cat("\n\nSubtype Classification:\n")
-cat("======================\n")
-cat(sprintf("Rare subtypes (< 50 samples): %d\n", length(rare_subtypes)))
-if (length(rare_subtypes) > 0) {
-  cat("Rare subtype list:\n")
-  for (subtype in rare_subtypes) {
-    cat(sprintf("  - %s: %d samples\n", subtype, subtype_counts[subtype]))
-  }
-}
-cat(sprintf("\nCommon subtypes (>= 50 samples): %d\n", 
-            sum(subtype_counts >= 50)))
-cat(sprintf("Total rare samples: %d (%.1f%%)\n", 
-            sum(sample_level_df$is_rare),
-            100 * mean(sample_level_df$is_rare)))
-
-# Summary statistics
-cat("Sample-Level Summary:\n")
-cat("=====================\n")
-cat(sprintf("Total samples: %d\n", nrow(sample_level_df)))
-cat(sprintf("Pediatric cohort samples: %d (%.1f%%)\n", 
-            sum(sample_level_df$is_pediatric), 
-            100 * mean(sample_level_df$is_pediatric)))
-cat(sprintf("\nOverall accuracy: %.2f\n", mean(sample_level_df$correct)))
-
-# Create sample_level_age as alias for age-related analyses
+# Alias for downstream analyses
 sample_level_age <- sample_level_df
 ```
-
 
 ## -- Visualization: Age Effect on Performance
 
 ```{r}
-# Binned kappa and accuracy by age
+# Binned kappa by age
 age_bins <- seq(0, 90, by = 5)
 age_performance <- data.frame()
 
 for (i in 1:(length(age_bins)-1)) {
   age_min <- age_bins[i]
   age_max <- age_bins[i+1]
-  
   subset_data <- sample_level_age[sample_level_age$age_years >= age_min & 
                                    sample_level_age$age_years < age_max, ]
   
-  if (nrow(subset_data) >= 10) {  # Need reasonable sample size for kappa
-    # Calculate kappa for this age bin
+  if (nrow(subset_data) >= 10) {
     cm <- caret::confusionMatrix(
       factor(subset_data$prediction_display, levels = unique(c(subset_data$truth_display, subset_data$prediction_display))),
       factor(subset_data$truth_display, levels = unique(c(subset_data$truth_display, subset_data$prediction_display)))
     )
     
-    kappa <- as.numeric(cm$overall["Kappa"])
-    accuracy <- mean(subset_data$correct)
-    
     age_performance <- rbind(age_performance, data.frame(
       age_mid = (age_min + age_max) / 2,
       age_label = sprintf("%d-%d", age_min, age_max),
       n = nrow(subset_data),
-      accuracy = accuracy,
-      kappa = kappa,
+      accuracy = mean(subset_data$correct),
+      kappa = as.numeric(cm$overall["Kappa"]),
       se_accuracy = sd(subset_data$correct) / sqrt(nrow(subset_data))
     ))
   }
 }
 
-# Plot kappa by age with accuracy overlay
 p_age_kappa <- ggplot(age_performance, aes(x = age_mid, y = kappa)) +
   geom_point(aes(size = n), alpha = 0.7, color = "#7eb0d5") +
   geom_smooth(method = "loess", se = TRUE, color = "#7eb0d5", fill = "#7eb0d5", 
@@ -2951,38 +2001,21 @@ p_age_kappa <- ggplot(age_performance, aes(x = age_mid, y = kappa)) +
            label = "Pediatric/Adult\nBoundary", vjust = 1, size = 3, color = "gray40") +
   scale_size_continuous(range = c(3, 12), name = "Sample Size") +
   theme_bw() +
-  labs(
-    title = "Prediction Performance by Patient Age",
-    subtitle = sprintf("Based on LOSO validation (n=%d patients)", nrow(sample_level_age)),
-    x = "Age (years)",
-    y = "Cohen's Kappa"
-  ) +
-  ylim(min(age_performance$kappa) - 0.1, 1) +
+  labs(title = "Prediction Performance by Patient Age",
+       subtitle = sprintf("Based on LOSO validation (n=%d patients)", nrow(sample_level_age)),
+       x = "Age (years)", y = "Cohen's Kappa") +
+  ylim(min(age_performance$kappa) - 0.15, 1) +
   theme(text = element_text(size = 12))
 
 print(p_age_kappa)
-ggsave("../writing/figures_new/age_effect_on_performance.png", p_age_kappa, 
-       width = 10, height = 6, dpi = 300)
+ggsave("../writing/figures_new/age_effect_on_performance.png", p_age_kappa, width = 10, height = 6, dpi = 300)
 ```
 
 ## -- Per-Subtype F1 by Age Analysis
 
 ```{r}
-# Calculate F1 scores per subtype and age bin
-# Use same 5-year bins as the kappa visualization (0 to 90 in steps of 5)
+# Calculate F1 per subtype per 15-year age bin
 age_bins_5yr <- seq(0, 90, by = 15)
-
-# Ensure prediction_display exists (apply same transformations as truth_display)
-if (!"prediction_display" %in% colnames(sample_level_age)) {
-  sample_level_age$prediction_merged <- modify_classes(sample_level_age$prediction)
-  sample_level_age$prediction_display <- fix_names(sample_level_age$prediction_merged)
-}
-
-cat(sprintf("Checking data: truth_display present: %s, prediction_display present: %s\n",
-            "truth_display" %in% colnames(sample_level_age),
-            "prediction_display" %in% colnames(sample_level_age)))
-
-# Calculate F1 score per subtype per age bin
 subtypes_unique <- unique(sample_level_age$truth_display)
 f1_by_age_subtype <- data.frame()
 
@@ -2992,28 +2025,16 @@ for (i in 1:(length(age_bins_5yr)-1)) {
   age_mid <- (age_min + age_max) / 2
   age_label <- sprintf("%d-%d", age_min, age_max)
   
-  # Get all samples in this age bin
   age_bin_data <- sample_level_age[sample_level_age$age_years >= age_min & 
                                      sample_level_age$age_years < age_max, ]
-  
   if (nrow(age_bin_data) == 0) next
   
   for (subtype_i in subtypes_unique) {
-    # For this subtype in this age bin:
-    # TP: samples of this subtype correctly predicted as this subtype
-    # FP: samples of OTHER subtypes incorrectly predicted as this subtype
-    # FN: samples of this subtype incorrectly predicted as something else
-    
-    tp <- sum(age_bin_data$truth_display == subtype_i & 
-              age_bin_data$prediction_display == subtype_i)
-    fp <- sum(age_bin_data$truth_display != subtype_i & 
-              age_bin_data$prediction_display == subtype_i)
-    fn <- sum(age_bin_data$truth_display == subtype_i & 
-              age_bin_data$prediction_display != subtype_i)
-    
+    tp <- sum(age_bin_data$truth_display == subtype_i & age_bin_data$prediction_display == subtype_i)
+    fp <- sum(age_bin_data$truth_display != subtype_i & age_bin_data$prediction_display == subtype_i)
+    fn <- sum(age_bin_data$truth_display == subtype_i & age_bin_data$prediction_display != subtype_i)
     n_true <- sum(age_bin_data$truth_display == subtype_i)
     
-    # Only include if we have at least 3 samples of this subtype (lowered threshold for 5-year bins)
     if (n_true >= 5) {
       precision <- ifelse(tp + fp > 0, tp / (tp + fp), NA)
       recall <- ifelse(tp + fn > 0, tp / (tp + fn), NA)
@@ -3021,190 +2042,91 @@ for (i in 1:(length(age_bins_5yr)-1)) {
                          2 * precision * recall / (precision + recall), NA)
       
       f1_by_age_subtype <- rbind(f1_by_age_subtype, data.frame(
-        age_bin = age_label,
-        age_min = age_min,
-        age_max = age_max,
-        age_mid = age_mid,
-        truth_display = subtype_i,
-        n = n_true,
-        tp = tp,
-        fp = fp,
-        fn = fn,
-        precision = precision,
-        recall = recall,
-        f1_score = f1_score
+        age_bin = age_label, age_min = age_min, age_max = age_max, age_mid = age_mid,
+        truth_display = subtype_i, n = n_true, tp = tp, fp = fp, fn = fn,
+        precision = precision, recall = recall, f1_score = f1_score
       ))
     }
   }
 }
-```
 
-## -- Visualization: Subtype F1 by Age
+# Filter to subtypes with data across multiple age ranges
+subtypes_multi_age <- f1_by_age_subtype %>%
+  group_by(truth_display) %>%
+  summarise(n_age_bins = n(), .groups = "drop") %>%
+  filter(n_age_bins >= 2)
 
-```{r}
-# Filter to subtypes with data across age ranges
 f1_by_age_plot <- f1_by_age_subtype %>%
   filter(truth_display %in% subtypes_multi_age$truth_display)
 
-# Create color palette for subtypes
-n_subtypes <- length(unique(f1_by_age_plot$truth_display))
-subtype_colors <- scales::hue_pal()(n_subtypes)
-names(subtype_colors) <- unique(f1_by_age_plot$truth_display)
-
-# Plot F1 by age for each subtype - FACETED
-p_f1_age_subtype_facet <- ggplot(f1_by_age_plot, 
-                                  aes(x = age_mid, y = f1_score)) +
+# Faceted plot
+p_f1_age_subtype_facet <- ggplot(f1_by_age_plot, aes(x = age_mid, y = f1_score)) +
   geom_line(linewidth = 1, color = "#7eb0d5", alpha = 0.8) +
   geom_point(aes(size = n), color = "#7eb0d5", alpha = 0.7) +
   geom_vline(xintercept = 18, linetype = "dashed", color = "gray40", alpha = 0.4, linewidth = 0.5) +
   facet_wrap(~truth_display, ncol = 4, scales = "free_y") +
   scale_size_continuous(range = c(2, 6), name = "Sample Size (n)",
-                         breaks = c(10, 25, 50),
-                         labels = c("n=10", "n=25", "n=50")) +
+                        breaks = c(10, 25, 50), labels = c("n=10", "n=25", "n=50")) +
   theme_bw() +
-  labs(
-    title = "Per-Subtype F1 Score by Patient Age",
-    subtitle = "Dashed line marks pediatric/adult boundary (18 years)",
-    x = "Age (years)",
-    y = "F1 Score"
-  ) +
+  labs(title = "Per-Subtype F1 Score by Patient Age",
+       subtitle = "Dashed line marks pediatric/adult boundary (18 years)",
+       x = "Age (years)", y = "F1 Score") +
   theme(strip.background = element_rect(fill = "gray95"),
         strip.text = element_text(size = 9, face = "bold"),
         panel.grid.minor = element_blank(),
-        legend.position = "bottom") +ylim(0.4,1)
+        legend.position = "bottom") +
+  ylim(0.4, 1)
 
 print(p_f1_age_subtype_facet)
-ggsave("../writing/figures_new/f1_by_age_and_subtype_faceted.png", p_f1_age_subtype_facet, 
-       width = 14, height = 10, dpi = 300)
+ggsave("../writing/figures_new/f1_by_age_and_subtype_faceted.png", p_f1_age_subtype_facet, width = 14, height = 10, dpi = 300)
 ```
 
-
-
-
-## -- Cohort-Level Age Analysis
+## -- Data Preparation: Subtype Enrichment Analysis
 
 ```{r}
-# Calculate mean age per cohort
-cohort_age_stats <- sample_level_age %>%
-  group_by(cohort) %>%
-  summarise(
-    n = n(),
-    mean_age = mean(age_years, na.rm = TRUE),
-    median_age = median(age_years, na.rm = TRUE),
-    sd_age = sd(age_years, na.rm = TRUE),
-    accuracy = mean(correct),
-    .groups = "drop"
-  )
-
-# Merge with cohort_analysis
-cohort_analysis_age <- merge(cohort_analysis, cohort_age_stats[, c("cohort", "mean_age", "median_age")],
-                              by = "cohort", all.x = TRUE)
-cohort_analysis_age$cohort[grepl("BEAT", cohort_analysis_age$cohort)] <- "BEAT-AML"
-# Scatter plot
-p_cohort_age <- ggplot(cohort_analysis_age, 
-                       aes(x = mean_age, y = kappa, label = cohort, color = cohort_type)) +
-  geom_point(size = 4, alpha = 0.8) +
-  geom_text(hjust = -0.2, vjust = 0.5, size = 3, show.legend = FALSE) +
-  scale_color_manual(values = c("Adult" = "#7eb0d5", "Pediatric" = "#fd7f6f")) +
-  theme_bw() +
-  labs(
-    title = "Cohort Performance vs Mean Age",
-    x = "Mean Age of Cohort (years)",
-    y = "Cohen's Kappa",
-    color = "Cohort Type"
-  ) +
-  theme(legend.position = "bottom") +
-  xlim(0, max(cohort_analysis_age$mean_age, na.rm = TRUE) * 1.15)
-
-print(p_cohort_age)
-ggsave("../writing/figures_new/cohort_age_correlation.png", p_cohort_age, 
-       width = 8, height = 6, dpi = 300)
-```
-
-## -- Subtype Enrichment Analysis: Pediatric vs Adult
-
-```{r}
-# Get F1 scores per subtype from the per-class summaries
+# Get F1 scores per subtype from per-class summaries
 per_class_f1 <- outer_merged$per_class_summaries$cv %>%
   filter(Model == "Global_Optimized") %>%
   select(Class, Mean_F1)
-
-# Clean class names
 per_class_f1$Class <- gsub("Class: ", "", per_class_f1$Class)
 per_class_f1$Class <- fix_names(per_class_f1$Class)
-#per_class_f1$Class[grepl("MDS", per_class_f1$Class)] <- "MDS.r/MECOM"
 
 # Analyze subtype distribution in pediatric vs adult samples
 subtype_enrichment <- sample_level_age %>%
   group_by(truth_display, is_pediatric) %>%
-  summarise(
-    n = n(),
-    accuracy = mean(correct),
-    .groups = "drop"
-  ) %>%
-  tidyr::pivot_wider(
-    names_from = is_pediatric,
-    values_from = c(n, accuracy),
-    values_fill = list(n = 0, accuracy = NA)
-  ) %>%
-  rename(
-    n_adult = `n_FALSE`,
-    n_pediatric = `n_TRUE`,
-    accuracy_adult = `accuracy_FALSE`,
-    accuracy_pediatric = `accuracy_TRUE`
-  )
+  summarise(n = n(), accuracy = mean(correct), .groups = "drop") %>%
+  tidyr::pivot_wider(names_from = is_pediatric, values_from = c(n, accuracy),
+                     values_fill = list(n = 0, accuracy = NA)) %>%
+  rename(n_adult = `n_FALSE`, n_pediatric = `n_TRUE`,
+         accuracy_adult = `accuracy_FALSE`, accuracy_pediatric = `accuracy_TRUE`)
 
-# Merge with F1 scores
+# Merge with F1 scores and calculate enrichment
 subtype_enrichment <- merge(subtype_enrichment, per_class_f1, 
-                            by.x = "truth_display", by.y = "Class", 
-                            all.x = TRUE)
+                            by.x = "truth_display", by.y = "Class", all.x = TRUE)
 
-# Calculate proportions and enrichment
 total_adult <- sum(subtype_enrichment$n_adult)
 total_pediatric <- sum(subtype_enrichment$n_pediatric)
-
 subtype_enrichment$prop_adult <- subtype_enrichment$n_adult / total_adult
 subtype_enrichment$prop_pediatric <- subtype_enrichment$n_pediatric / total_pediatric
-
-# Enrichment ratio (>1 means enriched in pediatric)
 subtype_enrichment$enrichment_ratio <- (subtype_enrichment$prop_pediatric + 0.001) / 
                                        (subtype_enrichment$prop_adult + 0.001)
-
-# Calculate overall accuracy per subtype (for reference)
 subtype_enrichment$overall_accuracy <- 
   (subtype_enrichment$n_adult * subtype_enrichment$accuracy_adult + 
    subtype_enrichment$n_pediatric * subtype_enrichment$accuracy_pediatric) /
   (subtype_enrichment$n_adult + subtype_enrichment$n_pediatric)
 
-# Chi-square tests for each subtype
+# Chi-square/Fisher tests for enrichment classification
 subtype_enrichment$chi_sq_p <- NA
-
 for (i in 1:nrow(subtype_enrichment)) {
-  subtype_name <- subtype_enrichment$truth_display[i]
-  n_subtype_ped <- subtype_enrichment$n_pediatric[i]
-  n_subtype_adult <- subtype_enrichment$n_adult[i]
-  n_other_ped <- total_pediatric - n_subtype_ped
-  n_other_adult <- total_adult - n_subtype_adult
-  
-  # Create contingency table
-  cont_table <- matrix(c(n_subtype_ped, n_other_ped,
-                         n_subtype_adult, n_other_adult),
+  cont_table <- matrix(c(subtype_enrichment$n_pediatric[i], 
+                         total_pediatric - subtype_enrichment$n_pediatric[i],
+                         subtype_enrichment$n_adult[i], 
+                         total_adult - subtype_enrichment$n_adult[i]),
                        nrow = 2, byrow = TRUE)
-  
-  # Fisher's exact test (better for small counts)
-  if (min(cont_table) < 5) {
-    test_result <- fisher.test(cont_table)
-  } else {
-    test_result <- chisq.test(cont_table)
-  }
-  
+  test_result <- if (min(cont_table) < 5) fisher.test(cont_table) else chisq.test(cont_table)
   subtype_enrichment$chi_sq_p[i] <- test_result$p.value
 }
-
-# Adjust for multiple testing
 subtype_enrichment$chi_sq_p_adj <- p.adjust(subtype_enrichment$chi_sq_p, method = "BH")
-
-# Classify subtypes
 subtype_enrichment$enrichment_class <- ifelse(
   subtype_enrichment$chi_sq_p_adj < 0.05,
   ifelse(subtype_enrichment$enrichment_ratio > 1, "Pediatric-enriched",
@@ -3212,375 +2134,81 @@ subtype_enrichment$enrichment_class <- ifelse(
   "Similar"
 )
 
-cat("\n\nSubtype Enrichment in Pediatric vs Adult:\n")
-cat("==========================================\n")
-cat(sprintf("Total Adult samples: %d\n", total_adult))
-cat(sprintf("Total Pediatric samples: %d\n", total_pediatric))
-
-cat("\n\nSubtypes significantly enriched in PEDIATRIC cohorts:\n")
-ped_enriched <- subtype_enrichment %>%
-  filter(enrichment_class == "Pediatric-enriched") %>%
-  arrange(desc(enrichment_ratio))
-print(ped_enriched[, c("truth_display", "n_pediatric", "n_adult", "enrichment_ratio", 
-                       "Mean_F1", "overall_accuracy", "chi_sq_p_adj")])
-
-cat("\n\nSubtypes significantly enriched in ADULT cohorts:\n")
-adult_enriched <- subtype_enrichment %>%
-  filter(enrichment_class == "Adult-enriched") %>%
-  arrange(enrichment_ratio)
-print(adult_enriched[, c("truth_display", "n_pediatric", "n_adult", "enrichment_ratio", 
-                         "Mean_F1", "overall_accuracy", "chi_sq_p_adj")])
-```
-
-## -- Test: Do Pediatric-Enriched Subtypes Have Lower Accuracy?
-
-```{r}
-# Compare accuracy of pediatric-enriched vs other subtypes
-ped_enriched_subtypes <- subtype_enrichment$truth_display[
-  subtype_enrichment$enrichment_class == "Pediatric-enriched"
+# Label samples by enrichment class
+sample_level_age$subtype_enrichment <- subtype_enrichment$enrichment_class[
+  match(sample_level_age$truth_display, subtype_enrichment$truth_display)
 ]
-
-adult_enriched_subtypes <- subtype_enrichment$truth_display[
-  subtype_enrichment$enrichment_class == "Adult-enriched"
-]
-
-similar_subtypes <- subtype_enrichment$truth_display[
-  subtype_enrichment$enrichment_class == "Similar"
-]
-
-# Calculate mean F1 and accuracy per group
-performance_by_enrichment <- subtype_enrichment %>%
-  group_by(enrichment_class) %>%
-  summarise(
-    n_subtypes = n(),
-    mean_F1 = mean(Mean_F1, na.rm = TRUE),
-    sd_F1 = sd(Mean_F1, na.rm = TRUE),
-    median_F1 = median(Mean_F1, na.rm = TRUE),
-    mean_accuracy = mean(overall_accuracy, na.rm = TRUE),
-    sd_accuracy = sd(overall_accuracy, na.rm = TRUE),
-    .groups = "drop"
-  )
-
-cat("\n\nPerformance by Subtype Enrichment Class:\n")
-cat("========================================\n")
-print(performance_by_enrichment)
-
-# Statistical test using F1 scores
-if (nrow(ped_enriched) > 0 && (nrow(adult_enriched) + length(similar_subtypes)) > 0) {
-  f1_ped_enriched <- subtype_enrichment$Mean_F1[
-    subtype_enrichment$enrichment_class == "Pediatric-enriched"
-  ]
-  f1_not_ped_enriched <- subtype_enrichment$Mean_F1[
-    subtype_enrichment$enrichment_class != "Pediatric-enriched"
-  ]
-  
-  # Remove NAs
-  f1_ped_enriched <- f1_ped_enriched[!is.na(f1_ped_enriched)]
-  f1_not_ped_enriched <- f1_not_ped_enriched[!is.na(f1_not_ped_enriched)]
-  
-  if (length(f1_ped_enriched) > 0 && length(f1_not_ped_enriched) > 0) {
-    wilcox_enrichment <- wilcox.test(f1_ped_enriched, f1_not_ped_enriched)
-    
-    cat(sprintf("\n\nMann-Whitney U test on F1 scores (Pediatric-enriched vs Others):\n"))
-    cat(sprintf("W = %.1f, p = %.2f\n", wilcox_enrichment$statistic, wilcox_enrichment$p.value))
-    cat(sprintf("Pediatric-enriched mean F1: %.2f\n", mean(f1_ped_enriched)))
-    cat(sprintf("Other subtypes mean F1: %.2f\n", mean(f1_not_ped_enriched)))
-  }
-}
 ```
 
-## -- Sample-Level Analysis: Controlling for Subtype
+## -- Data Preparation: Per-Class F1 by Cohort Type
 
 ```{r}
-# Label each sample by its subtype enrichment class
-sample_level_age$subtype_enrichment <- NA
-
-for (i in 1:nrow(sample_level_age)) {
-  subtype <- sample_level_age$truth_display[i]
-  enrich_class <- subtype_enrichment$enrichment_class[
-    subtype_enrichment$truth_display == subtype
-  ]
-  if (length(enrich_class) > 0) {
-    sample_level_age$subtype_enrichment[i] <- enrich_class
-  }
-}
-
-# Calculate accuracy by pediatric status AND subtype enrichment
-accuracy_by_ped_and_enrichment <- sample_level_age %>%
-  filter(!is.na(subtype_enrichment)) %>%
-  group_by(is_pediatric, subtype_enrichment) %>%
-  summarise(
-    n = n(),
-    accuracy = mean(correct),
-    .groups = "drop"
-  )
-
-cat("\n\nAccuracy by Pediatric Status and Subtype Enrichment:\n")
-cat("====================================================\n")
-print(accuracy_by_ped_and_enrichment)
-
-# Test if pediatric effect persists within each subtype enrichment class
-cat("\n\nWithin-Enrichment-Class Comparisons:\n")
-cat("====================================\n")
-
-for (enrich_class in unique(sample_level_age$subtype_enrichment)) {
-  if (is.na(enrich_class)) next
-  
-  subset_data <- sample_level_age[sample_level_age$subtype_enrichment == enrich_class & 
-                                   !is.na(sample_level_age$subtype_enrichment), ]
-  
-  ped_data <- subset_data[subset_data$is_pediatric == TRUE, ]
-  adult_data <- subset_data[subset_data$is_pediatric == FALSE, ]
-  
-  if (nrow(ped_data) > 0 && nrow(adult_data) > 0) {
-    wilcox_within <- wilcox.test(
-      as.numeric(ped_data$correct), 
-      as.numeric(adult_data$correct)
-    )
-    
-    cat(sprintf("\n%s subtypes:\n", enrich_class))
-    cat(sprintf("  Pediatric: n=%d, accuracy=%.2f\n", nrow(ped_data), mean(ped_data$correct)))
-    cat(sprintf("  Adult: n=%d, accuracy=%.2f\n", nrow(adult_data), mean(adult_data$correct)))
-    cat(sprintf("  Mann-Whitney U: W=%.1f, p=%.2f\n", 
-                wilcox_within$statistic, wilcox_within$p.value))
-  }
-}
-```
-
-## -- Kappa by Pediatric Status and Subtype Enrichment
-
-```{r}
-# Calculate kappa by pediatric status AND subtype enrichment
-library(caret)
-
-# Create list to store results
-kappa_by_ped_and_enrichment_list <- list()
-
-# Get unique combinations of is_pediatric and subtype_enrichment
-combinations <- sample_level_age %>%
-  filter(!is.na(subtype_enrichment)) %>%
-  distinct(is_pediatric, subtype_enrichment)
-
-for (i in 1:nrow(combinations)) {
-  is_ped <- combinations$is_pediatric[i]
-  enrich <- combinations$subtype_enrichment[i]
-  
-  # Get subset
-  subset_data <- sample_level_age %>%
-    filter(is_pediatric == is_ped, subtype_enrichment == enrich, !is.na(subtype_enrichment))
-  
-  if (nrow(subset_data) >= 10) {  # Minimum samples for meaningful kappa
-    # Get all possible levels from both predictions and truth
-    all_levels <- unique(c(subset_data$truth_display, subset_data$prediction_display))
-    
-    # Create confusion matrix
-    cm <- confusionMatrix(
-      factor(subset_data$prediction_display, levels = all_levels),
-      factor(subset_data$truth_display, levels = all_levels)
-    )
-    
-    kappa_by_ped_and_enrichment_list[[length(kappa_by_ped_and_enrichment_list) + 1]] <- data.frame(
-      is_pediatric = is_ped,
-      subtype_enrichment = enrich,
-      n = nrow(subset_data),
-      kappa = as.numeric(cm$overall["Kappa"]),
-      accuracy = as.numeric(cm$overall["Accuracy"])
-    )
-  }
-}
-
-# Combine into dataframe
-kappa_by_ped_and_enrichment <- do.call(rbind, kappa_by_ped_and_enrichment_list)
-
-cat("\n\nKappa by Pediatric Status and Subtype Enrichment:\n")
-cat("=================================================\n")
-print(kappa_by_ped_and_enrichment)
-```
-
-## -- Visualization: Kappa by Enrichment and Cohort Type
-
-```{r}
-# Create labels for better plotting
-kappa_by_ped_and_enrichment$cohort_type <- ifelse(
-  kappa_by_ped_and_enrichment$is_pediatric, 
-  "Pediatric Cohort", 
-  "Adult Cohort"
-)
-kappa_by_ped_and_enrichment <- kappa_by_ped_and_enrichment[kappa_by_ped_and_enrichment$subtype_enrichment != "Similar",]
-# Create bar plot
-p_kappa_enrichment <- ggplot(kappa_by_ped_and_enrichment, 
-                             aes(x = subtype_enrichment, y = kappa, 
-                                 fill = cohort_type)) +
-  geom_col(position = "dodge", alpha = 0.8) +
-  geom_text(aes(label = sprintf("κ=%.2f\n(n=%d)", kappa, n)), 
-            position = position_dodge(width = 0.9),
-            vjust = -0.5, size = 3) +
-  scale_fill_manual(
-    values = c("Pediatric Cohort" = "#fd7f6f", "Adult Cohort" = "#7eb0d5"),
-    name = "Cohort Type"
-  ) +
-  theme_bw() +
-  labs(
-    title = "Performance (Cohen's Kappa) by Subtype Enrichment and Cohort Type",
-    subtitle = "LOSO Cross-Validation: How well does the model perform on different subtype-cohort combinations?",
-    x = "Subtype Enrichment Class",
-    y = "Cohen's Kappa"
-  ) +
-  ylim(0, 1) +
-  theme(
-    legend.position = "bottom",
-    axis.text.x = element_text(angle = 45, hjust = 1),
-    plot.title = element_text(size = 12, face = "bold"),
-    plot.subtitle = element_text(size = 10)
-  )
-
-print(p_kappa_enrichment)
-ggsave("../writing/figures_new/kappa_by_enrichment_cohort.png", p_kappa_enrichment, 
-       width = 10, height = 7, dpi = 300)
-```
-
-## -- Statistical Tests: Kappa Differences
-
-```{r}
-# Test if kappa differs between pediatric and adult cohorts within each enrichment class
-cat("\n\nKappa Differences Between Cohort Types:\n")
-cat("========================================\n")
-
-for (enrich_class in unique(kappa_by_ped_and_enrichment$subtype_enrichment)) {
-  subset_kappa <- kappa_by_ped_and_enrichment[
-    kappa_by_ped_and_enrichment$subtype_enrichment == enrich_class, 
-  ]
-  
-  if (nrow(subset_kappa) == 2) {  # Both pediatric and adult present
-    ped_kappa <- subset_kappa$kappa[subset_kappa$is_pediatric == TRUE]
-    adult_kappa <- subset_kappa$kappa[subset_kappa$is_pediatric == FALSE]
-    kappa_diff <- ped_kappa - adult_kappa
-    
-    cat(sprintf("\n%s subtypes:\n", enrich_class))
-    cat(sprintf("  Pediatric cohort: κ = %.2f\n", ped_kappa))
-    cat(sprintf("  Adult cohort: κ = %.2f\n", adult_kappa))
-    cat(sprintf("  Difference (Ped - Adult): %.2f\n", kappa_diff))
-    
-    if (kappa_diff < 0) {
-      cat("  → Model performs BETTER on adult cohorts for these subtypes\n")
-    } else {
-      cat("  → Model performs BETTER on pediatric cohorts for these subtypes\n")
-    }
-  }
-}
-```
-
-## -- Per-Class F1: Comparing Individual Subtypes by Cohort Type and Enrichment
-
-```{r}
-# Calculate per-class F1 scores separately for pediatric and adult cohorts
-f1_per_class_cohort_list <- list()
-
 # Function to calculate F1 for a specific subtype and cohort subset
 calc_f1_for_subset <- function(data_subset, subtype_name, all_data) {
-  if (nrow(data_subset) < 5) {  # Minimum samples
-    return(NULL)
-  }
+  if (nrow(data_subset) < 5) return(NULL)
   
-  # Calculate per-class metrics
   n_total <- nrow(data_subset)
   n_correct <- sum(data_subset$prediction_display == data_subset$truth_display)
-  sensitivity <- n_correct / n_total  # Recall: TP / (TP + FN)
+  sensitivity <- n_correct / n_total
   
-  # Get precision: TP / (TP + FP) calculated from the same cohort subset
   n_predicted_as_this <- sum(all_data$prediction_display == subtype_name)
   if (n_predicted_as_this > 0) {
     n_correct_total <- sum(all_data$prediction_display == subtype_name & 
                            all_data$truth_display == subtype_name)
     precision <- n_correct_total / n_predicted_as_this
-    # F1 score
-    if (precision + sensitivity > 0) {
-      f1 <- 2 * (precision * sensitivity) / (precision + sensitivity)
-    } else {
-      f1 <- 0
-    }
+    f1 <- if (precision + sensitivity > 0) 2 * (precision * sensitivity) / (precision + sensitivity) else 0
   } else {
     precision <- 0
     f1 <- 0
   }
   
-  return(list(
-    n = n_total,
-    sensitivity = sensitivity,
-    precision = precision,
-    f1 = f1,
-    n_correct = n_correct
-  ))
+  list(n = n_total, sensitivity = sensitivity, precision = precision, f1 = f1, n_correct = n_correct)
 }
 
-# Loop through each subtype
+# Calculate F1 per class per cohort type
+f1_per_class_cohort_list <- list()
+
 for (subtype in unique(sample_level_age$truth_display)) {
-  # Get all samples of this subtype
   subset_all <- sample_level_age[sample_level_age$truth_display == subtype, ]
+  if (nrow(subset_all) < 10) next
   
-  if (nrow(subset_all) >= 10) {  # Only analyze if enough total samples
-    # Split by pediatric/adult
-    subset_ped <- subset_all[subset_all$is_pediatric == TRUE, ]
-    subset_adult <- subset_all[subset_all$is_pediatric == FALSE, ]
-    
-    # Get corresponding cohort data for precision calculation
-    all_ped <- sample_level_age[sample_level_age$is_pediatric == TRUE, ]
-    all_adult <- sample_level_age[sample_level_age$is_pediatric == FALSE, ]
-    
-    # Calculate for pediatric cohort
-    if (nrow(subset_ped) >= 5) {
-      metrics_ped <- calc_f1_for_subset(subset_ped, subtype, all_ped)
-      if (!is.null(metrics_ped)) {
-        f1_per_class_cohort_list[[length(f1_per_class_cohort_list) + 1]] <- data.frame(
-          subtype = subtype,
-          is_pediatric = TRUE,
-          cohort_type = "Pediatric",
-          n = metrics_ped$n,
-          sensitivity = metrics_ped$sensitivity,
-          precision = metrics_ped$precision,
-          f1 = metrics_ped$f1,
-          n_correct = metrics_ped$n_correct
-        )
-      }
+  subset_ped <- subset_all[subset_all$is_pediatric == TRUE, ]
+  subset_adult <- subset_all[subset_all$is_pediatric == FALSE, ]
+  all_ped <- sample_level_age[sample_level_age$is_pediatric == TRUE, ]
+  all_adult <- sample_level_age[sample_level_age$is_pediatric == FALSE, ]
+  
+  if (nrow(subset_ped) >= 5) {
+    metrics_ped <- calc_f1_for_subset(subset_ped, subtype, all_ped)
+    if (!is.null(metrics_ped)) {
+      f1_per_class_cohort_list[[length(f1_per_class_cohort_list) + 1]] <- data.frame(
+        subtype = subtype, is_pediatric = TRUE, cohort_type = "Pediatric",
+        n = metrics_ped$n, sensitivity = metrics_ped$sensitivity,
+        precision = metrics_ped$precision, f1 = metrics_ped$f1, n_correct = metrics_ped$n_correct
+      )
     }
-    
-    # Calculate for adult cohort
-    if (nrow(subset_adult) >= 5) {
-      metrics_adult <- calc_f1_for_subset(subset_adult, subtype, all_adult)
-      if (!is.null(metrics_adult)) {
-        f1_per_class_cohort_list[[length(f1_per_class_cohort_list) + 1]] <- data.frame(
-          subtype = subtype,
-          is_pediatric = FALSE,
-          cohort_type = "Adult",
-          n = metrics_adult$n,
-          sensitivity = metrics_adult$sensitivity,
-          precision = metrics_adult$precision,
-          f1 = metrics_adult$f1,
-          n_correct = metrics_adult$n_correct
-        )
-      }
+  }
+  
+  if (nrow(subset_adult) >= 5) {
+    metrics_adult <- calc_f1_for_subset(subset_adult, subtype, all_adult)
+    if (!is.null(metrics_adult)) {
+      f1_per_class_cohort_list[[length(f1_per_class_cohort_list) + 1]] <- data.frame(
+        subtype = subtype, is_pediatric = FALSE, cohort_type = "Adult",
+        n = metrics_adult$n, sensitivity = metrics_adult$sensitivity,
+        precision = metrics_adult$precision, f1 = metrics_adult$f1, n_correct = metrics_adult$n_correct
+      )
     }
   }
 }
 
-# Combine into dataframe
 f1_per_class_cohort <- do.call(rbind, f1_per_class_cohort_list)
-
-# Merge with enrichment classification
-f1_per_class_cohort <- merge(
-  f1_per_class_cohort,
+f1_per_class_cohort <- merge(f1_per_class_cohort,
   subtype_enrichment[, c("truth_display", "enrichment_class", "n_pediatric", "n_adult")],
-  by.x = "subtype",
-  by.y = "truth_display",
-  all.x = TRUE
-)
+  by.x = "subtype", by.y = "truth_display", all.x = TRUE)
 
-# Filter to only adult-enriched and pediatric-enriched classes
+# Filter to enriched classes and sort by mean F1
 f1_per_class_enriched <- f1_per_class_cohort[
-  f1_per_class_cohort$enrichment_class %in% c("Adult-enriched", "Pediatric-enriched"),
-]
+  f1_per_class_cohort$enrichment_class %in% c("Adult-enriched", "Pediatric-enriched"), ]
 
-# Calculate average F1 per subtype for sorting
 f1_avg <- f1_per_class_enriched %>%
   group_by(subtype) %>%
   summarise(avg_f1 = mean(f1, na.rm = TRUE), .groups = "drop")
@@ -3589,396 +2217,283 @@ f1_per_class_enriched <- merge(f1_per_class_enriched, f1_avg, by = "subtype")
 f1_per_class_enriched <- f1_per_class_enriched[order(f1_per_class_enriched$avg_f1), ]
 f1_per_class_enriched$subtype <- factor(f1_per_class_enriched$subtype, 
                                         levels = unique(f1_per_class_enriched$subtype))
-
-cat("\n\nPer-Class F1 Score for Enriched Subtypes by Cohort:\n")
-cat("====================================================\n")
-print(f1_per_class_enriched[, c("subtype", "enrichment_class", "cohort_type", "n", "f1")])
 ```
 
 ## -- Visualization: Per-Class F1 Score by Cohort Type and Enrichment Status
 
 ```{r}
-# Create grouped bar plot: F1 per class, grouped by cohort, faceted by enrichment
-# Order subtypes by mean F1 to improve interpretability
-f1_plot_data <- f1_per_class_enriched %>%
-  group_by(subtype) %>%
-  mutate(mean_f1 = mean(f1)) %>%
-  ungroup() %>%
-  mutate(subtype = reorder(subtype, mean_f1))
-
-p_f1_per_class <- ggplot(
-  f1_plot_data,
-  aes(x = subtype, y = f1, fill = cohort_type)
-) +
-  geom_col(
-    position = position_dodge(width = 0.65),
-    width = 0.65,
-    alpha = 0.85
-  ) +
-  geom_text(
-    aes(label = sprintf("%.2f", f1)),
-    position = position_dodge(width = 0.65),
-    hjust = 1.05,
-    size = 2.6,
-    color = "black"
-  ) +
-  coord_flip() +
-
-  scale_fill_manual(
-    values = c("Pediatric" = "#e67e62", "Adult" = "#5a9acb"),
-    name = "Cohort type"
-  ) +
-
-  facet_wrap(
-    ~ enrichment_class,
-    ncol = 1,
-    scales = "free_y",
-    strip.position = "top"
-  ) +
-
-  scale_y_continuous(
-    limits = c(0, 1),
-    expand = expansion(mult = c(0, 0.05))
-  ) +
-  facet_wrap(~ enrichment_class, scales = "free_y", ncol = 1) +
-  theme_bw() +
-  labs(
-    title = "LOSO performance per AML subtype",
-    subtitle = "F1 score grouped by cohort type, faceted by enrichment class",
-    x = "Subtype",
-    y = "F1 score"
-  ) +
-  ylim(0, 1) +
-  theme(
-    legend.position = "bottom",
-    plot.title = element_text(size = 12, face = "bold"),
-    plot.subtitle = element_text(size = 9),
-    axis.text.y = element_text(size = 8),
-    strip.text = element_text(size = 10, face = "bold")
-  )
-
-print(p_f1_per_class)
-ggsave("../writing/figures_new/f1_per_class_by_cohort_enriched.png", p_f1_per_class, 
-       width = 10, height = 10, dpi = 300)
-```
-```{r}
-library(dplyr)
-library(ggplot2)
 library(patchwork)
 
-# Split data by enrichment
-dat_top    <- f1_per_class_enriched %>% filter(enrichment_class == "Adult-enriched")
+# Split by enrichment class
+dat_top <- f1_per_class_enriched %>% filter(enrichment_class == "Adult-enriched")
 dat_bottom <- f1_per_class_enriched %>% filter(enrichment_class != "Adult-enriched")
 
-# ---- Plot 1: Top enrichment ----
-p_top <- ggplot(dat_top,
-                aes(x = subtype, y = f1, fill = cohort_type)) +
-  geom_col(position = position_dodge(width = 0.85),
-           width = 0.75, alpha = 0.85) +
-  geom_text(aes(label = sprintf("%.2f", f1)),
-            position = position_dodge(width = 0.85),
+p_top <- ggplot(dat_top, aes(x = subtype, y = f1, fill = cohort_type)) +
+  geom_col(position = position_dodge(width = 0.85), width = 0.75, alpha = 0.85) +
+  geom_text(aes(label = sprintf("%.2f", f1)), position = position_dodge(width = 0.85),
             hjust = 1.05, size = 2.7, color = "black") +
   coord_flip() +
-  scale_fill_manual(values = c("Pediatric"="#e67e62","Adult"="#5a9acb"),
-                    name="Cohort type") +
-  scale_y_continuous(limits = c(0,1), expand = expansion(mult=c(0,0.05))) +
-  labs(title = "LOSO performance per AML subtype",
-       subtitle = "Adult enriched classes",
+  scale_fill_manual(values = c("Pediatric" = "#e67e62", "Adult" = "#5a9acb"), name = "Cohort type") +
+  scale_y_continuous(limits = c(0, 1), expand = expansion(mult = c(0, 0.05))) +
+  labs(title = "LOSO performance per AML subtype", subtitle = "Adult enriched classes",
        x = "Subtype", y = "F1 score") +
   theme_bw() +
-  theme(
-    legend.position = "none",
-    axis.text.y = element_text(size = 8),
-    axis.text.x = element_text(size = 8),
-    panel.grid.major.y = element_blank(),
-    panel.grid.major.x = element_line(size = 0.3, color = "grey80")
-  )
+  theme(legend.position = "none", axis.text.y = element_text(size = 8),
+        panel.grid.major.y = element_blank())
 
-# ---- Plot 2: Bottom enrichment ----
-p_bottom <- ggplot(dat_bottom,
-                   aes(x = subtype, y = f1, fill = cohort_type)) +
-  geom_col(position = position_dodge(width = 0.85),
-           width = 0.75, alpha = 0.85) +
-  geom_text(aes(label = sprintf("%.2f", f1)),
-            position = position_dodge(width = 0.85),
+p_bottom <- ggplot(dat_bottom, aes(x = subtype, y = f1, fill = cohort_type)) +
+  geom_col(position = position_dodge(width = 0.85), width = 0.75, alpha = 0.85) +
+  geom_text(aes(label = sprintf("%.2f", f1)), position = position_dodge(width = 0.85),
             hjust = 1.05, size = 2.7, color = "black") +
   coord_flip() +
-  scale_fill_manual(values = c("Pediatric"="#e67e62","Adult"="#5a9acb"),
-                    name="Cohort type") +
-  scale_y_continuous(limits = c(0,1), expand = expansion(mult=c(0,0.05))) +
-  labs(subtitle = "Pediatric enriched classes",
-       x = "Subtype", y = "F1 score") +
+  scale_fill_manual(values = c("Pediatric" = "#e67e62", "Adult" = "#5a9acb"), name = "Cohort type") +
+  scale_y_continuous(limits = c(0, 1), expand = expansion(mult = c(0, 0.05))) +
+  labs(subtitle = "Pediatric enriched classes", x = "Subtype", y = "F1 score") +
   theme_bw() +
-  theme(
-    legend.position = "bottom",
-    axis.text.y = element_text(size = 8),
-    axis.text.x = element_text(size = 8),
-    panel.grid.major.y = element_blank(),
-    panel.grid.major.x = element_line(size = 0.3, color = "grey80")
-  )
+  theme(legend.position = "bottom", axis.text.y = element_text(size = 8),
+        panel.grid.major.y = element_blank())
 
-# ---- Combine with patchwork ----
-p_final <- p_top / p_bottom +
-  plot_layout(heights = c(3, 8))   # adjust bottom panel height if needed
-
-p_final
-
+p_f1_per_class <- p_top / p_bottom + plot_layout(heights = c(3, 8))
+print(p_f1_per_class)
+ggsave("../writing/figures_new/figures_class_perf.png", p_f1_per_class, width = 10, height = 10, dpi = 300)
 ```
-```{r}
-library(dplyr)
-library(ggplot2)
-
-# Summarise mean F1 by (cohort_type × enrichment_class)
-summary_df <- f1_per_class_enriched %>%
-  group_by(cohort_type, enrichment_class) %>%
-  summarise(mean_f1 = mean(f1, na.rm = TRUE), .groups = "drop")
-
-# Simple comparison barplot
-p_summary <- ggplot(summary_df,
-                    aes(x = enrichment_class,
-                        y = mean_f1,
-                        fill = cohort_type)) +
-  geom_col(position = "dodge", width = 0.6, alpha = 0.9) +
-  geom_text(aes(label = sprintf("%.2f", mean_f1)),
-            position = position_dodge(width = 0.6),
-            vjust = -0.4,
-            size = 3,
-            color = "black") +
-  scale_fill_manual(values = c("Pediatric" = "#e67e62",
-                               "Adult" = "#5a9acb"),
-                    name = "") +
-  scale_y_continuous(limits = c(0, 1),
-                     expand = expansion(mult = c(0, 0.1))) +
-  labs(title = "Mean F1 score: pediatric vs adult cohorts",
-       subtitle = "Across pediatric-enriched vs adult-enriched AML subtypes",
-       x = "Enrichment class",
-       y = "Mean F1 score") +
-  theme_bw() +
-  theme(
-    legend.position = "bottom",
-    plot.title = element_text(size = 12, face = "bold"),
-    axis.text.x = element_text(size = 9)
-  )
-
-p_summary
-
-```
-
-## -- Summary: Performance Patterns by Enrichment and Cohort
-
-```{r}
-# Summarize F1 score by enrichment class and cohort type
-f1_summary <- f1_per_class_enriched %>%
-  group_by(enrichment_class, cohort_type) %>%
-  summarise(
-    n_classes = n(),
-    mean_f1 = mean(f1, na.rm = TRUE),
-    sd_f1 = sd(f1, na.rm = TRUE),
-    median_f1 = median(f1, na.rm = TRUE),
-    min_f1 = min(f1, na.rm = TRUE),
-    max_f1 = max(f1, na.rm = TRUE),
-    .groups = "drop"
-  )
-
-cat("\n\nF1 Score Summary by Enrichment Class and Cohort Type:\n")
-cat("=====================================================\n")
-print(f1_summary)
-
-# Test 1: Within adult-enriched subtypes, do pediatric vs adult cohorts differ?
-cat("\n\n1. ADULT-ENRICHED SUBTYPES: Pediatric vs Adult Cohorts\n")
-cat("======================================================\n")
-adult_enriched <- f1_per_class_enriched[f1_per_class_enriched$enrichment_class == "Adult-enriched", ]
-if (nrow(adult_enriched) > 0) {
-  adult_enr_ped <- adult_enriched$f1[adult_enriched$cohort_type == "Pediatric"]
-  adult_enr_adult <- adult_enriched$f1[adult_enriched$cohort_type == "Adult"]
-  
-  if (length(adult_enr_ped) > 0 && length(adult_enr_adult) > 0) {
-    wilcox_adult_enr <- wilcox.test(adult_enr_ped, adult_enr_adult, paired = FALSE)
-    
-    cat(sprintf("Pediatric cohorts: median F1 = %.2f (n = %d)\n", 
-                median(adult_enr_ped), length(adult_enr_ped)))
-    cat(sprintf("Adult cohorts: median F1 = %.2f (n = %d)\n", 
-                median(adult_enr_adult), length(adult_enr_adult)))
-    cat(sprintf("Mann-Whitney U: W = %.1f, p = %.4f\n", 
-                wilcox_adult_enr$statistic, wilcox_adult_enr$p.value))
-    
-    if (wilcox_adult_enr$p.value < 0.05) {
-      if (median(adult_enr_ped) > median(adult_enr_adult)) {
-        cat("→ Model performs BETTER in pediatric cohorts on adult-enriched subtypes\n")
-      } else {
-        cat("→ Model performs BETTER in adult cohorts on adult-enriched subtypes\n")
-      }
-    } else {
-      cat("→ No significant difference between cohorts\n")
-    }
-  }
-}
-
-# Test 2: Within pediatric-enriched subtypes, do pediatric vs adult cohorts differ?
-cat("\n\n2. PEDIATRIC-ENRICHED SUBTYPES: Pediatric vs Adult Cohorts\n")
-cat("==========================================================\n")
-ped_enriched <- f1_per_class_enriched[f1_per_class_enriched$enrichment_class == "Pediatric-enriched", ]
-if (nrow(ped_enriched) > 0) {
-  ped_enr_ped <- ped_enriched$f1[ped_enriched$cohort_type == "Pediatric"]
-  ped_enr_adult <- ped_enriched$f1[ped_enriched$cohort_type == "Adult"]
-  
-  if (length(ped_enr_ped) > 0 && length(ped_enr_adult) > 0) {
-    wilcox_ped_enr <- wilcox.test(ped_enr_ped, ped_enr_adult, paired = FALSE)
-    
-    cat(sprintf("Pediatric cohorts: median F1 = %.2f (n = %d)\n", 
-                median(ped_enr_ped), length(ped_enr_ped)))
-    cat(sprintf("Adult cohorts: median F1 = %.2f (n = %d)\n", 
-                median(ped_enr_adult), length(ped_enr_adult)))
-    cat(sprintf("Mann-Whitney U: W = %.1f, p = %.4f\n", 
-                wilcox_ped_enr$statistic, wilcox_ped_enr$p.value))
-    
-    if (wilcox_ped_enr$p.value < 0.05) {
-      if (median(ped_enr_ped) > median(ped_enr_adult)) {
-        cat("→ Model performs BETTER in pediatric cohorts on pediatric-enriched subtypes\n")
-      } else {
-        cat("→ Model performs BETTER in adult cohorts on pediatric-enriched subtypes\n")
-      }
-    } else {
-      cat("→ No significant difference between cohorts\n")
-    }
-  }
-}
-
-# Test 3: Overall effect - interaction between enrichment and cohort type
-cat("\n\n3. INTERACTION EFFECT: Does cohort performance depend on enrichment?\n")
-cat("====================================================================\n")
-cat("For adult-enriched subtypes, is the pediatric-adult difference\n")
-cat("different from the pediatric-adult difference in pediatric-enriched?\n\n")
-
-# Calculate F1 differences (pediatric - adult) for each enrichment class
-if (exists("adult_enr_ped") && exists("adult_enr_adult") && 
-    length(adult_enr_ped) > 0 && length(adult_enr_adult) > 0) {
-  adult_enr_diff <- mean(adult_enr_ped) - mean(adult_enr_adult)
-  cat(sprintf("Adult-enriched: Ped-Adult difference = %.2f\n", adult_enr_diff))
-}
-
-if (exists("ped_enr_ped") && exists("ped_enr_adult") && 
-    length(ped_enr_ped) > 0 && length(ped_enr_adult) > 0) {
-  ped_enr_diff <- mean(ped_enr_ped) - mean(ped_enr_adult)
-  cat(sprintf("Pediatric-enriched: Ped-Adult difference = %.2f\n", ped_enr_diff))
-}
-```
-
-
 
 ## -- Visualization: Subtype Enrichment and Performance
 
 ```{r}
-# Scatter plot: enrichment ratio vs F1 score
 p_enrichment <- ggplot(subtype_enrichment, 
                        aes(x = log2(enrichment_ratio), y = Mean_F1, 
-                           color = enrichment_class, 
-                           size = n_pediatric + n_adult)) +
+                           color = enrichment_class, size = n_pediatric + n_adult)) +
   geom_point(alpha = 0.7) +
-  geom_text(aes(label = truth_display), hjust = -0.1, vjust = 0.5, 
-            size = 3, show.legend = FALSE) +
+  geom_text(aes(label = truth_display), hjust = -0.1, vjust = 0.5, size = 3, show.legend = FALSE) +
   geom_vline(xintercept = 0, linetype = "dashed", alpha = 0.5) +
-  scale_color_manual(
-    values = c("Pediatric-enriched" = "#fd7f6f", 
-               "Adult-enriched" = "#7eb0d5",
-               "Similar" = "gray60"),
-    name = "Enrichment"
-  ) +
+  scale_color_manual(values = c("Pediatric-enriched" = "#fd7f6f", 
+                                "Adult-enriched" = "#7eb0d5", "Similar" = "gray60"),
+                     name = "Enrichment") +
   scale_size_continuous(range = c(2, 10), name = "Total Samples") +
   theme_bw() +
-  labs(
-    title = "Subtype Performance (F1) vs Pediatric/Adult Enrichment",
-    subtitle = "Negative log2 ratio = Adult-enriched, Positive = Pediatric-enriched",
-    x = "Log2(Pediatric/Adult Enrichment Ratio)",
-    y = "F1 Score"
-  ) +
+  labs(title = "Subtype Performance (F1) vs Pediatric/Adult Enrichment",
+       subtitle = "Negative log2 ratio = Adult-enriched, Positive = Pediatric-enriched",
+       x = "Log2(Pediatric/Adult Enrichment Ratio)", y = "F1 Score") +
   theme(legend.position = "bottom") +
-  xlim(min(log2(subtype_enrichment$enrichment_ratio)) * 1.3,
-       max(log2(subtype_enrichment$enrichment_ratio)) * 1.3) +
-  ylim(0.75, 1)
+  #xlim(min(log2(subtype_enrichment$enrichment_ratio)) / 1.3,
+  #max(log2(subtype_enrichment$enrichment_ratio)) * 1.3) +
+  ylim(0.7, 1)
 
 print(p_enrichment)
-ggsave("../writing/figures_new/subtype_enrichment_performance.png", p_enrichment, 
-       width = 10, height = 8, dpi = 300)
+ggsave("../writing/figures_new/subtype_enrichment_performance.png", p_enrichment, width = 10, height = 8, dpi = 300)
 ```
 
-## -- Performance Difference: Adult vs Pediatric Cohorts by Enrichment
+
+## -- Visualization: F1 Scores per LOSO Fold (Full vs Merged)
 
 ```{r}
-# Calculate performance difference (Adult - Pediatric) for each subtype
-# Use accuracy data from subtype_enrichment which has accuracy by pediatric status
-
-# Also merge with F1 data from f1_per_class_cohort if available
-performance_diff_data <- subtype_enrichment %>%
-  mutate(
-    # Accuracy difference: Adult - Pediatric
-    accuracy_diff = accuracy_adult - accuracy_pediatric
-  ) %>%
-  filter(!is.na(accuracy_diff))  # Remove subtypes without both pediatric and adult data
-
-# Add F1 difference if we have the f1_per_class_cohort data
-if (exists("f1_per_class_cohort")) {
-  # Pivot to get pediatric and adult F1 side by side
-  f1_wide <- f1_per_class_cohort %>%
-    select(subtype, cohort_type, f1) %>%
-    tidyr::pivot_wider(
-      names_from = cohort_type,
-      values_from = f1,
-      names_prefix = "f1_"
-    ) %>%
-    mutate(
-      f1_diff =  f1_Pediatric - f1_Adult,
-      f1_ratio = f1_Adult/f1_Pediatric
-    )
+# Extract per-fold F1 scores for both full and merged classes
+# Helper function to get per-class F1 per fold for LOSO
+get_f1_per_fold_loso <- function(res_obj, label_set_name) {
+  folds <- names(res_obj$detailed_performance$loso$svm)
+  f1_list <- list()
   
-  # Merge with performance_diff_data
-  performance_diff_data <- merge(
-    performance_diff_data,
-    f1_wide[, c("subtype", "f1_Adult", "f1_Pediatric", "f1_diff", "f1_ratio")],
-    by.x = "truth_display",
-    by.y = "subtype",
-    all.x = TRUE
-  )
+  for (fold in folds) {
+    # Get predictions and truth for this fold
+    fold_perf <- res_obj$detailed_performance$loso$svm[[fold]]
+    predictions <- fold_perf$predictions
+    truth <- fold_perf$truth
+    
+    # Calculate F1 per class for this fold
+    classes <- unique(c(as.character(predictions), as.character(truth)))
+    
+    for (cls in classes) {
+      tp <- sum(truth == cls & predictions == cls)
+      fp <- sum(truth != cls & predictions == cls)
+      fn <- sum(truth == cls & predictions != cls)
+      
+      precision <- ifelse(tp + fp > 0, tp / (tp + fp), 0)
+      recall <- ifelse(tp + fn > 0, tp / (tp + fn), 0)
+      f1 <- ifelse(precision + recall > 0, 2 * precision * recall / (precision + recall), 0)
+      
+      f1_list[[length(f1_list) + 1]] <- data.frame(
+        fold = fold,
+        class = cls,
+        f1 = f1,
+        label_set = label_set_name,
+        stringsAsFactors = FALSE
+      )
+    }
+  }
+  
+  do.call(rbind, f1_list)
 }
 
+# Get F1 per fold for both full and merged
+f1_full_loso <- get_f1_per_fold_loso(outer_unmerged, "Full subtypes")
+f1_merged_loso <- get_f1_per_fold_loso(outer_merged, "Collapsed classes")
 
-```
+# Clean class names
+f1_full_loso$class <- fix_names(f1_full_loso$class)
+f1_merged_loso$class <- fix_names(f1_merged_loso$class)
 
-## -- Visualization: Enrichment vs Performance Gap
+# Combine datasets
+f1_loso_combined <- rbind(f1_full_loso, f1_merged_loso)
+f1_loso_combined$label_set <- factor(f1_loso_combined$label_set, 
+                                     levels = c("Full subtypes", "Collapsed classes"))
 
-```{r}
-# Scatter plot: enrichment ratio vs performance difference
-p_enrichment_diff <- ggplot(performance_diff_data, 
-                            aes(x = log2(enrichment_ratio), y = log(f1_ratio), 
-                                color = enrichment_class, 
-                                size = n_pediatric + n_adult)) +
-  geom_point(alpha = 0.7) +
-  geom_text(aes(label = truth_display), hjust = -0.1, vjust = 0.5, 
-            size = 3, show.legend = FALSE) +
-  geom_hline(yintercept = 0, linetype = "dashed", alpha = 0.5, color = "black") +
-  geom_vline(xintercept = 0, linetype = "dashed", alpha = 0.5, color = "black") +
-  scale_color_manual(
-    values = c("Pediatric-enriched" = "#fd7f6f", 
-               "Adult-enriched" = "#7eb0d5",
-               "Similar" = "gray60"),
-    name = "Enrichment"
-  ) +
-  scale_size_continuous(range = c(2, 10), name = "Total Samples") +
+# Order classes by mean F1 (using merged as reference)
+# class_order <- f1_merged_loso %>%
+#   group_by(class) %>%
+#   summarise(mean_f1 = mean(f1, na.rm = TRUE), .groups = "drop") %>%
+#   arrange(mean_f1) %>%
+#   pull(class)
+
+# Keep only classes present in both datasets for comparison
+#common_classes <- intersect(unique(f1_full_loso$class), unique(f1_merged_loso$class))
+f1_loso_plot <- f1_loso_combined # %>%
+#  filter(class %in% common_classes)
+
+f1_loso_plot$class <- factor(f1_loso_plot$class, 
+                             levels = rev(order_AML))#[class_order %in% common_classes])
+f1_loso_plot$label_set <- NULL
+f1_loso_plot <- unique(f1_loso_plot)
+# Create faceted plot with dots per LOSO fold
+p_f1_loso_facet <- ggplot(f1_loso_plot, aes(x = f1, y = class, color = fold)) +
+  geom_point(size = 2.5, alpha = 0.7) +
+  geom_vline(xintercept = 0.8, linetype = "dashed", color = "gray50", alpha = 0.5) +
+  #facet_wrap(~ label_set, ncol = 2) +
+  # scale_color_manual(
+  #   values = c("AAML0531" = "#fd7f6f", "AAML1031" = "#e67e62", "AAML03P1" = "#d66b5b",
+  #              "BEAT_AML_Waves_1and2" = "#7eb0d5", "TCGA_LAML" = "#5a9acb", 
+  #              "LEUCEGENE" = "#4a8ab8", "TARGET_AML" = "#3a7aa8"),
+  #   name = "LOSO Fold"
+  # ) +
   theme_bw() +
   labs(
-    title = "Subtype Enrichment vs Performance Gap (Adult - Pediatric Cohorts)",
-    x = "Log2(Pediatric/Adult Enrichment Ratio)\n← Adult-enriched | Pediatric-enriched →",
-    y = "Log2(F1 Adult/Pediatric Ratio)\n← Pediatric performance higher | Adult performance higher →"
+    title = "F1 Scores per AML Subtype",
+    subtitle = "Each dot represents performance on a LOSO outer fold",
+    x = "F1 Score",
+    y = "AML Subtype"
   ) +
-  theme(legend.position = "bottom",
-        plot.title = element_text(size = 12, face = "bold"),
-        plot.subtitle = element_text(size = 9)) +
-  xlim(-2,
-       3)
+  theme(
+    strip.background = element_rect(fill = "gray95"),
+    strip.text = element_text(size = 10, face = "bold"),
+    axis.text.y = element_text(size = 7),
+    legend.position = "bottom",
+    panel.grid.major.y = element_line(color = "gray90", linewidth = 0.3)
+  ) +
+  xlim(0, 1)
 
-print(p_enrichment_diff)
-ggsave("../writing/figures_new/enrichment_vs_performance_gap.png", p_enrichment_diff, 
-       width = 11, height = 8, dpi = 300)
+print(p_f1_loso_facet)
+ggsave("../writing/figures_new/f1_per_loso_fold_full_vs_merged.png", p_f1_loso_facet, 
+       width = 14, height = 12, dpi = 300)
+```
+
+## -- Visualization: Delta F1 from Class Collapsing
+
+```{r}
+# Calculate delta F1 (F1_collapsed - F1_full) for collapsed class groups
+# Focus on MDS-related and other KMT2A classes that were merged
+
+# Define the merge mapping: which full classes map to which collapsed class
+merge_mapping <- list(
+  "MDS-related" = c("MDS-related, gene mutations", "MDS-related, cytogenetic abnormalities", 
+                    "MDS-related, TP53 mutated", "MDS.r"),
+  "Other KMT2A rearrangements" = c("KMT2A::ELL", "KMT2A::MLLT10","KMT2A::MLLT1", "KMT2A::MLLT4", "KMT2A::SEPT6")
+)
+
+# Calculate mean F1 per fold for full subclasses and collapsed classes
+delta_f1_list <- list()
+
+for (collapsed_class in names(merge_mapping)) {
+  full_classes <- merge_mapping[[collapsed_class]]
+  
+  # Get F1 for the collapsed class per fold (from merged results)
+  collapsed_f1 <- f1_merged_loso %>%
+    filter(class == collapsed_class) %>%
+    select(fold, f1_collapsed = f1)
+  
+  # Get mean F1 across the constituent full classes per fold
+  # (weighted average would be better but mean is simpler for visualization)
+  full_f1 <- f1_full_loso %>%
+    filter(class %in% full_classes) %>%
+    group_by(fold) %>%
+    summarise(f1_full = mean(f1, na.rm = TRUE), .groups = "drop")
+  
+  # Calculate delta
+  delta_df <- merge(collapsed_f1, full_f1, by = "fold")
+  delta_df$delta_f1 <- delta_df$f1_collapsed - delta_df$f1_full
+  delta_df$group <- collapsed_class
+  
+  delta_f1_list[[collapsed_class]] <- delta_df
+}
+
+delta_f1_data <- do.call(rbind, delta_f1_list)
+
+# Add cohort type for coloring
+delta_f1_data$cohort_type <- ifelse(
+  delta_f1_data$fold %in% c("AAML0531", "AAML1031", "AAML03P1"), 
+  "Pediatric", "Adult"
+)
+
+# Calculate summary statistics for reporting
+delta_summary <- delta_f1_data %>%
+  group_by(group) %>%
+  summarise(
+    mean_delta = mean(delta_f1, na.rm = TRUE),
+    sd_delta = sd(delta_f1, na.rm = TRUE),
+    min_f1_full = min(f1_full, na.rm = TRUE),
+    max_f1_full = max(f1_full, na.rm = TRUE),
+    min_f1_collapsed = min(f1_collapsed, na.rm = TRUE),
+    max_f1_collapsed = max(f1_collapsed, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+cat("Delta F1 Summary (Collapsed - Full):\n")
+cat("=====================================\n")
+print(delta_summary)
+
+# Bar plot with individual fold points showing delta F1
+p_delta_f1 <- ggplot(delta_f1_data, aes(x = group, y = delta_f1)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  geom_boxplot(aes(fill = group), alpha = 0.3, outlier.shape = NA, width = 0.5) +
+  geom_point(aes(color = cohort_type, shape = cohort_type), 
+             size = 3, alpha = 0.8, position = position_jitter(width = 0.1, seed = 42)) +
+  scale_fill_manual(values = c("MDS-related" = "#d62728", 
+                               "Other KMT2A rearrangements" = "#ff7f0e"),
+                    guide = "none") +
+  scale_color_manual(values = c("Adult" = "#7eb0d5", "Pediatric" = "#fd7f6f"),
+                     name = "Cohort Type") +
+  scale_shape_manual(values = c("Adult" = 16, "Pediatric" = 17),
+                     name = "Cohort Type") +
+  theme_bw() +
+  labs(
+    title = "F1 Score Improvement from Class Collapsing (LOSO)",
+    subtitle = sprintf("MDS-related: mean dF1 = +%.2f | Other KMT2A: mean dF1 = +%.2f",
+                       delta_summary$mean_delta[delta_summary$group == "MDS-related"],
+                       delta_summary$mean_delta[delta_summary$group == "Other KMT2A rearrangements"]),
+    x = "Collapsed Class Group",
+    y = expression(Delta*"F1 (Collapsed - Full)")
+  ) +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(size = 12, face = "bold"),
+    axis.text.x = element_text(size = 10)
+  ) +
+  ylim(-0.1, max(delta_f1_data$delta_f1) + 0.05)
+
+print(p_delta_f1)
+ggsave("../writing/figures_new/delta_f1_collapsed_classes.png", p_delta_f1, 
+       width = 8, height = 6, dpi = 300)
+
+# Print detailed results for manuscript text
+cat("\n\nFor manuscript text:\n")
+cat("====================\n")
+for (grp in unique(delta_f1_data$group)) {
+  grp_data <- delta_f1_data[delta_f1_data$group == grp, ]
+  grp_summary <- delta_summary[delta_summary$group == grp, ]
+  cat(sprintf("\n%s:\n", grp))
+  cat(sprintf("  Full F1 range: %.2f - %.2f\n", grp_summary$min_f1_full, grp_summary$max_f1_full))
+  cat(sprintf("  Collapsed F1 range: %.2f - %.2f\n", grp_summary$min_f1_collapsed, grp_summary$max_f1_collapsed))
+  cat(sprintf("  Mean dF1: +%.2f (SD: %.2f)\n", grp_summary$mean_delta, grp_summary$sd_delta))
+}
 ```
 
 # Ensemble Weights Analysis

@@ -139,7 +139,9 @@ for (gene in genes_of_interest) {
 }
 
 # NPM1
+table(results[["mutated_NPM1"]])
 results[["mutated_NPM1"]][LEUCEGENE_2$NPM1 != "-"] <- 1
+results[["mutated_NPM1"]]
 
 mutation_calls_NPM1 <- LEUCEGENE_mutations %>%
   filter(genes == "NPM1") %>%
@@ -162,5 +164,35 @@ sum(results[,grepl("MECOM", colnames(results))], na.rm = TRUE)
 
 # Only add to results if not all primary RGAS have no data. I dont want fallback only on karyotyping
 results$all_primary_data_na <-ifelse(Reduce(`&`, lapply(c(fusion_vectors), is.na)), 1, 0)
+
+# https://ashpublications.org/blood/article/125/1/140/33905/EVI1-rearranged-acute-myeloid-leukemias-are
+ids <- c(
+  "04H050",
+  "04H063",
+  "05H179",
+  "08H118",
+  "10H046",
+  "10H063",
+  "10H107",
+  "11H205",
+  "12H148",
+  "13H083",
+  "14H023",
+  "14H038"
+)
+
+results$MECOM_fusion_any_partner[meta_LEUCEGENE$sample_id %in% ids] <- 1
+
+ids <- c("05H128",
+"06H073",
+"06H077",
+"07H160",
+"09H102",
+"11H095",
+"22H021",
+"22H021")
+
+results$`t(10;11)/MLLT10::KMT2A`[meta_LEUCEGENE$sample_id %in% ids] <- 1
+results$`t(10;11)/MLLT10::KMT2A`[grepl("MLL-MLLT10",clinical_LEUCEGENE$Karyotype)] <- 1
 
 write.csv(results,"/Users/jsevere2/Library/CloudStorage/OneDrive-UMCUtrecht/AML/data/LEUCEGENE/RGAs_LEUCEGENE_regex.csv")

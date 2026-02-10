@@ -14,6 +14,9 @@ fusions <- fusions[!grepl("NA\\(NA\\)", fusions$Fusion.genes), ]
 fusions$Fusion.genes <- gsub("\\bMLL\\b", "KMT2A", fusions$Fusion.genes)
 fusions$Fusion.genes <- gsub("^([^()]+)\\([^()]+\\)([^()]+)\\([^()]+\\)$", "\\1::\\2", fusions$Fusion.genes)
 
+# https://pmc.ncbi.nlm.nih.gov/articles/PMC5916809/#S25
+TCGA_more_fusions <- readxl::read_xlsx("/Users/jsevere2/Library/CloudStorage/OneDrive-UMCUtrecht/AML/data/TCGA/NIHMS958978-supplement-2.xlsx", skip = 1, sheet = 2) %>% filter(Cancer == "LAML")
+TCGA_more_fusions$Sample <- gsub("-03A.+","",TCGA_more_fusions$Sample)
 library(dplyr)
 library(purrr)
 
@@ -138,6 +141,13 @@ for (abn in names(abnormalities_fusion)) {
   results[[abn]][results$Sample.ID %in% has_fusion] <- 1
 }
 
+for (abn in names(abnormalities_fusion)) {
+  pattern <- abnormalities_fusion[[abn]]
+  has_fusion <- grepl(pattern, TCGA_more_fusions$Fusion, ignore.case = TRUE)
+  has_fusion <- TCGA_more_fusions$Sample[has_fusion]
+  cat(abn, "old:", sum(results[[abn]], na.rm = TRUE), "new:", sum(results$Sample.ID %in% has_fusion, na.rm = TRUE), "\n")
+  results[[abn]][results$Sample.ID %in% has_fusion] <- 1
+}
 # BCR_ABL1
 mapping_BCR_ABL1 <- ifelse(grepl("BCR-ABL Positive", TCGA_meta1$molecular_abnormality_results), 1, 0)
 results$`t(9;22)/BCR::ABL1` <- pmax(results$`t(9;22)/BCR::ABL1`, mapping_BCR_ABL1, na.rm = TRUE)
@@ -150,5 +160,6 @@ sum(results[,grepl("MECOM", colnames(results))], na.rm = TRUE)
 # Only add to results if not all primary RGAS have no data. I dont want fallback only on karyotyping
 results$all_primary_data_na <-ifelse(Reduce(`&`, lapply(c(fusion_vectors), is.na)), 1, 0)
 
+table(results$`t(9;11)/MLLT3::KMT2A`)
 
 write.csv(results,"/Users/jsevere2/Library/CloudStorage/OneDrive-UMCUtrecht/AML/data/TCGA/RGAs_TCGA.csv")

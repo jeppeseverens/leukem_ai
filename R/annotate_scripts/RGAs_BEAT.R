@@ -152,6 +152,3 @@ results$all_primary_data_na <-ifelse(Reduce(`&`, lapply(c(fusion_vectors), is.na
 
 
 write.csv(results,"/Users/jsevere2/Library/CloudStorage/OneDrive-UMCUtrecht/AML/data/BEAT/RGAs_BEAT.csv")
-
-table(results$`t(9;11)/MLLT3::KMT2A`)
-sum(results[,grepl("MECOM", colnames(results))], na.rm = TRUE)
