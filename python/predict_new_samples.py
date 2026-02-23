@@ -1087,8 +1087,8 @@ def main():
     parser.add_argument("--input_file", required=True, help="Path to input CSV file with new samples")
     parser.add_argument("--output_dir", required=True, help="Output directory for prediction results")
     parser.add_argument("--models_dir", default=None, help="Path to final_models directory")
-    parser.add_argument("--weights_dir", default=None, help="Path to final_train_test directory (will look for ensemble_weights_merged and ensemble_weights_unmerged subdirs)")
-    parser.add_argument("--cutoffs_file", default=None, help="Path to final_train_test directory (will look for cutoffs_merged and cutoffs_unmerged subdirs)")
+    parser.add_argument("--weights_dir", default=None, help="Path to final_train_test directory (will look for ensemble_weights_merged_summed and ensemble_weights_unmerged_maxprob subdirs)")
+    parser.add_argument("--cutoffs_file", default=None, help="Path to final_train_test directory (will look for cutoffs_merged_summed and cutoffs_unmerged_maxprob subdirs)")
     parser.add_argument("--pipelines_dir", default=None, help="Path to pipelines cache directory")
     parser.add_argument("--merged_only", action="store_true", help="Only run merged predictions")
     parser.add_argument("--unmerged_only", action="store_true", help="Only run unmerged predictions")
@@ -1150,15 +1150,15 @@ def main():
         print("UNMERGED VERSION")
         print("="*60)
         
-        # Load unmerged ensemble weights
-        # Structure: final_train_test/ensemble_weights_unmerged/cv/
-        weights_dir_unmerged = os.path.join(str(args.weights_dir), "ensemble_weights_unmerged")
+        # Load unmerged ensemble weights (matches R: ensemble_weights_unmerged_maxprob)
+        # Structure: final_train_test/ensemble_weights_unmerged_maxprob/cv/
+        weights_dir_unmerged = os.path.join(str(args.weights_dir), "ensemble_weights_unmerged_maxprob")
         print(f"\nLoading unmerged ensemble weights from: {weights_dir_unmerged}")
         ensemble_weights_unmerged = load_ensemble_weights(weights_dir_unmerged)
         
-        # Load unmerged cutoffs
-        # Structure: final_train_test/cutoffs_unmerged/train_test_cutoffs_unmerged.csv
-        cutoffs_file_unmerged = os.path.join(str(args.cutoffs_file), "cutoffs_unmerged", "train_test_cutoffs_unmerged.csv")
+        # Load unmerged cutoffs (matches R: cutoffs_unmerged_maxprob)
+        # Structure: final_train_test/cutoffs_unmerged_maxprob/train_test_cutoffs_unmerged_maxprob.csv
+        cutoffs_file_unmerged = os.path.join(str(args.cutoffs_file), "cutoffs_unmerged_maxprob", "train_test_cutoffs_unmerged_maxprob.csv")
         print(f"\nLoading unmerged cutoffs from: {cutoffs_file_unmerged}")
         cutoffs_unmerged = load_cutoffs(cutoffs_file_unmerged)
         

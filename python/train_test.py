@@ -668,8 +668,10 @@ def pre_process_data(
     for n_genes_i in n_genes_list:
         pipe_clone = clone(pipe)
 
+        # Pass y_train so FeatureSelectionEta (eta2) receives subtype labels; ignored by MAD selector
         X_train_proc = pipe_clone.fit_transform(
             X_train,
+            y_train,
             feature_selection__study_per_patient=study_labels_train,
             feature_selection__n_genes=n_genes_i,
         ).astype(np.float32)
@@ -978,6 +980,7 @@ def run_train_test_loso_single_param(
             X_train,
             X_test,
             study_labels_train,
+            y_train,
             pipe
         )
 
@@ -1115,6 +1118,7 @@ def pre_process_data_loso(
     X_train,
     X_test,
     study_labels_inner,  # Labels corresponding to X_train_inner
+    y_train_inner,       # Subtype labels for X_train (required for FeatureSelectionEta)
     pipe
 ):
     """
@@ -1126,8 +1130,10 @@ def pre_process_data_loso(
         # Clone the pipeline for this specific n_genes setting
         pipe_inner = clone(pipe)
 
+        # Pass y_train_inner so FeatureSelectionEta (eta2) receives subtype labels
         X_train_proc = pipe_inner.fit_transform(
             X_train,
+            y_train_inner,
             feature_selection__study_per_patient=study_labels_inner,
             feature_selection__n_genes=n_genes_i,
         )
@@ -1206,6 +1212,7 @@ def run_inner_cv_loso(
                     X_train_inner,
                     X_val_inner,
                     study_labels_inner,  # Pass inner training labels for pipeline fitting
+                    y_train_inner,
                     pipe
                 )
             )
@@ -1322,6 +1329,7 @@ def run_inner_cv_loso_single_param(
                 X_train_inner,
                 X_val_inner,
                 study_labels_inner,
+                y_train_inner,
                 pipe
             )
 
@@ -1418,6 +1426,7 @@ def run_outer_cv_loso(
             X_train,
             X_test,
             study_labels_train,
+            y_train,
             pipe
         )
         
@@ -1576,23 +1585,13 @@ def train_final_model_standard(X, y, study_labels, model, pipe, best_params, mod
     clf = model(**params)
     
     if model_type == "NN":
-        # For neural networks, use a portion of data for validation monitoring
-        from sklearn.model_selection import train_test_split
-        X_train, X_val, y_train, y_val = train_test_split(
-            X_processed, y_encoded, test_size=0.2, random_state=42, stratify=y_encoded
-        )
-        
+        # Train on full data using best_epoch from inner CV (no validation split; final model uses all data)
         best_epoch = params.get("best_epoch", None)
         if best_epoch is None:
             print("Warning: No best_epoch found in parameters. Training with default epochs.")
-            clf.fit(X_train, y_train, validation_data=(X_val, y_val))
+            clf.fit(X_processed, y_encoded)
         else:
-            clf.fit(X_train, y_train, validation_data=(X_val, y_val), epochs=best_epoch)
-        
-        # Retrain on full data with best epoch
-        clf_final = model(**params)
-        clf_final.fit(X_processed, y_encoded, epochs=best_epoch)
-        clf = clf_final
+            clf.fit(X_processed, y_encoded, epochs=best_epoch)
     else:
         clf.fit(X_processed, y_encoded)
     

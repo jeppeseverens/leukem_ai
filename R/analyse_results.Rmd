@@ -37,7 +37,7 @@ outer_merged <- readRDS("../data/out/outer_cv/outer_cv_results_10feb26_merged_su
 
 
 ```{r}
-#source("train_test_analysis.R")
+source("train_test_analysis.R")
 ```
 
 # Load data
@@ -2585,7 +2585,7 @@ if local_python not in sys.path:
 
 # Load full fitted pipeline (joblib). Steps: DESeq2 norm -> MVG selection -> scaling.
 py_run_string("import joblib")
-py_run_string("pipeline = joblib.load('../data/out/final_models/pipelines/pipeline_ngenes_2000.pkl')")
+py_run_string("pipeline = joblib.load('../data/out/final_models/pipelines/pipeline_ngenes_5000.pkl')")
 pipeline_2000 <- py$pipeline
 
 # Get full gene name vector (for all genes)
