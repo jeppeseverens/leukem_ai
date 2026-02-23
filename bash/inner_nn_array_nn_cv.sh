@@ -25,6 +25,8 @@ echo "=================================="
 
 # Define your arguments for each array job
 MODEL_TYPE="NN"
+# Feature selection method: "mad" (default intersecting MVGs) or "eta2" (eta2_subtype - eta2_study)
+FS_METHOD="eta2"
 
 # Run CV fold type
 python python/run_inner_cv_array.py \
@@ -34,6 +36,7 @@ python python/run_inner_cv_array.py \
     --k_in 5 \
     --n_max_param 60 \
     --fold_type "CV" \
-    --run_name "cv_28jan26_all"
+    --run_name "cv_10feb26_eta2" \
+    --fs_method "$FS_METHOD"
 
 deactivate 

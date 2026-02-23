@@ -6,6 +6,14 @@ cd /Users/jsevere2/leukem_ai
 # Activate the Python virtual environment
 source .venv/bin/activate
 
+# Remove cached pipelines so they are rebuilt from current data (get_or_create_pipeline
+# does not check if data changed, so stale pipelines would otherwise be reused)
+PIPELINES_DIR="data/out/final_models/pipelines"
+if [ -d "$PIPELINES_DIR" ]; then
+  echo "Removing cached pipelines in $PIPELINES_DIR so they are rebuilt from current data."
+  rm -rf "$PIPELINES_DIR"
+fi
+
 echo "Starting all final model training experiments..."
 echo "=================================="
 

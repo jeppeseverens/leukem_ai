@@ -14,24 +14,24 @@ output:
 ```{r}
 #setwd("~/leukem_ai/R")
 #source("inner_cv_analysis.R")
+#inner_cv_results_merged <- readRDS("../data/out/inner_cv/inner_cv_results_10feb2026_merged_maxprob.rds")
+#inner_cv_results_merged_summed <- readRDS("../data/out/inner_cv/inner_cv_results_10feb2026_merged_summed.rds")
 
-# inner_cv_results_unmerged$final_results
-# inner_cv_results_merged$final_results
-# inner_cv_results_mds_only$final_results
+#inner_cv_results_merged$final_results
+#inner_cv_results_merged_summed$final_results
 ```
 
 
 
 ```{r}
-# source("outer_cv_analysis.R")
-# outer_cv_results_unmerged[["performance_summaries"]]
-# outer_cv_results_merged[["performance_summaries"]]
-# outer_cv_results_mds_only[["performance_summaries"]]
+#source("outer_cv_analysis.R")
+#outer_cv_results_unmerged[["performance_summaries"]]
+#outer_cv_results_merged[["performance_summaries"]]
 ```
 
 ```{r}
-outer_unmerged <-  readRDS("../data/out/outer_cv/outer_cv_results_28jan2025_nomdspaed_unmerged_maxprob.rds")
-outer_merged <- readRDS("../data/out/outer_cv/outer_cv_results_28jan2025_nomdspaed_merged_maxprob.rds")
+outer_unmerged <-  readRDS("../data/out/outer_cv/outer_cv_results_10feb26_unmerged_maxprob.rds")
+outer_merged <- readRDS("../data/out/outer_cv/outer_cv_results_10feb26_merged_summed.rds")
 ```
 
 
@@ -42,7 +42,6 @@ outer_merged <- readRDS("../data/out/outer_cv/outer_cv_results_28jan2025_nomdspa
 
 # Load data
 ```{r}
-
 modify_classes <- function(vector) {
     # Convert factor to character to avoid invalid factor level warnings
     was_factor <- is.factor(vector)
@@ -50,6 +49,8 @@ modify_classes <- function(vector) {
     
     vector[grepl("MDS|TP53", vector)] <- "MDS.r"
     vector[!grepl("MLLT3", vector) & grepl("KMT2A", vector)] <- "other.KMT2A"
+    vector[grepl("MECOM", vector)] <- "MECOM"
+
     
     # Optionally convert back to factor if input was factor
     if (was_factor) {
@@ -77,7 +78,7 @@ DATA_FILTERS <- list(
 label_mapping <- read.csv("../data/label_mapping_all.csv")
 
 # Load leukemia subtype data
-leukemia_subtypes <- read.csv("../data/rgas_28jan26.csv")$ICC_Subtype
+leukemia_subtypes <- read.csv("../data/rgas_10feb26.csv")$ICC_Subtype
 
 # Load study metadata
 meta <- read.csv("../data/meta_20aug25.csv")
@@ -100,6 +101,8 @@ filtered_study_names <- study_names[filter]
 
 meta <- meta[filter, ]
 meta$classes <- filtered_leukemia_subtypes
+
+
 ```
 
 ```{r}
@@ -184,7 +187,7 @@ create_subtype_table <- function(df, cohort_order) {
 included_df_modified <- included_df
 included_df_modified$Subtype_Original <- included_df$Subtype
 
-# Start from the standard merged labels (MDS-related and other KMT2A)
+# Start from the standard merged labels (MDS-related, other KMT2A, MECOM)
 included_df_modified$Subtype_Merged <- modify_classes(included_df$Subtype)
 
 # Define rare recurrent translocation subtypes to be grouped.
@@ -214,6 +217,7 @@ included_table_merged <- create_subtype_table(
 # Rename merged subtypes for display
 included_table_merged$Subtype <- gsub("MDS\\.r", "MDS-related", included_table_merged$Subtype)
 included_table_merged$Subtype <- gsub("other\\.KMT2A", "Other KMT2A rearrangements", included_table_merged$Subtype)
+included_table_merged$Subtype[included_table_merged$Subtype == "MECOM"] <- "MECOM rearrangement"
 included_table_merged$Subtype <- gsub(
   "other\\.rare\\.tx",
   "AML with other rare recurring translocations",
@@ -232,6 +236,8 @@ desired_included_order <- c(
   "AML with t(6;9)/DEK::NUP214",
   # MECOM rearrangements grouped at merged level
   "MECOM rearrangement",
+  "GATA2;MECOM",
+  "MECOM, other",
   "AML with other rare recurring translocations",
   "AML with t(9;22)/BCR::ABL1",             # May be absent; ordering still safe
   "NUP98::NSD1",
@@ -271,6 +277,17 @@ if (length(other_kmt2a_subtypes) > 0) {
     cohort_order
   )
   other_kmt2a_breakdown$Subtype <- paste0("<span style='padding-left:20px;'>└─ ", other_kmt2a_breakdown$Subtype, "</span>")
+}
+
+# MECOM breakdown (GATA2;MECOM, MECOM other -> merged as MECOM rearrangement)
+mecom_subtypes <- included_df_modified$Subtype_Original[included_df_modified$Subtype_Merged == "MECOM"]
+if (length(mecom_subtypes) > 0) {
+  mecom_breakdown <- create_subtype_table(
+    data.frame(Subtype = mecom_subtypes,
+               Cohort = included_df_modified$Cohort[included_df_modified$Subtype_Merged == "MECOM"]),
+    cohort_order
+  )
+  mecom_breakdown$Subtype <- paste0("<span style='padding-left:20px;'>└─ ", mecom_breakdown$Subtype, "</span>")
 }
 
 # other.rare.tx breakdown (rare recurring translocations)
@@ -340,6 +357,9 @@ for (i in 1:nrow(included_table_merged)) {
     included_table_final <- rbind(included_table_final, other_kmt2a_breakdown)
     # Add same stripe group for all breakdown rows
     stripe_groups <- c(stripe_groups, rep(current_stripe, nrow(other_kmt2a_breakdown)))
+  } else if (subtype == "MECOM rearrangement" && exists("mecom_breakdown")) {
+    included_table_final <- rbind(included_table_final, mecom_breakdown)
+    stripe_groups <- c(stripe_groups, rep(current_stripe, nrow(mecom_breakdown)))
   } else if (subtype == "AML with other rare recurring translocations" &&
              exists("other_rare_tx_breakdown")) {
     # Add expanded rows for rare translocations under the merged row
@@ -449,7 +469,7 @@ save_kable(table_output, "../writing/tables_new/supplementary_table1.png", zoom 
 ## -- Table 1: Included Subtypes Only
 
 ```{r results='asis'}
-# Table with only included classes, with MDS-related and other KMT2A
+# Table with only included classes, with MDS-related, other KMT2A, and MECOM
 # subtypes expanded into their component subtypes (matching Supplementary Table 1)
 # Add a total row (based on merged-class counts to avoid double-counting)
 included_totals_simple <- data.frame(
@@ -951,9 +971,13 @@ mapping <- c(
     "AML.with.MDS.related.gene.mutations" = "MDS-related, gene mutations",
     "AML.with.MDS.related.cytogenetic.abnormalities" = "MDS-related, cytogenetic abnormalities",
     "AML.with.mutated.TP53" = "MDS-related, TP53 mutated",
-    # MECOM variants
+    # MECOM: merged and unmerged (GATA2;MECOM, MECOM other)
+    "MECOM" = "MECOM rearrangement",
     "MECOM.fusion" = "MECOM rearrangement",
     "MECOM.rearrangement" = "MECOM rearrangement",
+    "GATA2.MECOM" = "GATA2;MECOM",
+    "MECOM.other" = "MECOM, other",
+    "MECOM..other" = "MECOM, other",
     # Additional subtypes that may appear in results
     "AML.with.t.9.22..BCR..ABL1" = "BCR::ABL1",
     "BCR..ABL1" = "BCR::ABL1",
@@ -985,7 +1009,9 @@ order_AML <- c(
     "KMT2A::MLLT4",
     "KMT2A::SEPT6",
     "DEK::NUP214",                                 # AML with t(6;9)/DEK::NUP214
-    "MECOM rearrangement",                         # MECOM rearrangement
+    "MECOM rearrangement",                         # MECOM rearrangement (merged)
+    "GATA2;MECOM",                                 # MECOM unmerged
+    "MECOM, other",                                # MECOM unmerged
     "BCR::ABL1",                                   # AML with t(9;22)/BCR::ABL1
     "PRDM16::RPN1",
     "NPM1::MLF1",
@@ -1030,7 +1056,7 @@ fix_names <- function(x){
 make_cm_fig <- function(res_obj, type, label_set) {
   # All per-class summaries for a given result object (full vs collapsed)
   per_class <- res_obj$per_class_summaries[[type]]
-  per_class <- per_class[per_class$Model == "svm", ]
+  per_class <- per_class[per_class$Model == "OvR_Ensemble", ]
   rownames(per_class) <- gsub("Class: ", "", per_class$Class)
 
   # Apply pretty names to per-class row labels
@@ -1100,7 +1126,7 @@ per_class <- apply(per_class, 2, function(x) round(x, 2))
   # Confusion matrices across folds for the same result object
   conf_table <- list()
   for (fold in names(res_obj$detailed_performance[[type]]$Global_Optimized)) {
-      conf_table[[fold]] <- res_obj$detailed_performance[[type]]$svm[[fold]]$confusion_matrix$table
+      conf_table[[fold]] <- res_obj$detailed_performance[[type]]$OvR_Ensemble[[fold]]$confusion_matrix$table
   }
 
   # Get all unique classes across all folds
@@ -1245,7 +1271,7 @@ library(gridExtra)
 # Panel A: F1 Scores Comparison (Full vs Merged)
 # Extract F1 scores for full and merged classes
 f1_full <- outer_unmerged$per_class_summaries$cv %>%
-  filter(Model == "svm") %>%
+  filter(Model == "OvR_Ensemble") %>%
   mutate(Class = gsub("Class: ", "", Class),
          Class = fix_names(Class),
          Type = "Full",
@@ -1253,7 +1279,7 @@ f1_full <- outer_unmerged$per_class_summaries$cv %>%
   select(Class, F1, Type)
 
 f1_merged <- outer_merged$per_class_summaries$cv %>%
-  filter(Model == "svm") %>%
+  filter(Model == "OvR_Ensemble") %>%
   mutate(Class = gsub("Class: ", "", Class),
          Class = fix_names(Class),
          Type = "Merged",
@@ -1261,20 +1287,22 @@ f1_merged <- outer_merged$per_class_summaries$cv %>%
   select(Class, F1, Type)
 
 # Combine and create comparison data
-f1_comparison <- bind_rows(f1_full, f1_merged) 
+f1_comparison <- bind_rows(f1_full, f1_merged)
 
-# Define merge mapping for connecting lines
+# Define merge mapping for connecting lines (full -> merged class)
 merge_mapping <- list(
   "Other KMT2A rearrangements" = c("KMT2A::ELL", "KMT2A::MLLT10", "KMT2A::MLLT4", "KMT2A::SEPT6"),
-  "MDS-related" = c("MDS-related, gene mutations", "MDS-related, cytogenetic abnormalities", "MDS-related, TP53 mutated", "MDS.r")
+  "MDS-related" = c("MDS-related, gene mutations", "MDS-related, cytogenetic abnormalities", "MDS-related, TP53 mutated", "MDS.r"),
+  "MECOM rearrangement" = c("GATA2;MECOM", "MECOM, other")
 )
 
 # Create category groups for coloring
 f1_comparison <- f1_comparison %>%
   mutate(
     Category = case_when(
-      Class %in% c("PML::RARA", "RUNX1::RUNX1T1", "CBFB::MYH11", "DEK::NUP214", "MECOM rearrangement", "MLLT3::KMT2A") ~ "Major rearrangements",
+      Class %in% c("PML::RARA", "RUNX1::RUNX1T1", "CBFB::MYH11", "DEK::NUP214", "MLLT3::KMT2A") ~ "Major rearrangements",
       Class %in% c("Other KMT2A rearrangements", "KMT2A::ELL", "KMT2A::MLLT10", "KMT2A::MLLT1","KMT2A::MLLT4", "KMT2A::SEPT6") ~ "Other KMT2A rearrangements",
+      Class %in% c("MECOM rearrangement", "GATA2;MECOM", "MECOM, other") ~ "MECOM rearrangement",
       Class %in% c("MDS-related", "MDS-related, gene mutations", "MDS-related, cytogenetic abnormalities", "MDS-related, TP53 mutated", "MDS.r") ~ "MDS-related",
       Class %in% c("Mutated NPM1", "CEBPA bZIP in-frame") ~ "Major mutations",
       Class %in% c("PRDM16::RPN1", "NPM1::MLF1", "KAT6A::CREBBP", "RBM15::MRTF1", "ETV6::MNX1", "PICALM::MLLT10", "FUS::ERG", "RUNX1::CBFA2T3", "CBFA2T3::GLIS2", "NUP98::NSD1", "NUP98::KDM5A", "NUP98, other partners") ~ "Rare translocations",
@@ -1282,15 +1310,23 @@ f1_comparison <- f1_comparison %>%
     )
   )
 
-# Order classes consistently
-all_classes_ordered <- order_AML 
+# For Panel A: show only Full dot for classes unchanged between Full and Merged; merged groups keep Merged point
+classes_in_full <- unique(f1_comparison$Class[f1_comparison$Type == "Full"])
+f1_comparison_plot <- f1_comparison %>%
+  filter(Type == "Full" | (Type == "Merged" & !(Class %in% classes_in_full)))
 
-f1_comparison$Class <- factor(f1_comparison$Class, levels = rev(all_classes_ordered))
+# Order classes consistently; include any class in the data so none become NA (unnamed level)
+all_classes_ordered <- order_AML
+extra_classes <- setdiff(unique(as.character(f1_comparison_plot$Class)), all_classes_ordered)
+if (length(extra_classes) > 0) all_classes_ordered <- c(all_classes_ordered, extra_classes)
+
+f1_comparison_plot$Class <- factor(f1_comparison_plot$Class, levels = rev(all_classes_ordered))
 
 # Create color palette for categories
 category_colors <- c(
   "Major rearrangements" = "#1f77b4",
   "Other KMT2A rearrangements" = "#ff7f0e",
+  "MECOM rearrangement" = "#17becf",
   "Major mutations" = "#2ca02c",
   "Rare translocations" = "#9467bd",
   "MDS-related" = "#d62728"
@@ -1300,11 +1336,11 @@ category_colors <- c(
 library(ggtext)
 
 # Get the actual y-axis levels as they appear on the plot (bottom to top)
-axis_class_levels <- levels(f1_comparison$Class)
-# Filter to only classes present in the data
-axis_class_levels <- axis_class_levels[axis_class_levels %in% unique(f1_comparison$Class)]
+axis_class_levels <- levels(f1_comparison_plot$Class)
+# Filter to only classes present in the plot data
+axis_class_levels <- axis_class_levels[axis_class_levels %in% unique(f1_comparison_plot$Class)]
 
-# Create axis text colors based on category (MDS-related and KMT2A get their group colors)
+# Create axis text colors based on category (MDS-related, KMT2A, MECOM get their group colors)
 axis_text_colors <- sapply(axis_class_levels, function(cls) {
   if (cls %in% c("MDS-related", "MDS-related, gene mutations", 
                  "MDS-related, cytogenetic abnormalities", "MDS-related, TP53 mutated", "MDS.r")) {
@@ -1313,22 +1349,26 @@ axis_text_colors <- sapply(axis_class_levels, function(cls) {
                         "KMT2A::ELL", "KMT2A::MLLT1", "KMT2A::MLLT10", "KMT2A::MLLT4", 
                         "KMT2A::SEPT6", "KMT2A::SEPT9")) {
     "#ff7f0e"  # KMT2A color
+  } else if (cls %in% c("MECOM rearrangement", "GATA2;MECOM", "MECOM, other")) {
+    "#17becf"  # MECOM color
   } else {
     "black"
   }
 })
 
 # Create labels with bold formatting for merged classes
+# Replace ";" with "::" in labels so element_markdown does not parse semicolon as CSS (e.g. GATA2;MECOM -> GATA2::MECOM)
 axis_labels <- sapply(axis_class_levels, function(cls) {
-  if (cls %in% c("Other KMT2A rearrangements", "MDS-related")) {
-    paste0("**", cls, "**")
+  safe_cls <- gsub(";", ", ", cls, fixed = TRUE)
+  if (cls %in% c("Other KMT2A rearrangements", "MDS-related", "MECOM rearrangement")) {
+    paste0("**", safe_cls, "**")
   } else {
-    cls
+    safe_cls
   }
 })
 names(axis_labels) <- axis_class_levels
 
-panel_a <- ggplot(f1_comparison, aes(x = F1, y = Class, color = Category, shape = Type)) +
+panel_a <- ggplot(f1_comparison_plot, aes(x = F1, y = Class, color = Category, shape = Type)) +
   geom_point(size = 2.5, alpha = 0.8, position = position_dodge(width = 0.5)) +
   geom_vline(xintercept = 0.8, linetype = "dashed", color = "gray50", alpha = 0.5) +
   scale_color_manual(values = category_colors, name = "Category") +
@@ -1359,7 +1399,7 @@ get_error_heatmap <- function(res_obj, type, label_set, focus_groups) {
   conf_table <- list()
   
   # Determine model name - check what's available
-  model_name <- "svm"
+  model_name <- "OvR_Ensemble"
   
   if (is.null(model_name) || !model_name %in% names(res_obj$detailed_performance[[type]])) {
     return(NULL)
@@ -1430,19 +1470,21 @@ get_error_heatmap <- function(res_obj, type, label_set, focus_groups) {
   ))
 }
 
-# Define focus groups for KMT2A and MDS
+# Define focus groups for KMT2A, MDS, and MECOM
 # Panel B: Full classes shown separately
 kmt2a_mllt3 <- "MLLT3::KMT2A"
 kmt2a_other_full <- c("KMT2A::ELL", "KMT2A::MLLT10", "KMT2A::MLLT1", "KMT2A::MLLT4", "KMT2A::SEPT6")
 mds_groups_full <- c("MDS-related, gene mutations", "MDS-related, TP53 mutated", "MDS-related, cytogenetic abnormalities")
+mecom_groups_full <- c("GATA2;MECOM", "MECOM, other")
 
-# Panel C: KMT2A::MLLT3 separate, other KMT2A combined, MDS combined
+# Panel C: KMT2A::MLLT3 separate, other KMT2A combined, MDS combined, MECOM combined
 kmt2a_other_merged <- "Other KMT2A rearrangements"
 mds_merged <- "MDS-related"
+mecom_merged <- "MECOM rearrangement"
 
 # Combine groups for each panel
-focus_groups_panel_b <- c(kmt2a_mllt3, kmt2a_other_full, mds_groups_full)
-focus_groups_panel_c <- c(kmt2a_mllt3, kmt2a_other_merged, mds_merged)
+focus_groups_panel_b <- c(kmt2a_mllt3, kmt2a_other_full, mds_groups_full, mecom_groups_full)
+focus_groups_panel_c <- c(kmt2a_mllt3, kmt2a_other_merged, mds_merged, mecom_merged)
 
 # Get error heatmaps from appropriate result objects
 # Panel B uses full classes (outer_unmerged), Panel C uses collapsed classes (outer_merged)
@@ -1450,14 +1492,14 @@ error_panel_b <- get_error_heatmap(outer_unmerged, "cv", "Full", focus_groups_pa
 error_panel_c <- get_error_heatmap(outer_merged, "cv", "Collapsed", focus_groups_panel_c)
 
 # Create heatmap function with group annotations
-create_error_heatmap <- function(error_data, title, other_kmt2a_classes, mds_classes) {
+create_error_heatmap <- function(error_data, title, other_kmt2a_classes, mds_classes, mecom_classes = NULL) {
   if (is.null(error_data)) {
     return(NULL)
   }
   
   conf_percent <- error_data$percentages
   
-  # Create annotation for groups: MLLT3::KMT2A, Other KMT2A, MDS-related
+  # Create annotation for groups: MLLT3::KMT2A, Other KMT2A, MDS-related, MECOM
   group_anno <- sapply(rownames(conf_percent), function(name) {
     if (name == "MLLT3::KMT2A") {
       return("KMT2A::MLLT3")
@@ -1465,17 +1507,24 @@ create_error_heatmap <- function(error_data, title, other_kmt2a_classes, mds_cla
       return("Other KMT2A")
     } else if (name %in% mds_classes) {
       return("MDS-related")
+    } else if (!is.null(mecom_classes) && name %in% mecom_classes) {
+      return("MECOM rearrangement")
     } else {
       return("Other")
     }
   })
   
-  # Set factor order for consistent display
-  group_anno <- factor(group_anno, levels = c("KMT2A::MLLT3", "Other KMT2A", "MDS-related"))
+  group_levels <- c("KMT2A::MLLT3", "Other KMT2A", "MDS-related")
+  group_cols <- c("KMT2A::MLLT3" = "#1f77b4", "Other KMT2A" = "#ff7f0e", "MDS-related" = "#d62728")
+  if (!is.null(mecom_classes)) {
+    group_levels <- c(group_levels, "MECOM rearrangement")
+    group_cols <- c(group_cols, "MECOM rearrangement" = "#17becf")
+  }
+  group_anno <- factor(group_anno, levels = group_levels)
   
   ha <- rowAnnotation(
     Group = group_anno,
-    col = list(Group = c("KMT2A::MLLT3" = "#1f77b4", "Other KMT2A" = "#ff7f0e", "MDS-related" = "#d62728")),
+    col = list(Group = group_cols),
     annotation_legend_param = list(title = "Group", title_gp = gpar(fontsize = 9))
   )
   
@@ -1517,20 +1566,22 @@ create_error_heatmap <- function(error_data, title, other_kmt2a_classes, mds_cla
   return(ht)
 }
 
-# Create Panel B: Full classes (MLLT3::KMT2A separate, other KMT2A separate, MDS separate)
+# Create Panel B: Full classes (MLLT3::KMT2A separate, other KMT2A separate, MDS separate, MECOM separate)
 create_error_heatmap(
   error_panel_b, 
   "B. Error Analysis: Full Classes",
   other_kmt2a_classes = kmt2a_other_full,
-  mds_classes = mds_groups_full
+  mds_classes = mds_groups_full,
+  mecom_classes = mecom_groups_full
 )
 
-# Create Panel C: Collapsed classes (MLLT3::KMT2A separate, Other KMT2A combined, MDS combined)
+# Create Panel C: Collapsed classes (MLLT3::KMT2A separate, Other KMT2A combined, MDS combined, MECOM combined)
 create_error_heatmap(
   error_panel_c, 
   "C. Error Analysis: Collapsed Classes",
   other_kmt2a_classes = kmt2a_other_merged,
-  mds_classes = mds_merged
+  mds_classes = mds_merged,
+  mecom_classes = mecom_merged
 )
 ```
 
@@ -1543,7 +1594,7 @@ create_error_heatmap(
 # Function to create faceted confusion matrices per fold
 make_faceted_cm <- function(type) {
   # Get all folds for this type
-  folds <- names(outer_merged$detailed_performance[[type]]$svm)
+  folds <- names(outer_merged$detailed_performance[[type]]$OvR_Ensemble)
   # Per class
   per_class_list <- list()
   # Collect confusion matrices for all folds
@@ -1863,7 +1914,7 @@ library(ggplot2)
 library(dplyr)
 
 # Extract LOSO performance per cohort
-loso_performance <- outer_merged$detailed_performance$loso$svm
+loso_performance <- outer_merged$detailed_performance$loso$OvR_Ensemble
 
 cohort_performance <- data.frame(
   cohort = names(loso_performance),
@@ -1922,7 +1973,7 @@ loso_fold_list <- list()
 loso_indices_list <- list()
 
 for (fold in names(outer_merged$detailed_performance$loso$svm)) {
-  fold_prob_matrix <- outer_merged$outer_probability_matrices$svm$loso[[fold]]
+  fold_prob_matrix <- outer_merged$ensemble_matrices$loso$ovr_ensemble[[fold]]
   predictions <- apply(fold_prob_matrix[,!colnames(fold_prob_matrix) %in% c("y", "outer_fold", "sample_indices")], 1, which.max)
   predictions <- colnames(fold_prob_matrix)[!colnames(fold_prob_matrix) %in% c("y", "outer_fold", "sample_indices")][predictions]
   truth <- as.character(fold_prob_matrix$y)
@@ -2015,7 +2066,7 @@ ggsave("../writing/figures_new/age_effect_on_performance.png", p_age_kappa, widt
 
 ```{r}
 # Calculate F1 per subtype per 15-year age bin
-age_bins_5yr <- seq(0, 90, by = 15)
+age_bins_5yr <- seq(0, 90, by = 20)
 subtypes_unique <- unique(sample_level_age$truth_display)
 f1_by_age_subtype <- data.frame()
 
@@ -2075,7 +2126,7 @@ p_f1_age_subtype_facet <- ggplot(f1_by_age_plot, aes(x = age_mid, y = f1_score))
         strip.text = element_text(size = 9, face = "bold"),
         panel.grid.minor = element_blank(),
         legend.position = "bottom") +
-  ylim(0.4, 1)
+  ylim(0, 1)
 
 print(p_f1_age_subtype_facet)
 ggsave("../writing/figures_new/f1_by_age_and_subtype_faceted.png", p_f1_age_subtype_facet, width = 14, height = 10, dpi = 300)
@@ -2086,7 +2137,7 @@ ggsave("../writing/figures_new/f1_by_age_and_subtype_faceted.png", p_f1_age_subt
 ```{r}
 # Get F1 scores per subtype from per-class summaries
 per_class_f1 <- outer_merged$per_class_summaries$cv %>%
-  filter(Model == "Global_Optimized") %>%
+  filter(Model == "OvR_Ensemble") %>%
   select(Class, Mean_F1)
 per_class_f1$Class <- gsub("Class: ", "", per_class_f1$Class)
 per_class_f1$Class <- fix_names(per_class_f1$Class)
@@ -2275,10 +2326,10 @@ p_enrichment <- ggplot(subtype_enrichment,
   labs(title = "Subtype Performance (F1) vs Pediatric/Adult Enrichment",
        subtitle = "Negative log2 ratio = Adult-enriched, Positive = Pediatric-enriched",
        x = "Log2(Pediatric/Adult Enrichment Ratio)", y = "F1 Score") +
-  theme(legend.position = "bottom") +
+  theme(legend.position = "bottom") #+
   #xlim(min(log2(subtype_enrichment$enrichment_ratio)) / 1.3,
   #max(log2(subtype_enrichment$enrichment_ratio)) * 1.3) +
-  ylim(0.7, 1)
+  #ylim(0.7, 1)
 
 print(p_enrichment)
 ggsave("../writing/figures_new/subtype_enrichment_performance.png", p_enrichment, width = 10, height = 8, dpi = 300)
@@ -2288,15 +2339,18 @@ ggsave("../writing/figures_new/subtype_enrichment_performance.png", p_enrichment
 ## -- Visualization: F1 Scores per LOSO Fold (Full vs Merged)
 
 ```{r}
+# Minimum number of samples per subtype in a fold to show that fold's F1 (avoids unstable F1 from tiny n)
+min_n_per_subtype_in_fold <- 5L
+
 # Extract per-fold F1 scores for both full and merged classes
-# Helper function to get per-class F1 per fold for LOSO
+# Helper function to get per-class F1 per fold for LOSO (includes n = count of subtype in fold)
 get_f1_per_fold_loso <- function(res_obj, label_set_name) {
   folds <- names(res_obj$detailed_performance$loso$svm)
   f1_list <- list()
   
   for (fold in folds) {
     # Get predictions and truth for this fold
-    fold_perf <- res_obj$detailed_performance$loso$svm[[fold]]
+    fold_perf <- res_obj$detailed_performance$loso$OvR_Ensemble[[fold]]
     predictions <- fold_perf$predictions
     truth <- fold_perf$truth
     
@@ -2307,6 +2361,7 @@ get_f1_per_fold_loso <- function(res_obj, label_set_name) {
       tp <- sum(truth == cls & predictions == cls)
       fp <- sum(truth != cls & predictions == cls)
       fn <- sum(truth == cls & predictions != cls)
+      n_in_fold <- sum(truth == cls)  # number of samples of this subtype in this fold
       
       precision <- ifelse(tp + fp > 0, tp / (tp + fp), 0)
       recall <- ifelse(tp + fn > 0, tp / (tp + fn), 0)
@@ -2316,6 +2371,7 @@ get_f1_per_fold_loso <- function(res_obj, label_set_name) {
         fold = fold,
         class = cls,
         f1 = f1,
+        n_in_fold = n_in_fold,
         label_set = label_set_name,
         stringsAsFactors = FALSE
       )
@@ -2337,6 +2393,9 @@ f1_merged_loso$class <- fix_names(f1_merged_loso$class)
 f1_loso_combined <- rbind(f1_full_loso, f1_merged_loso)
 f1_loso_combined$label_set <- factor(f1_loso_combined$label_set, 
                                      levels = c("Full subtypes", "Collapsed classes"))
+
+# Keep only (fold, class) rows where subtype has at least min_n samples in that fold
+f1_loso_combined <- f1_loso_combined %>% filter(n_in_fold >= min_n_per_subtype_in_fold)
 
 # Order classes by mean F1 (using merged as reference)
 # class_order <- f1_merged_loso %>%
@@ -2368,7 +2427,7 @@ p_f1_loso_facet <- ggplot(f1_loso_plot, aes(x = f1, y = class, color = fold)) +
   theme_bw() +
   labs(
     title = "F1 Scores per AML Subtype",
-    subtitle = "Each dot represents performance on a LOSO outer fold",
+    subtitle = sprintf("Each dot = one LOSO fold (only folds with n >= %d samples per subtype)", min_n_per_subtype_in_fold),
     x = "F1 Score",
     y = "AML Subtype"
   ) +
@@ -2389,25 +2448,29 @@ ggsave("../writing/figures_new/f1_per_loso_fold_full_vs_merged.png", p_f1_loso_f
 ## -- Visualization: Delta F1 from Class Collapsing
 
 ```{r}
+# Only include folds where the collapsed class has at least this many samples (avoids unstable delta from tiny n)
+min_n_delta_f1 <- 5L
+
 # Calculate delta F1 (F1_collapsed - F1_full) for collapsed class groups
-# Focus on MDS-related and other KMT2A classes that were merged
+# Focus on MDS-related, other KMT2A, and MECOM rearrangement classes that were merged
 
 # Define the merge mapping: which full classes map to which collapsed class
 merge_mapping <- list(
   "MDS-related" = c("MDS-related, gene mutations", "MDS-related, cytogenetic abnormalities", 
                     "MDS-related, TP53 mutated", "MDS.r"),
-  "Other KMT2A rearrangements" = c("KMT2A::ELL", "KMT2A::MLLT10","KMT2A::MLLT1", "KMT2A::MLLT4", "KMT2A::SEPT6")
+  "Other KMT2A rearrangements" = c("KMT2A::ELL", "KMT2A::MLLT10","KMT2A::MLLT1", "KMT2A::MLLT4", "KMT2A::SEPT6"),
+  "MECOM rearrangement" = c("GATA2;MECOM", "MECOM, other")
 )
 
-# Calculate mean F1 per fold for full subclasses and collapsed classes
+# Calculate mean F1 per fold for full subclasses and collapsed classes (only folds with n >= min_n_delta_f1)
 delta_f1_list <- list()
 
 for (collapsed_class in names(merge_mapping)) {
   full_classes <- merge_mapping[[collapsed_class]]
   
-  # Get F1 for the collapsed class per fold (from merged results)
+  # Get F1 for the collapsed class per fold (from merged results); keep only folds with n >= min_n
   collapsed_f1 <- f1_merged_loso %>%
-    filter(class == collapsed_class) %>%
+    filter(class == collapsed_class, n_in_fold >= min_n_delta_f1) %>%
     select(fold, f1_collapsed = f1)
   
   # Get mean F1 across the constituent full classes per fold
@@ -2457,7 +2520,8 @@ p_delta_f1 <- ggplot(delta_f1_data, aes(x = group, y = delta_f1)) +
   geom_point(aes(color = cohort_type, shape = cohort_type), 
              size = 3, alpha = 0.8, position = position_jitter(width = 0.1, seed = 42)) +
   scale_fill_manual(values = c("MDS-related" = "#d62728", 
-                               "Other KMT2A rearrangements" = "#ff7f0e"),
+                               "Other KMT2A rearrangements" = "#ff7f0e",
+                               "MECOM rearrangement" = "#17becf"),
                     guide = "none") +
   scale_color_manual(values = c("Adult" = "#7eb0d5", "Pediatric" = "#fd7f6f"),
                      name = "Cohort Type") +
@@ -2466,9 +2530,14 @@ p_delta_f1 <- ggplot(delta_f1_data, aes(x = group, y = delta_f1)) +
   theme_bw() +
   labs(
     title = "F1 Score Improvement from Class Collapsing (LOSO)",
-    subtitle = sprintf("MDS-related: mean dF1 = +%.2f | Other KMT2A: mean dF1 = +%.2f",
-                       delta_summary$mean_delta[delta_summary$group == "MDS-related"],
-                       delta_summary$mean_delta[delta_summary$group == "Other KMT2A rearrangements"]),
+    subtitle = paste(
+      sprintf("Folds with n >= %d per collapsed class. ", min_n_delta_f1),
+      sprintf("MDS-related: mean dF1 = +%.2f", delta_summary$mean_delta[delta_summary$group == "MDS-related"]),
+      sprintf("| Other KMT2A: +%.2f", delta_summary$mean_delta[delta_summary$group == "Other KMT2A rearrangements"]),
+      if ("MECOM rearrangement" %in% delta_summary$group)
+        sprintf("| MECOM: +%.2f", delta_summary$mean_delta[delta_summary$group == "MECOM rearrangement"]) else "",
+      sep = " "
+    ),
     x = "Collapsed Class Group",
     y = expression(Delta*"F1 (Collapsed - Full)")
   ) +
@@ -2496,13 +2565,199 @@ for (grp in unique(delta_f1_data$group)) {
 }
 ```
 
+# Gene selection analysis
+
+```{r}
+counts <- data.table::fread("../data/counts_20aug25.csv", drop = 1)
+counts <- data.frame(data.table::transpose(counts))
+counts_filtered <- counts[filter,]
+
+library(reticulate)
+use_virtualenv("../.venv/", required = TRUE)
+
+# Ensure our local `python` folder (with `transformers.py`) is on sys.path
+py_run_string("
+import sys, os
+local_python = os.path.abspath('../python')
+if local_python not in sys.path:
+    sys.path.insert(0, local_python)
+")
+
+# Load full fitted pipeline (joblib). Steps: DESeq2 norm -> MVG selection -> scaling.
+py_run_string("import joblib")
+py_run_string("pipeline = joblib.load('../data/out/final_models/pipelines/pipeline_ngenes_2000.pkl')")
+pipeline_2000 <- py$pipeline
+
+# Get full gene name vector (for all genes)
+counts_gene_names <- data.table::fread("../data/counts_20aug25.csv", select = 1, header = TRUE)[[1]]
+
+# Indices of selected MVGs from the pipeline (0-based in Python, 1-based in R)
+mvgs_1based <- py_to_r(py_eval("list(pipeline.named_steps['feature_selection'].mvgs_)"))
+mvgs_1based <- as.integer(mvgs_1based) + 1L
+
+# Build matrix of filtered counts (samples x all genes)
+X_counts <- as.matrix(counts_filtered)
+mode(X_counts) <- "numeric"
+py$X <- X_counts
+
+# DESeq2-only normalisation on ALL genes (no MVG filter, no scaler)
+counts_deseq2_all <- py_to_r(pipeline_2000$named_steps$DEseq2$transform(py$X))
+rownames(counts_deseq2_all) <- rownames(counts_filtered)
+colnames(counts_deseq2_all) <- counts_gene_names
+```
+
+## Eta-squared: study vs subtype association per gene
+
+```{r}
+# Vectorized eta-squared (proportion of variance explained) per gene for study and subtype.
+X <- as.matrix(counts_deseq2_all)
+n <- nrow(X)
+mean_g <- colMeans(X)
+SS_total <- colSums((X - rep(mean_g, each = n))^2)
+SS_total[SS_total <= 0] <- NA
+
+study_f <- factor(filtered_study_names)
+rs_study <- rowsum(X, study_f)
+n_study <- as.vector(table(study_f))
+mean_by_study <- rs_study / n_study
+SS_between_study <- colSums(n_study * (mean_by_study - rep(mean_g, each = nrow(mean_by_study)))^2)
+eta2_study <- SS_between_study / SS_total
+
+subtype_f <- factor(modify_classes(filtered_leukemia_subtypes))
+rs_subtype <- rowsum(X, subtype_f)
+n_subtype <- as.vector(table(subtype_f))
+mean_by_subtype <- rs_subtype / n_subtype
+SS_between_subtype <- colSums(n_subtype * (mean_by_subtype - rep(mean_g, each = nrow(mean_by_subtype)))^2)
+eta2_subtype <- SS_between_subtype / SS_total
+
+eta2_study[is.nan(eta2_study)] <- NA
+eta2_subtype[is.nan(eta2_subtype)] <- NA
+
+df_eta2 <- data.frame(
+  gene = counts_gene_names,
+  eta2_study = as.numeric(eta2_study),
+  eta2_subtype = as.numeric(eta2_subtype),
+  selected = seq_along(counts_gene_names) %in% mvgs_1based,
+  stringsAsFactors = FALSE
+)
+```
+
+```{r}
+library(ggplot2)
+p_eta2 <- ggplot(df_eta2, aes(x = eta2_study, y = eta2_subtype)) +
+  geom_point(data = subset(df_eta2, !selected), color = "black", alpha = 0.35, size = 0.6) +
+  geom_point(data = subset(df_eta2, selected), color = "red", alpha = 0.6, size = 0.8) +
+  theme_bw() +
+  labs(
+    x = expression(eta^2 ~ "(study | gene expression)"),
+    y = expression(eta^2 ~ "(subtype | gene expression)"),
+    title = "Study vs subtype association per gene"
+  )
+p_eta2
+#ggsave("../writing/figures_new/eta2_study_vs_subtype.png", p_eta2, width = 6, height = 5, dpi = 300)
+```
+
+## t-SNE on MVGs (PCA 50)
+
+```{r}
+library(Rtsne)
+
+# MVG expression (DESeq2-normalised), then scale for PCA
+X_mvg <- scale(counts_deseq2_all[, mvgs_1based])
+# PCA on MVGs, then use first 50 PCs for fast t-SNE
+pca_mvg <- prcomp(X_mvg, scale. = FALSE)
+pcs_50 <- pca_mvg$x[, 1:50]
+# t-SNE on 50 PC scores
+set.seed(42)
+tsne_mvg <- Rtsne(
+  pcs_50,
+  dims = 2,
+  perplexity = min(30, (nrow(pca_mvg$x) - 1) %/% 3),
+  max_iter = 1000,
+  pca = FALSE
+)
+df_tsne <- data.frame(
+  tsne1 = tsne_mvg$Y[, 1],
+  tsne2 = tsne_mvg$Y[, 2],
+  subtype = modify_classes(filtered_leukemia_subtypes),
+  study = filtered_study_names
+)
+# Group rare treatment subtypes into a single 'Rare' category
+df_tsne$subtype_grouped <- ifelse(
+  df_tsne$subtype %in% rare_tx_subtypes,
+  "Rare",
+  as.character(df_tsne$subtype)
+)
+df_tsne$subtype_grouped <- factor(df_tsne$subtype_grouped)
+
+p_tsne <- ggplot(df_tsne, aes(x = tsne1, y = tsne2, fill = subtype_grouped)) +
+  geom_point(alpha = 1, size = 1.5, shape = 21) +
+  scale_fill_brewer(palette = "Paired", name = "Subtype") +
+  theme_bw() +
+  labs(
+    x = "t-SNE 1",
+    y = "t-SNE 2",
+    title = "t-SNE on MVGs (50 PCs)"
+  )
+p_tsne
+#ggsave("../writing/figures_new/tsne_mvg_50pcs.png", p_tsne, width = 8, height = 6, dpi = 300)
+```
+
+## t-SNE on 500 subtype-informative, study-invariant genes
+
+```{r}
+# Rank genes by high eta2_subtype and low eta2_study (subtype signal, minimal batch)
+df_eta2$score_subtype_vs_study <- df_eta2$eta2_subtype - df_eta2$eta2_study
+idx_500 <- order(df_eta2$score_subtype_vs_study, decreasing = TRUE, na.last = TRUE)[1:500]
+genes_500_subtype <- df_eta2$gene[idx_500]
+col_idx_500 <- match(genes_500_subtype, counts_gene_names)
+
+# Expression for these 500 genes only
+X_500 <- scale(counts_deseq2_all[, col_idx_500])
+pca_500 <- prcomp(X_500, scale. = FALSE)
+pcs_50_500 <- pca_500$x[, 1:min(50, ncol(pca_500$x))]
+set.seed(42)
+tsne_500 <- Rtsne(
+  pcs_50_500,
+  dims = 2,
+  perplexity = min(30, (nrow(pcs_50_500) - 1) %/% 3),
+  max_iter = 1000,
+  pca = FALSE
+)
+df_tsne_500 <- data.frame(
+  tsne1 = tsne_500$Y[, 1],
+  tsne2 = tsne_500$Y[, 2],
+  subtype = modify_classes(filtered_leukemia_subtypes),
+  study = filtered_study_names
+)
+# Group rare treatment subtypes into a single 'Rare' category
+df_tsne_500$subtype_grouped <- ifelse(
+  df_tsne_500$subtype %in% rare_tx_subtypes,
+  "Rare",
+  as.character(df_tsne_500$subtype)
+)
+df_tsne_500$subtype_grouped <- factor(df_tsne_500$subtype_grouped)
+
+p_tsne_500 <- ggplot(df_tsne_500, aes(x = tsne1, y = tsne2, fill = subtype_grouped)) +
+  geom_point(alpha = 1, size = 1.5, shape = 21) +
+  scale_fill_brewer(palette = "Paired", name = "Subtype") +
+  theme_bw() +
+  labs(
+    x = "t-SNE 1",
+    y = "t-SNE 2",
+    title = "t-SNE on 500 genes (high eta2 subtype, low eta2 study; 50 PCs)"
+  )
+p_tsne_500
+#ggsave("../writing/figures_new/tsne_500_subtype_vs_study.png", p_tsne_500, width = 8, height = 6, dpi = 300)
+```
+
 # Ensemble Weights Analysis
 
 ##  --CV Weights Visualization
 
 ```{r}
 # Read global and OvR ensemble weights
-df_global <- read.csv("../data/out/inner_cv/ensemble_weights_mds_only_maxprob/cv/")
+df_global <- read.csv("../data/out/inner_cv/ensemble_weights_merged_summed/cv/ovr_ensemble_weights_used.csv")
 
 # Select weight columns and fold info from global weights
 df_global_weights <- df_global %>%
@@ -2533,7 +2788,7 @@ p_weights_cv <- ggplot(df_long, aes(x = model, y = weight)) +
   theme_bw() +
   theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
   labs(
-    title = "CV: Global ensemble weights distribution (Global + OvR)",
+    title = "CV: Ensemble weights distribution (OvR)",
     x = "Model",
     y = "Weight",
     color = "Fold"
@@ -2548,7 +2803,7 @@ ggsave('../writing/figures_new/weights_per_fold_cv.png', p_weights_cv, width = 1
 
 ```{r}
 # Read global and OvR ensemble weights
-df_global <- read.csv("../data/out/inner_cv/ensemble_weights_merged/loso/ovr_ensemble_weights_used.csv")
+df_global <- read.csv("../data/out/inner_cv/ensemble_weights_merged_summed/loso/ovr_ensemble_weights_used.csv")
 
 # Select weight columns and fold info from global weights
 df_global_weights <- df_global %>%
@@ -2637,8 +2892,8 @@ map_truth_to_canonical <- function(truth_labels) {
     "AML-RUNX1::RUNX1T1" = "AML with t(8;21)/RUNX1::RUNX1T1",
     "AML-KMT2A::MLLT3" = "AML with t(9;11)/MLLT3::KMT2A",
     "APL-PML::RARA" = "APL, t(15;17)/PML::RARA",
-    "AML-GATA2::MECOM" = "MECOM fusion",
-    "AML-otherMECOM" = "MECOM fusion"
+    "AML-GATA2::MECOM" = "MECOM rearrangement",
+    "AML-otherMECOM" = "MECOM rearrangement"
   )
   
   sapply(truth_labels, function(x) {
@@ -2660,6 +2915,8 @@ MLL_lab_truth <- map_truth_to_canonical(MLL_lab_truth)
 #MLL_lab_truth[(MLL_lab$WHO_2022 == "AML-CEBPA" & MLL_lab$WHO_2017 == "AML with biallelic CEBPA" & MLL_lab$ICC_2022 != "AML-CEBPA")] <- "AML with in frame bZIP CEBPA"
 MLL_lab_truth[grepl("MDS|TP53", MLL_lab_truth)] <- "AML MDS"
 MLL_lab_truth[grepl("KMT2A",MLL_lab_truth) & !grepl("MLLT3", MLL_lab_truth)] <- "Other KMT2A"
+# MECOM merged to same display name as elsewhere (MECOM rearrangement)
+MLL_lab_truth[grepl("MECOM", MLL_lab_truth)] <- "MECOM rearrangement"
 MLL_lab_truth <- make.names(MLL_lab_truth)
 
 
@@ -2667,6 +2924,8 @@ MLL_lab_predictions <- MLL_lab_pred_df$prediction
 table(MLL_lab_predictions)
 MLL_lab_predictions[grepl("MDS|TP53", MLL_lab_predictions)]<- "AML MDS"
 MLL_lab_predictions[grepl("KMT2A",MLL_lab_predictions) & !grepl("MLLT3", MLL_lab_predictions)] <- "Other KMT2A"
+# MECOM merged to same display name as elsewhere (MECOM rearrangement)
+MLL_lab_predictions[grepl("MECOM", MLL_lab_predictions)] <- "MECOM rearrangement"
 MLL_lab_predictions[grepl("KAT6A|ETV6|NUP98|CBFA2T3", MLL_lab_predictions)]<- "AML-other rare transloc"
 MLL_lab_predictions <- make.names(MLL_lab_predictions)
 MLL_lab_predictions <- gsub("_", ".", MLL_lab_predictions)

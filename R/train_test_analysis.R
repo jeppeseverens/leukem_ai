@@ -1,7 +1,7 @@
 # Source shared utility functions
 source("utility_functions.R")
 
-main_train_test_analysis <- function(merge_classes = FALSE, merge_mds_only = FALSE){
+main_train_test_analysis <- function(merge_classes = FALSE){
 
   #' Generate probability data frames for One-vs-Rest classification
   #' @param cv_results_df Cross-validation results data frame
@@ -9,7 +9,7 @@ main_train_test_analysis <- function(merge_classes = FALSE, merge_mds_only = FAL
   #' @param label_mapping Label mapping data frame
   #' @return List of probability data frames organized by outer fold
   #'
-  generate_ovr_probability_matrices <- function(cv_results_df, best_params_df, label_mapping, study_names, merge_classes = FALSE, merge_mds_only = FALSE) {
+  generate_ovr_probability_matrices <- function(cv_results_df, best_params_df, label_mapping, study_names, merge_classes = FALSE) {
     best_params_with_labels <- add_class_labels(best_params_df, label_mapping)
     outer_fold_ids <- unique(cv_results_df$outer_fold)
 
@@ -78,9 +78,9 @@ main_train_test_analysis <- function(merge_classes = FALSE, merge_mds_only = FAL
         probability_matrix$indices <- parse_numeric_string(inner_fold_data$sample_indices[1]) + 1
         probability_matrix$study <- study_names[probability_matrix$indices]
 
-        # Apply class merging if requested
+        # Apply class merging if requested (summed method, consistent with inner CV)
         if (merge_classes) {
-          probability_matrix <- merge_classes_in_matrix(probability_matrix, merge_mds_only = merge_mds_only)
+          probability_matrix <- merge_classes_in_matrix(probability_matrix, merge_prob_method = "sum")
         }
 
         fold_matrices[[as.character(inner_fold_id)]] <- probability_matrix
@@ -151,7 +151,7 @@ main_train_test_analysis <- function(merge_classes = FALSE, merge_mds_only = FAL
   #' @param filtered_subtypes Filtered leukemia subtypes
   #' @return List of probability data frames organized by outer fold
 
-  generate_standard_probability_matrices <- function(cv_results_df, best_params_df, label_mapping, filtered_subtypes, study_names, merge_classes = FALSE, merge_mds_only = FALSE) {
+  generate_standard_probability_matrices <- function(cv_results_df, best_params_df, label_mapping, filtered_subtypes, study_names, merge_classes = FALSE) {
     outer_fold_ids <- unique(cv_results_df$outer_fold)
     probability_matrices <- list()
 
@@ -196,9 +196,9 @@ main_train_test_analysis <- function(merge_classes = FALSE, merge_mds_only = FAL
         probability_matrix$indices <- parse_numeric_string(inner_fold_data$sample_indices) + 1
         probability_matrix$study <- study_names[probability_matrix$indices]
 
-        # Apply class merging if requested
+        # Apply class merging if requested (summed method, consistent with inner CV)
         if (merge_classes) {
-          probability_matrix <- merge_classes_in_matrix(probability_matrix, merge_mds_only = merge_mds_only)
+          probability_matrix <- merge_classes_in_matrix(probability_matrix, merge_prob_method = "sum")
         }
 
         fold_matrices[[as.character(inner_fold_id)]] <- probability_matrix
@@ -231,7 +231,7 @@ main_train_test_analysis <- function(merge_classes = FALSE, merge_mds_only = FAL
   #' Generate One-vs-Rest optimized ensemble probability matrices for train/test
   #' @param results Analysis results containing probability matrices
   #' @param weights Weight configurations for ensemble
-  #' @param type Type of analysis ("cv" or "loso")
+  #' @param type Type of analysis ("cv" only; LOSO removed)
   #' @param ensemble_performance Performance results from perform_ovr_ensemble_analysis_train_test
   #' @return List containing optimized probability matrices and weights used for each outer fold
   generate_ovr_optimized_ensemble_matrices_train_test <- function(results, weights, type = "cv", ensemble_performance) {
@@ -424,7 +424,7 @@ main_train_test_analysis <- function(merge_classes = FALSE, merge_mds_only = FAL
   #' Generate globally optimized ensemble probability matrices for train/test
   #' @param results Analysis results containing probability matrices
   #' @param weights Weight configurations for ensemble
-  #' @param type Type of analysis ("cv" or "loso")
+  #' @param type Type of analysis ("cv" only; LOSO removed)
   #' @param ensemble_performance Performance results from perform_global_ensemble_analysis_train_test
   #' @return List containing optimized probability matrices and weights used for each outer fold
   generate_global_optimized_ensemble_matrices_train_test <- function(results, weights, type = "cv", ensemble_performance) {
@@ -516,7 +516,7 @@ main_train_test_analysis <- function(merge_classes = FALSE, merge_mds_only = FAL
 
   #' Calculate performance metrics for optimized ensemble matrices (train/test version)
   #' @param ensemble_result Result containing optimized ensemble probability matrices and weights
-  #' @param type Type of analysis ("cv" or "loso")
+  #' @param type Type of analysis ("cv" only; LOSO removed)
   #' @return Performance results for each outer fold
   analyze_optimized_ensemble_performance_train_test <- function(ensemble_result, type = "cv") {
     cat("Analyzing optimized ensemble performance for train/test...\n")
@@ -640,7 +640,7 @@ main_train_test_analysis <- function(merge_classes = FALSE, merge_mds_only = FAL
   }
 
   #' Compare performance with and without rejection for train/test analysis
-  #' @param type Analysis type ("cv" or "loso")
+  #' @param type Analysis type ("cv" only)
   #' @param train_test_results Train/test results object
   #' @return Combined data frame with performance metrics with and without rejection
   compare_all_results_train_test <- function(type, train_test_results){
@@ -664,15 +664,13 @@ main_train_test_analysis <- function(merge_classes = FALSE, merge_mds_only = FAL
     return(combined_df)
   }
 
-  #' Combine all results for both CV and LOSO train/test analysis
+  #' Combine results for CV train/test analysis
   #' @param train_test_results Train/test results object
-  #' @return List with combined results for CV and LOSO
+  #' @return List with combined results for CV
   combine_all_results_train_test <- function(train_test_results){
     combined_results <- list()
-    for (type in c("cv", "loso")){
-      if (type %in% names(train_test_results[["performance_comparisons"]])) {
-        combined_results[[type]] <- compare_all_results_train_test(type, train_test_results)
-      }
+    if ("cv" %in% names(train_test_results[["performance_comparisons"]])) {
+      combined_results[["cv"]] <- compare_all_results_train_test("cv", train_test_results)
     }
     return(combined_results)
   }
@@ -700,7 +698,7 @@ main_train_test_analysis <- function(merge_classes = FALSE, merge_mds_only = FAL
   label_mapping <- read.csv("../data/label_mapping_all.csv")
 
   # Load leukemia subtype data
-  leukemia_subtypes <- read.csv("../data/rgas_18dec25.csv")$ICC_Subtype
+  leukemia_subtypes <- read.csv("../data/rgas_10feb26.csv")$ICC_Subtype
 
   # Load study metadata
   meta <- read.csv("../data/meta_20aug25.csv")
@@ -724,29 +722,21 @@ main_train_test_analysis <- function(merge_classes = FALSE, merge_mds_only = FAL
 
   dir.create("../data/out/final_train_test/best_params")
 
+  # CV only (hyperparameters for final model are selected from standard CV)
   MODEL_CONFIGS <- list(
     svm = list(
       classification_type = "OvR",
-      file_paths = list(
-        cv = "../data/out/final_train_test/SVM_final_selection/final_cv_svm/",
-        loso = "../data/out/final_train_test/SVM_final_selection/final_loso_svm/"
-      ),
+      file_paths = list(cv = "../data/out/final_train_test/SVM_final_selection/final_cv_svm_28jan26/"),
       output_dir = "../data/out/final_train_test/best_params/SVM"
     ),
     xgboost = list(
       classification_type = "OvR",
-      file_paths = list(
-        cv = "../data/out/final_train_test/XGBOOST_final_selection/final_cv_xgb/",
-        loso = "../data/out/final_train_test/XGBOOST_final_selection/final_loso_xgb/"
-      ),
+      file_paths = list(cv = "../data/out/final_train_test/XGBOOST_final_selection/final_cv_xgb_28jan26/"),
       output_dir = "../data/out/final_train_test/best_params/XGBOOST"
     ),
     neural_net = list(
       classification_type = "standard",
-      file_paths = list(
-        cv = "../data/out/final_train_test/NN_final_selection/final_cv_nn/",
-        loso = "../data/out/final_train_test/NN_final_selection/final_loso_nn/"
-      ),
+      file_paths = list(cv = "../data/out/final_train_test/NN_final_selection/final_cv_nn_28jan26/"),
       output_dir = "../data/out/final_train_test/best_params/NN"
     )
   )
@@ -772,9 +762,9 @@ main_train_test_analysis <- function(merge_classes = FALSE, merge_mds_only = FAL
 
       if (!is.null(results) && !is.null(best_params)) {
         if (config$classification_type == "OvR") {
-          probs <- generate_ovr_probability_matrices(results, best_params, label_mapping, study_names, merge_classes = merge_classes, merge_mds_only = merge_mds_only)
+          probs <- generate_ovr_probability_matrices(results, best_params, label_mapping, study_names, merge_classes = merge_classes)
         } else {
-          probs <- generate_standard_probability_matrices(results, best_params, label_mapping, filtered_leukemia_subtypes, study_names, merge_classes = merge_classes, merge_mds_only = merge_mds_only)
+          probs <- generate_standard_probability_matrices(results, best_params, label_mapping, filtered_leukemia_subtypes, study_names, merge_classes = merge_classes)
         }
 
         # No class grouping - keep original classes
@@ -806,11 +796,11 @@ main_train_test_analysis <- function(merge_classes = FALSE, merge_mds_only = FAL
 
   per_class_results <- do.call(rbind, per_class_results)
 
-  # Run ensemble analysis for both CV and LOSO
-  cat("Running ensemble analysis for train/test...\n")
+  # Run ensemble analysis for CV (final model uses CV-selected hyperparameters)
+  cat("Running ensemble analysis for train/test (CV)...\n")
   ensemble_results <- list()
 
-  for (analysis_type in c("cv", "loso")) {
+  for (analysis_type in "cv") {
     cat(sprintf("\n=== Running %s analysis ===\n", toupper(analysis_type)))
 
     # Check if we have data for this analysis type
@@ -870,10 +860,10 @@ main_train_test_analysis <- function(merge_classes = FALSE, merge_mds_only = FAL
   }
 
   # Run rejection analysis
-  cat("Running rejection analysis for train/test...\n")
+  cat("Running rejection analysis for train/test (CV)...\n")
   rejection_results <- list()
 
-  for (analysis_type in c("cv", "loso")) {
+  for (analysis_type in "cv") {
     cat(sprintf("\n=== Running rejection analysis for %s ===\n", toupper(analysis_type)))
 
     # Check if we have ensemble results for this analysis type
@@ -900,10 +890,8 @@ main_train_test_analysis <- function(merge_classes = FALSE, merge_mds_only = FAL
   # Determine suffix for file paths (maxprob method - uses max probability instead of summing)
   if (!merge_classes) {
     merge_suffix <- "_unmerged_maxprob"
-  } else if (merge_mds_only) {
-    merge_suffix <- "_mds_only_maxprob"
   } else {
-    merge_suffix <- "_merged_maxprob"
+    merge_suffix <- "_merged_summed"
   }
 
   # Save ensemble weights
@@ -915,31 +903,14 @@ main_train_test_analysis <- function(merge_classes = FALSE, merge_mds_only = FAL
   cutoff_dir <- paste0("../data/out/final_train_test/cutoffs", merge_suffix)
   dir.create(cutoff_dir, recursive = TRUE)
 
-  # Extract and save the optimal cutoffs
-  cv_cutoffs <- NULL
-  loso_cutoffs <- NULL
-
+  # Extract and save the optimal cutoffs (CV only)
+  combined_cutoffs <- data.frame()
   if ("cv" %in% names(rejection_results) && "optimal_results" %in% names(rejection_results[["cv"]])) {
     cv_cutoffs <- rejection_results[["cv"]][["optimal_results"]][["optimal_cutoffs_per_outer_fold"]]
-    if (!is.null(cv_cutoffs)) {
+    if (!is.null(cv_cutoffs) && nrow(cv_cutoffs) > 0) {
       cv_cutoffs$source <- "cv"
+      combined_cutoffs <- cv_cutoffs
     }
-  }
-
-  if ("loso" %in% names(rejection_results) && "optimal_results" %in% names(rejection_results[["loso"]])) {
-    loso_cutoffs <- rejection_results[["loso"]][["optimal_results"]][["optimal_cutoffs_per_outer_fold"]]
-    if (!is.null(loso_cutoffs)) {
-      loso_cutoffs$source <- "loso"
-    }
-  }
-
-  # Combine and save cutoffs
-  combined_cutoffs <- data.frame()
-  if (!is.null(cv_cutoffs)) {
-    combined_cutoffs <- rbind(combined_cutoffs, cv_cutoffs)
-  }
-  if (!is.null(loso_cutoffs)) {
-    combined_cutoffs <- rbind(combined_cutoffs, loso_cutoffs)
   }
 
   if (nrow(combined_cutoffs) > 0) {
@@ -948,11 +919,11 @@ main_train_test_analysis <- function(merge_classes = FALSE, merge_mds_only = FAL
     cat("Warning: No optimal cutoffs found to save\n")
   }
 
-  # Calculate performance comparisons
-  cat("Calculating performance comparisons...\n")
+  # Calculate performance comparisons (CV only)
+  cat("Calculating performance comparisons (CV)...\n")
   performance_comparisons <- list()
 
-  for (analysis_type in c("cv", "loso")) {
+  for (analysis_type in "cv") {
     if (analysis_type %in% names(ensemble_results)) {
 
       # Individual model performance
@@ -1051,18 +1022,17 @@ main_train_test_analysis <- function(merge_classes = FALSE, merge_mds_only = FAL
   # Add final results comparison (with and without rejection)
   train_test_results$final_results <- combine_all_results_train_test(train_test_results)
   train_test_results$merge_classes <- merge_classes  # Store merge status in results
-  train_test_results$merge_mds_only <- merge_mds_only  # Store merge_mds_only status in results
 
   cat("\n=== Final Train/Test Results Summary ===\n")
   print(train_test_results$final_results)
 
-  saveRDS(train_test_results, paste0("../data/out/final_train_test/final_train_test_results_5jan2025", merge_suffix, ".rds"))
+  saveRDS(train_test_results, paste0("../data/out/final_train_test/final_train_test_results_10feb2026", merge_suffix, ".rds"))
   return(train_test_results)
 }
 
-# Run merged and MDS-only merged versions (maxprob method)
-cat("=== Running Train/Test Analysis (Merged - MaxProb Method) ===\n")
-train_test_results_merged <- main_train_test_analysis(merge_classes = TRUE, merge_mds_only = FALSE)
+# Run unmerged and fully merged versions (MDS.r, other.KMT2A, MECOM; maxprob method)
+cat("=== Running Train/Test Analysis (Unmerged - MaxProb Method) ===\n")
+train_test_results_unmerged <- main_train_test_analysis(merge_classes = FALSE)
 
-#cat("=== Running Train/Test Analysis (MDS Only Merged - MaxProb Method) ===\n")
-#train_test_results_mds_only <- main_train_test_analysis(merge_classes = TRUE, merge_mds_only = TRUE)
+cat("=== Running Train/Test Analysis (Merged MDS/KMT2A/MECOM - MaxProb Method) ===\n")
+train_test_results_merged <- main_train_test_analysis(merge_classes = TRUE)

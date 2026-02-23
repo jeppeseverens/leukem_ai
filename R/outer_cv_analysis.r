@@ -16,22 +16,22 @@ OUTER_MODEL_CONFIGS <- list(
   svm = list(
     classification_type = "OvR",
     file_paths = list(
-      cv = "../data/out/outer_cv/SVM_n10/SVM_outer_cv_CV_OvR_20260201_1125.csv",
-      loso = "../data/out/outer_cv/SVM_n10/SVM_outer_cv_loso_OvR_20260201_1128.csv"
+      cv = "../data/out/outer_cv/SVM_n10/SVM_outer_cv_CV_OvR_20260221_0943.csv",
+      loso = "../data/out/outer_cv/SVM_n10/SVM_outer_cv_loso_OvR_20260221_0946.csv"
     )
   ),
   xgboost = list(
     classification_type = "OvR",
     file_paths = list(
-      cv = "../data/out/outer_cv/XGBOOST_n10/XGBOOST_outer_cv_CV_OvR_20260201_1132.csv",
-      loso = "../data/out/outer_cv/XGBOOST_n10/XGBOOST_outer_cv_loso_OvR_20260201_1136.csv"
+      cv = "../data/out/outer_cv/XGBOOST_n10/XGBOOST_outer_cv_CV_OvR_20260221_0950.csv",
+      loso = "../data/out/outer_cv/XGBOOST_n10/XGBOOST_outer_cv_loso_OvR_20260221_0953.csv"
     )
   ),
   neural_net = list(
     classification_type = "standard",
     file_paths = list(
-      cv = "../data/out/outer_cv/NN_n10/NN_outer_cv_CV_standard_20260201_1141.csv",
-      loso = "../data/out/outer_cv/NN_n10/NN_outer_cv_loso_standard_20260201_1212.csv"
+      cv = "../data/out/outer_cv/NN_n10/NN_outer_cv_CV_standard_20260221_0958.csv",
+      loso = "../data/out/outer_cv/NN_n10/NN_outer_cv_loso_standard_20260221_1037.csv"
     )
   )
 )
@@ -52,14 +52,12 @@ DATA_FILTERS <- list(
 )
 # Base directory for ensemble weights (will be updated based on merge_classes parameter)
 # Using maxprob suffix to distinguish from summed method
-WEIGHTS_BASE_DIR_UNMERGED <- "../data/out/inner_cv/cutoffs_unmerged_maxprob"
-WEIGHTS_BASE_DIR_MERGED <- "../data/out/inner_cv/ensemble_weights_merged_maxprob"
-WEIGHTS_BASE_DIR_MDS_ONLY <- "../data/out/inner_cv/ensemble_weights_mds_only_maxprob"
+WEIGHTS_BASE_DIR_UNMERGED <- "../data/out/inner_cv/ensemble_weights_unmerged_maxprob"
+WEIGHTS_BASE_DIR_MERGED <- "../data/out/inner_cv/ensemble_weights_merged_summed"
 
 # Base directory for rejection cut offs (will be updated based on merge_classes parameter)
 REJECTION_BASE_DIR_UNMERGED <- "../data/out/inner_cv/cutoffs_unmerged_maxprob"
-REJECTION_BASE_DIR_MERGED <- "../data/out/inner_cv/cutoffs_merged_maxprob"
-REJECTION_BASE_DIR_MDS_ONLY <- "../data/out/inner_cv/cutoffs_mds_only_maxprob"
+REJECTION_BASE_DIR_MERGED <- "../data/out/inner_cv/cutoffs_merged_summed"
 
 # =============================================================================
 # Source Utility Functions
@@ -108,7 +106,7 @@ load_outer_cv_results <- function(file_path, classification_type) {
 #' @param label_mapping Label mapping data frame
 #' @param filter_unseen_classes Whether to filter samples with classes not in training (default: TRUE)
 #' @return List of probability matrices organized by outer fold (and filtering statistics if filtered)
-generate_outer_ovr_probability_matrices <- function(outer_cv_results, label_mapping, filter_unseen_classes = TRUE, merge_classes = FALSE, merge_mds_only = FALSE) {
+generate_outer_ovr_probability_matrices <- function(outer_cv_results, label_mapping, filter_unseen_classes = TRUE, merge_classes = FALSE) {
   cat("Generating outer One-vs-Rest probability matrices...\n")
 
   if (filter_unseen_classes) {
@@ -194,7 +192,7 @@ generate_outer_ovr_probability_matrices <- function(outer_cv_results, label_mapp
 
     # Apply class merging if requested (before filtering)
     if (merge_classes) {
-      probability_matrix <- merge_classes_in_matrix(probability_matrix, merge_mds_only = merge_mds_only)
+      probability_matrix <- merge_classes_in_matrix(probability_matrix, merge_prob_method = "sum")
       # Update class_labels after merging for filtering
       class_labels <- colnames(probability_matrix)[!colnames(probability_matrix) %in%
                                                     c("y", "outer_fold", "sample_indices")]
@@ -232,7 +230,7 @@ generate_outer_ovr_probability_matrices <- function(outer_cv_results, label_mapp
 #' @param filtered_subtypes Filtered leukemia subtypes
 #' @param filter_unseen_classes Whether to filter samples with classes not in training (default: TRUE)
 #' @return List of probability matrices organized by outer fold (and filtering statistics if filtered)
-generate_outer_standard_probability_matrices <- function(outer_cv_results, label_mapping, filtered_subtypes, filter_unseen_classes = TRUE, merge_classes = FALSE, merge_mds_only = FALSE) {
+generate_outer_standard_probability_matrices <- function(outer_cv_results, label_mapping, filtered_subtypes, filter_unseen_classes = TRUE, merge_classes = FALSE) {
   cat("Generating outer CV standard probability matrices...\n")
 
   if (filter_unseen_classes) {
@@ -292,7 +290,7 @@ generate_outer_standard_probability_matrices <- function(outer_cv_results, label
 
     # Apply class merging if requested (before filtering)
     if (merge_classes) {
-      probability_matrix <- merge_classes_in_matrix(probability_matrix, merge_mds_only = merge_mds_only)
+      probability_matrix <- merge_classes_in_matrix(probability_matrix, merge_prob_method = "sum")
       # Update class_labels after merging for filtering
       class_labels <- colnames(probability_matrix)[!colnames(probability_matrix) %in%
                                                     c("y", "outer_fold", "sample_indices")]
@@ -1134,8 +1132,8 @@ compare_performance_with_rejection <- function(detailed_performance, rejection_s
 # Main Outer CV Analysis Function
 
 #' Main function to run outer CV analysis
-#' @param merge_classes Whether to merge classes (MDS/TP53 -> MDS.r, other KMT2A -> other.KMT2A)
-main_outer_cv <- function(merge_classes = FALSE, merge_mds_only = FALSE) {
+#' @param merge_classes Whether to merge classes (MDS/TP53 -> MDS.r, other KMT2A -> other.KMT2A, MECOM -> MECOM)
+main_outer_cv <- function(merge_classes = FALSE) {
   # Load required libraries
   load_library_quietly("plyr")
   load_library_quietly("dplyr")
@@ -1153,7 +1151,7 @@ main_outer_cv <- function(merge_classes = FALSE, merge_mds_only = FALSE) {
   }
 
   # Load leukemia subtype data
-  leukemia_subtypes <- safe_read_file("../data/rgas_28jan26.csv", function(f) read.csv(f)$ICC_Subtype)
+  leukemia_subtypes <- safe_read_file("../data/rgas_10feb26.csv", function(f) read.csv(f)$ICC_Subtype)
   if (is.null(leukemia_subtypes)) {
     stop("Failed to load leukemia subtype data")
   }
@@ -1209,9 +1207,9 @@ main_outer_cv <- function(merge_classes = FALSE, merge_mds_only = FALSE) {
       if (!is.null(results)) {
         # Generate probability matrices (with filtering and optional merging)
         if (config$classification_type == "OvR") {
-          result <- generate_outer_ovr_probability_matrices(results, label_mapping, filter_unseen_classes = T, merge_classes = merge_classes, merge_mds_only = merge_mds_only)
+          result <- generate_outer_ovr_probability_matrices(results, label_mapping, filter_unseen_classes = TRUE, merge_classes = merge_classes)
         } else {
-          result <- generate_outer_standard_probability_matrices(results, label_mapping, filtered_leukemia_subtypes, filter_unseen_classes = T, merge_classes = merge_classes, merge_mds_only = merge_mds_only)
+          result <- generate_outer_standard_probability_matrices(results, label_mapping, filtered_leukemia_subtypes, filter_unseen_classes = TRUE, merge_classes = merge_classes)
         }
 
         # Extract matrices and filtering stats
@@ -1234,9 +1232,7 @@ main_outer_cv <- function(merge_classes = FALSE, merge_mds_only = FALSE) {
 
   # Load ensemble weights from inner CV analysis (use correct directory based on merge_classes)
   cat("Loading ensemble weights from inner CV analysis...\n")
-  if (merge_mds_only) {
-    weights_base_dir <- WEIGHTS_BASE_DIR_MDS_ONLY
-  } else if (merge_classes) {
+  if (merge_classes) {
     weights_base_dir <- WEIGHTS_BASE_DIR_MERGED
   } else {
     weights_base_dir <- WEIGHTS_BASE_DIR_UNMERGED
@@ -1326,9 +1322,7 @@ main_outer_cv <- function(merge_classes = FALSE, merge_mds_only = FALSE) {
 
   # Load optimal cutoffs for rejection analysis (use correct directory based on merge_classes)
   cat("Loading optimal cutoffs for rejection analysis...\n")
-  if (merge_mds_only) {
-    rejection_base_dir <- REJECTION_BASE_DIR_MDS_ONLY
-  } else if (merge_classes) {
+  if (merge_classes) {
     rejection_base_dir <- REJECTION_BASE_DIR_MERGED
   } else {
     rejection_base_dir <- REJECTION_BASE_DIR_UNMERGED
@@ -1430,20 +1424,16 @@ main_outer_cv <- function(merge_classes = FALSE, merge_mds_only = FALSE) {
   # Determine suffix for file paths (maxprob method - uses max probability instead of summing)
   if (!merge_classes) {
     merge_suffix <- "_unmerged_maxprob"
-  } else if (merge_mds_only) {
-    merge_suffix <- "_mds_only_maxprob"
   } else {
-    merge_suffix <- "_merged_maxprob"
+    merge_suffix <- "_merged_summed"
   }
   outer_cv_results$merge_classes <- merge_classes  # Store merge status in results
-  outer_cv_results$merge_mds_only <- merge_mds_only  # Store merge_mds_only status in results
 
-  saveRDS(outer_cv_results, paste0("../data/out/outer_cv/outer_cv_results_28jan2025_nomdspaed", merge_suffix, ".rds"))
+  saveRDS(outer_cv_results, paste0("../data/out/outer_cv/outer_cv_results_10feb26", merge_suffix, ".rds"))
 
 
   return(outer_cv_results)
 }
 
-outer_cv_results_unmerged <- main_outer_cv(merge_classes = FALSE, merge_mds_only = FALSE)
-outer_cv_results_merged <- main_outer_cv(merge_classes = TRUE, merge_mds_only = FALSE)
-outer_cv_results_mds_only <- main_outer_cv(merge_classes = TRUE, merge_mds_only = TRUE)
+outer_cv_results_unmerged <- main_outer_cv(merge_classes = FALSE)
+outer_cv_results_merged <- main_outer_cv(merge_classes = TRUE)

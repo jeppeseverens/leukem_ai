@@ -61,6 +61,11 @@ def main():
             'type': str,
             'default': 'run',
             'help': 'Name of the run (default: run)'
+        },
+        'fs_method': {
+            'type': str,
+            'default': 'mad',
+            'help': 'Feature selection method: "mad" (intersection MVGs, default) or "eta2" (eta2_subtype - eta2_study)'
         }
     }
 
@@ -98,7 +103,7 @@ def main():
     X, y, study_labels = train_test.filter_data(X, y, study_labels, min_n = 10)
     y, label_mapping = train_test.encode_labels(y)
 
-    # Define the model and parameter grid (same as original)
+    # Define the model and parameter grid (same as original, then adapt n_genes if needed)
     if args.model_type == "XGBOOST":
         model = classifiers.WeightedXGBClassifier
         param_grid = {
@@ -148,6 +153,10 @@ def main():
     else:
         raise ValueError(f"Model type {args.model_type} not supported")
 
+    # If using eta2-based feature selection, restrict n_genes to smaller values
+    if args.fs_method.lower() == "eta2" and 'n_genes' in param_grid:
+        param_grid['n_genes'] = [250, 500, 1000]
+
     # Generate full parameter list (same logic as original)
     full_param_list = list(ParameterGrid(param_grid))
 
@@ -174,10 +183,23 @@ def main():
     single_param = param_list[param_index]
     print(f"Processing parameter combination: {single_param}")
 
+    # Define the feature selection method
+    fs_method = args.fs_method.lower()
+    if fs_method == "eta2":
+        feature_selector = transformers.FeatureSelectionEta()
+        fs_suffix = "_fs_eta"
+        print("Using eta2-based feature selection (eta2_subtype - eta2_study).")
+    elif fs_method == "mad":
+        feature_selector = transformers.FeatureSelection()
+        fs_suffix = ""
+        print("Using MAD-based intersecting MVG feature selection (default).")
+    else:
+        raise ValueError(f"Unknown fs_method '{args.fs_method}'. Use 'mad' or 'eta2'.")
+
     # Define the pipeline
     pipe = Pipeline([
         ('DEseq2', transformers.DESeq2RatioNormalizer()),
-        ('feature_selection', transformers.FeatureSelection()),
+        ('feature_selection', feature_selector),
         ('scaler', StandardScaler())
     ])
     print("Pipeline set up")
@@ -204,7 +226,7 @@ def main():
             df = train_test.restore_labels(df, label_mapping)
 
             # Save results with parameter index in filename
-            output_filename = f"{args.model_type}_inner_cv_{multi_type}_param_{param_index:03d}_{time}.csv"
+            output_filename = f"{args.model_type}_inner_cv_{multi_type}_param_{param_index:03d}{fs_suffix}_{time}.csv"
             df.to_csv(f"{output_dir}/{output_filename}")
             print(f"Saved results to {output_filename}")
             
@@ -221,7 +243,7 @@ def main():
             df = train_test.restore_labels(df, label_mapping)
 
             # Save results with parameter index in filename
-            output_filename = f"{args.model_type}_inner_cv_loso_{multi_type}_param_{param_index:03d}_{time}.csv"
+            output_filename = f"{args.model_type}_inner_cv_loso_{multi_type}_param_{param_index:03d}{fs_suffix}_{time}.csv"
             df.to_csv(f"{output_dir}/{output_filename}")
             print(f"Saved results to {output_filename}")
     else:

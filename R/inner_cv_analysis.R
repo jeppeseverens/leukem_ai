@@ -1,15 +1,17 @@
 # Source shared utility functions
 source("utility_functions.R")
 
-main_inner_cv <- function(merge_classes = FALSE, merge_mds_only = FALSE){
+main_inner_cv <- function(merge_classes = FALSE, merge_prob_method = c("max", "sum")) {
+  merge_prob_method <- match.arg(merge_prob_method)
 
   #' Generate probability data frames for One-vs-Rest classification
   #' @param cv_results_df Cross-validation results data frame
   #' @param best_params_df Best parameters data frame
   #' @param label_mapping Label mapping data frame
   #' @param filter_unseen_classes Whether to filter samples with classes not in training (default: TRUE)
+  #' @param merge_prob_method "max" or "sum" for merging class probabilities when merge_classes is TRUE
   #' @return List of probability data frames organized by outer fold (and filtering statistics)
-  generate_ovr_probability_matrices <- function(cv_results_df, best_params_df, label_mapping, study_names, filter_unseen_classes = TRUE, merge_classes = FALSE, merge_mds_only = FALSE) {
+  generate_ovr_probability_matrices <- function(cv_results_df, best_params_df, label_mapping, study_names, filter_unseen_classes = TRUE, merge_classes = FALSE, merge_prob_method = "max") {
     best_params_with_labels <- add_class_labels(best_params_df, label_mapping)
     outer_fold_ids <- unique(cv_results_df$outer_fold)
 
@@ -87,7 +89,7 @@ main_inner_cv <- function(merge_classes = FALSE, merge_mds_only = FALSE){
 
         # Apply class merging if requested (before filtering)
         if (merge_classes) {
-          probability_matrix <- merge_classes_in_matrix(probability_matrix, merge_mds_only = merge_mds_only)
+          probability_matrix <- merge_classes_in_matrix(probability_matrix, merge_prob_method = merge_prob_method)
           # Update class_labels after merging for filtering
           class_labels <- colnames(probability_matrix)[!colnames(probability_matrix) %in%
                                                         c("y", "inner_fold", "outer_fold", "indices", "study")]
@@ -185,7 +187,7 @@ main_inner_cv <- function(merge_classes = FALSE, merge_mds_only = FALSE){
   #' @param filter_unseen_classes Whether to filter samples with classes not in training (default: TRUE)
   #' @return List of probability data frames organized by outer fold (and filtering statistics)
 
-  generate_standard_probability_matrices <- function(cv_results_df, best_params_df, label_mapping, filtered_subtypes, study_names, filter_unseen_classes = TRUE, merge_classes = FALSE, merge_mds_only = FALSE) {
+  generate_standard_probability_matrices <- function(cv_results_df, best_params_df, label_mapping, filtered_subtypes, study_names, filter_unseen_classes = TRUE, merge_classes = FALSE, merge_prob_method = "max") {
     outer_fold_ids <- unique(cv_results_df$outer_fold)
     probability_matrices <- list()
     filtering_stats_list <- list()
@@ -239,7 +241,7 @@ main_inner_cv <- function(merge_classes = FALSE, merge_mds_only = FALSE){
 
         # Apply class merging if requested (before filtering)
         if (merge_classes) {
-          probability_matrix <- merge_classes_in_matrix(probability_matrix, merge_mds_only = merge_mds_only)
+          probability_matrix <- merge_classes_in_matrix(probability_matrix, merge_prob_method = merge_prob_method)
           # Update class_labels after merging for filtering
           class_labels <- colnames(probability_matrix)[!colnames(probability_matrix) %in%
                                                         c("y", "inner_fold", "outer_fold", "indices", "study")]
@@ -1105,7 +1107,7 @@ main_inner_cv <- function(merge_classes = FALSE, merge_mds_only = FALSE){
   label_mapping <- read.csv("../data/label_mapping_all.csv")
 
   # Load leukemia subtype data
-  leukemia_subtypes <- read.csv("../data/rgas_28jan26.csv")$ICC_Subtype
+  leukemia_subtypes <- read.csv("../data/rgas_10feb26.csv")$ICC_Subtype
 
   # Load study metadata
   meta <- read.csv("../data/meta_20aug25.csv")
@@ -1136,7 +1138,7 @@ main_inner_cv <- function(merge_classes = FALSE, merge_mds_only = FALSE){
         cv = "../data/out/inner_cv/SVM_array/cv_28jan26_all/",
         loso = "../data/out/inner_cv/SVM_array/loso_28jan26_all/"
       ),
-      output_dir = "../data/out/inner_cv/inner_cv_best_params/SVM_28jan26"
+      output_dir = "../data/out/inner_cv/inner_cv_best_params/SVM_10feb26"
     ),
     xgboost = list(
       classification_type = "OvR",
@@ -1144,7 +1146,7 @@ main_inner_cv <- function(merge_classes = FALSE, merge_mds_only = FALSE){
         cv = "../data/out/inner_cv/XGBOOST_array/cv_28jan26_all/",
         loso = "../data/out/inner_cv/XGBOOST_array/loso_28jan26_all/"
       ),
-      output_dir = "../data/out/inner_cv/inner_cv_best_params/XGBOOST_28jan26"
+      output_dir = "../data/out/inner_cv/inner_cv_best_params/XGBOOST_10feb26"
     ),
     neural_net = list(
       classification_type = "standard",
@@ -1152,7 +1154,7 @@ main_inner_cv <- function(merge_classes = FALSE, merge_mds_only = FALSE){
         cv = "../data/out/inner_cv/NN_array/cv_28jan26_all/",
         loso = "../data/out/inner_cv/NN_array/loso_28jan26_all/"
       ),
-      output_dir = "../data/out/inner_cv/inner_cv_best_params/NN_28jan26"
+      output_dir = "../data/out/inner_cv/inner_cv_best_params/NN_10feb26"
     )
   )
 
@@ -1182,9 +1184,9 @@ main_inner_cv <- function(merge_classes = FALSE, merge_mds_only = FALSE){
       if (!is.null(results) && !is.null(best_params)) {
         # Generate probability matrices (with filtering and optional merging)
         if (config$classification_type == "OvR") {
-          result <- generate_ovr_probability_matrices(results, best_params, label_mapping, study_names, filter_unseen_classes = TRUE, merge_classes = merge_classes, merge_mds_only = merge_mds_only)
+          result <- generate_ovr_probability_matrices(results, best_params, label_mapping, study_names, filter_unseen_classes = TRUE, merge_classes = merge_classes, merge_prob_method = merge_prob_method)
         } else {
-          result <- generate_standard_probability_matrices(results, best_params, label_mapping, filtered_leukemia_subtypes, study_names, filter_unseen_classes = TRUE, merge_classes = merge_classes, merge_mds_only = merge_mds_only)
+          result <- generate_standard_probability_matrices(results, best_params, label_mapping, filtered_leukemia_subtypes, study_names, filter_unseen_classes = TRUE, merge_classes = merge_classes, merge_prob_method = merge_prob_method)
         }
 
         # Extract matrices and filtering stats
@@ -1239,11 +1241,11 @@ main_inner_cv <- function(merge_classes = FALSE, merge_mds_only = FALSE){
 
   per_class_results <- do.call(rbind, per_class_results)
 
-  # Determine suffix for file paths (maxprob method - uses max probability instead of summing)
+  # Determine suffix for file paths (max vs summed merge method when merged)
   if (!merge_classes) {
     merge_suffix <- "_unmerged_maxprob"
-  } else if (merge_mds_only) {
-    merge_suffix <- "_mds_only_maxprob"
+  } else if (merge_prob_method == "sum") {
+    merge_suffix <- "_merged_summed"
   } else {
     merge_suffix <- "_merged_maxprob"
   }
@@ -1333,10 +1335,10 @@ main_inner_cv <- function(merge_classes = FALSE, merge_mds_only = FALSE){
   )
 
   inner_cv_results$final_results = combine_all_results(inner_cv_results)
-  inner_cv_results$merge_classes <- merge_classes  # Store merge status in results
-  inner_cv_results$merge_mds_only <- merge_mds_only  # Store merge_mds_only status in results
+  inner_cv_results$merge_classes <- merge_classes
+  inner_cv_results$merge_prob_method <- merge_prob_method
   print(inner_cv_results$final_results)
-  saveRDS(inner_cv_results, paste0("../data/out/inner_cv/inner_cv_results_28jan2025_nopaedmds", merge_suffix, ".rds"))
+  saveRDS(inner_cv_results, paste0("../data/out/inner_cv/inner_cv_results_10feb2026", merge_suffix, ".rds"))
 
   # Save filtering statistics to CSV for easy inspection
   if (length(filtering_statistics) > 0) {
@@ -1355,12 +1357,12 @@ main_inner_cv <- function(merge_classes = FALSE, merge_mds_only = FALSE){
   return(inner_cv_results)
 }
 
-# Run merged and MDS-only merged versions (maxprob method)
-cat("=== Running Inner CV Analysis (Merged - MaxProb Method) ===\n")
-inner_cv_results_unmerged <- main_inner_cv(merge_classes = FALSE, merge_mds_only = FALSE)
+# Run unmerged, merged (max), and merged (summed) for comparison
+#cat("=== Running Inner CV Analysis (Unmerged) ===\n")
+#inner_cv_results_unmerged <- main_inner_cv(merge_classes = FALSE)
 
-cat("=== Running Inner CV Analysis (MDS Only Merged - MaxProb Method) ===\n")
-inner_cv_results_mds_only <- main_inner_cv(merge_classes = TRUE, merge_mds_only = TRUE)
+#cat("=== Running Inner CV Analysis (Merged MDS/KMT2A/MECOM - Max Method) ===\n")
+#inner_cv_results_merged <- main_inner_cv(merge_classes = TRUE, merge_prob_method = "max")
 
-cat("=== Running Inner CV Analysis (MDS Only Merged - MaxProb Method) ===\n")
-inner_cv_results_merged <- main_inner_cv(merge_classes = TRUE, merge_mds_only = FALSE)
+cat("=== Running Inner CV Analysis (Merged MDS/KMT2A/MECOM - Summed Method) ===\n")
+inner_cv_results_merged_summed <- main_inner_cv(merge_classes = TRUE, merge_prob_method = "sum")

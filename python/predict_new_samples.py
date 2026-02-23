@@ -872,18 +872,19 @@ def predict_ensemble_ovr(individual_predictions, individual_prob_matrices, ensem
 
 def merge_probability_classes(prob_matrix_df):
     """
-    Merge specific classes in the probability matrix using max probability method:
-    1. Use max probability for all classes with 'MDS' or 'TP53' in their name -> "MDS.r"
-    2. Use max probability for all other KMT2A classes (excluding MLLT3 fusion) -> "other.KMT2A"
-    
-    Uses max probability instead of summing to prevent merged classes from overpowering
-    other classes in predictions.
-    
+    Merge specific classes in the probability matrix using summed probabilities:
+    1. Sum probabilities for all classes with 'MDS' or 'TP53' in their name -> "MDS.r"
+    2. Sum probabilities for all other KMT2A classes (excluding MLLT3 fusion) -> "other.KMT2A"
+    3. Sum probabilities for MECOM-related classes (GATA2;MECOM, MECOM other) -> "MECOM"
+
+    After merging, row probabilities are renormalized to sum to 1.
+    Matches R logic in utility_functions.R (merge_prob_method = "sum").
+
     Parameters:
     -----------
     prob_matrix_df : pd.DataFrame
         Probability matrix DataFrame with 'sample_name' column and class probability columns
-        
+
     Returns:
     --------
     prob_matrix_df : pd.DataFrame
@@ -891,34 +892,44 @@ def merge_probability_classes(prob_matrix_df):
     """
     # Get all column names except 'sample_name'
     class_columns = [col for col in prob_matrix_df.columns if col != 'sample_name']
-    
-    # Identify classes to merge for MDS 
-    mds_classes = []
-    for col in class_columns:
-        col_lower = col.lower()
-        if 'mds' in col_lower or 'tp53' in col_lower:
-            mds_classes.append(col)
-    
+
+    # Identify classes to merge for MDS/TP53
+    mds_classes = [
+        col for col in class_columns
+        if 'mds' in col.lower() or 'tp53' in col.lower()
+    ]
+
     # Identify classes to merge for other KMT2A (excluding MLLT3)
-    other_kmt2a_classes = []
-    for col in class_columns:
-        col_lower = col.lower()
-        # Check if it contains KMT2A but not MLLT3
-        if 'kmt2a' in col_lower and 'mllt3' not in col_lower:
-            other_kmt2a_classes.append(col)
-    
+    other_kmt2a_classes = [
+        col for col in class_columns
+        if 'kmt2a' in col.lower() and 'mllt3' not in col.lower()
+    ]
+
+    # Identify classes to merge for MECOM (e.g. GATA2;MECOM, MECOM other)
+    mecom_classes = [
+        col for col in class_columns
+        if 'mecom' in col.lower() and ('gata2' in col.lower() or 'other' in col.lower())
+    ]
+
     if mds_classes:
-        # Use max probability for MDS classes (not sum)
-        prob_matrix_df['MDS.r'] = prob_matrix_df[mds_classes].max(axis=1)
-        # Remove individual classes
+        prob_matrix_df['MDS.r'] = prob_matrix_df[mds_classes].sum(axis=1)
         prob_matrix_df = prob_matrix_df.drop(columns=mds_classes)
-    
+
     if other_kmt2a_classes:
-        # Use max probability for other KMT2A classes (not sum)
-        prob_matrix_df['other.KMT2A'] = prob_matrix_df[other_kmt2a_classes].max(axis=1)
-        # Remove individual classes
+        prob_matrix_df['other.KMT2A'] = prob_matrix_df[other_kmt2a_classes].sum(axis=1)
         prob_matrix_df = prob_matrix_df.drop(columns=other_kmt2a_classes)
-    
+
+    if mecom_classes:
+        prob_matrix_df['MECOM'] = prob_matrix_df[mecom_classes].sum(axis=1)
+        prob_matrix_df = prob_matrix_df.drop(columns=mecom_classes)
+
+    # Renormalize so each row sums to 1 (class columns only)
+    class_cols = [c for c in prob_matrix_df.columns if c != 'sample_name']
+    if class_cols:
+        row_sums = prob_matrix_df[class_cols].sum(axis=1)
+        row_sums = row_sums.replace(0, 1)
+        prob_matrix_df[class_cols] = prob_matrix_df[class_cols].div(row_sums, axis=0)
+
     return prob_matrix_df
 
 
@@ -1159,22 +1170,22 @@ def main():
         # Save unmerged predictions
         save_predictions(predictions_unmerged, prob_matrices_unmerged, output_dir, input_filename, merge_suffix="_unmerged")
     
-    # Run predictions for merged version (using maxprob method)
+    # Run predictions for merged version (summed method; matches R train_test_analysis)
     if run_merged:
         print("\n" + "="*60)
-        print("MERGED VERSION (MaxProb Method)")
+        print("MERGED VERSION (Summed Method)")
         print("="*60)
         
-        # Load merged ensemble weights (maxprob method)
-        # Structure: final_train_test/ensemble_weights_merged_maxprob/cv/
-        weights_dir_merged = os.path.join(str(args.weights_dir), "ensemble_weights_merged_maxprob")
-        print(f"\nLoading merged ensemble weights (maxprob) from: {weights_dir_merged}")
+        # Load merged ensemble weights (summed method)
+        # Structure: final_train_test/ensemble_weights_merged_summed/cv/
+        weights_dir_merged = os.path.join(str(args.weights_dir), "ensemble_weights_merged_summed")
+        print(f"\nLoading merged ensemble weights (summed) from: {weights_dir_merged}")
         ensemble_weights_merged = load_ensemble_weights(weights_dir_merged)
         
-        # Load merged cutoffs (maxprob method)
-        # Structure: final_train_test/cutoffs_merged_maxprob/train_test_cutoffs_merged_maxprob.csv
-        cutoffs_file_merged = os.path.join(str(args.cutoffs_file), "cutoffs_merged_maxprob", "train_test_cutoffs_merged_maxprob.csv")
-        print(f"\nLoading merged cutoffs (maxprob) from: {cutoffs_file_merged}")
+        # Load merged cutoffs (summed method)
+        # Structure: final_train_test/cutoffs_merged_summed/train_test_cutoffs_merged_summed.csv
+        cutoffs_file_merged = os.path.join(str(args.cutoffs_file), "cutoffs_merged_summed", "train_test_cutoffs_merged_summed.csv")
+        print(f"\nLoading merged cutoffs (summed) from: {cutoffs_file_merged}")
         cutoffs_merged = load_cutoffs(cutoffs_file_merged)
         
         # Run predictions
@@ -1183,7 +1194,7 @@ def main():
         )
         
         # Save merged predictions
-        save_predictions(predictions_merged, prob_matrices_merged, output_dir, input_filename, merge_suffix="_merged_maxprob")
+        save_predictions(predictions_merged, prob_matrices_merged, output_dir, input_filename, merge_suffix="_merged_summed")
 
     print("\n" + "="*60)
     print("Prediction pipeline completed successfully!")

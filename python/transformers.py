@@ -217,3 +217,89 @@ class FeatureSelection2(BaseEstimator, TransformerMixin):
         Reduce the dataset to only include the selected genes.
         """
         return X[:, self.mvgs_] 
+
+
+class FeatureSelectionEta(BaseEstimator, TransformerMixin):
+    """
+    Transformer that selects genes based on eta-squared difference:
+    eta2_subtype - eta2_study.
+
+    For each gene, it computes the proportion of variance in expression
+    explained by subtype labels and by study labels, then scores genes
+    by eta2_subtype - eta2_study and keeps the top n_genes.
+    """
+
+    def __init__(self):
+        self.study_per_patient = None
+        self.n_genes = None
+
+    def _eta2(self, X, groups):
+        """
+        Compute eta-squared per column of X for a categorical grouping vector.
+
+        X: np.ndarray of shape (n_samples, n_genes)
+        groups: array-like of length n_samples
+        """
+        n_samples, n_genes = X.shape
+        groups = np.asarray(groups)
+
+        overall_mean = X.mean(axis=0)
+        ss_total = ((X - overall_mean) ** 2).sum(axis=0)
+        # Avoid division by zero for constant genes
+        ss_total[ss_total == 0] = np.nan
+
+        ss_between = np.zeros(n_genes, dtype=X.dtype)
+        for g in np.unique(groups):
+            mask = groups == g
+            n_g = mask.sum()
+            if n_g == 0:
+                continue
+            mean_g = X[mask].mean(axis=0)
+            ss_between += n_g * (mean_g - overall_mean) ** 2
+
+        eta2 = ss_between / ss_total
+        return eta2
+
+    def fit(self, X, y=None, study_per_patient=None, n_genes=2000):
+        """
+        Fit by computing eta2_subtype and eta2_study and selecting top genes
+        by (eta2_subtype - eta2_study).
+
+        X: samples x genes matrix (numpy array)
+        y: subtype labels (encoded)
+        study_per_patient: array-like of study labels
+        """
+        if y is None:
+            raise ValueError("Subtype labels (y) must be provided.")
+        if study_per_patient is None:
+            raise ValueError("study_per_patient must be provided.")
+
+        self.n_genes = n_genes
+        self.study_per_patient = np.asarray(study_per_patient)
+
+        # Compute eta-squared for subtype and study
+        eta2_subtype = self._eta2(X, y)
+        eta2_study = self._eta2(X, self.study_per_patient)
+
+        # Score genes: high subtype signal, low study signal
+        score = eta2_subtype - eta2_study
+
+        # Handle NaNs (e.g. constant genes): push them to the bottom
+        score = np.where(np.isnan(score), -np.inf, score)
+
+        # Select top n_genes by score
+        n_genes = min(self.n_genes, X.shape[1])
+        if n_genes <= 0:
+            raise ValueError("n_genes must be positive.")
+
+        top_indices = np.argpartition(score, -n_genes)[-n_genes:]
+        # Keep as Python list of column indices
+        self.mvgs_ = list(top_indices)
+
+        return self
+
+    def transform(self, X, y=None):
+        """
+        Reduce the dataset to only include the selected genes.
+        """
+        return X[:, self.mvgs_]

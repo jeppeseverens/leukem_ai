@@ -1677,16 +1677,21 @@ evaluate_all_matrices_with_rejection_unified <- function(probability_matrices, e
 # Class Merging Functions
 # =============================================================================
 
-#' Merge classes in probability matrix by using max probability (not sum)
-#' Merges:
-#' 1. All classes containing "MDS" or "TP53" (case-insensitive) -> "MDS.r"
-#' 2. If merge_mds_only is FALSE: All classes containing "KMT2A" but not "MLLT3" (case-insensitive) -> "other.KMT2A"
-#' Uses max probability among merged classes instead of summing them
-#' @param prob_matrix Probability matrix data frame with class columns
-#' @param non_prob_cols Vector of column names that are not probability columns (e.g., "y", "outer_fold", etc.)
-#' @param merge_mds_only If TRUE, only merge MDS classes and keep KMT2A classes separate (default: FALSE)
-#' @return Modified probability matrix with merged classes
-merge_probability_matrix_classes <- function(prob_matrix, non_prob_cols = c("y", "inner_fold", "outer_fold", "indices", "study", "sample_indices"), merge_mds_only = FALSE) {
+##' Merge classes in probability matrix by using max probability (not sum)
+##' Merges:
+##' 1. All classes containing "MDS" or "TP53" (case-insensitive) -> "MDS.r"
+##' 2. All classes containing "KMT2A" but not "MLLT3" (case-insensitive) -> "other.KMT2A"
+##' 3. Classes representing MECOM rearrangements (e.g. "GATA2;MECOM", "MECOM other") -> "MECOM"
+##'    (In reporting/figures the merged class is displayed as "MECOM rearrangement", consistent with
+##'    MDS.r -> "MDS-related" and other.KMT2A -> "Other KMT2A rearrangements".)
+##' Uses max probability among merged classes instead of summing them.
+##' @param prob_matrix Probability matrix data frame with class columns.
+##' @param non_prob_cols Vector of column names that are not probability columns (e.g., "y", "outer_fold", etc.).
+##' @param merge_prob_method "max" = max probability per row among merged classes; "sum" = sum probabilities (then renormalized).
+##' @return Modified probability matrix with merged classes.
+merge_probability_matrix_classes <- function(prob_matrix, non_prob_cols = c("y", "inner_fold", "outer_fold", "indices", "study", "sample_indices"), merge_prob_method = c("max", "sum")) {
+  merge_prob_method <- match.arg(merge_prob_method)
+  method_label <- if (merge_prob_method == "max") "max prob" else "summed"
   # Get all column names
   all_cols <- colnames(prob_matrix)
 
@@ -1711,33 +1716,46 @@ merge_probability_matrix_classes <- function(prob_matrix, non_prob_cols = c("y",
     }
   }
 
+  # Identify classes to merge for MECOM rearrangements (e.g. GATA2;MECOM and MECOM other)
+  mecom_classes <- character(0)
+  for (col in prob_cols) {
+    col_lower <- tolower(col)
+    if (grepl("mecom", col_lower) && (grepl("gata2", col_lower) || grepl("other", col_lower))) {
+      mecom_classes <- c(mecom_classes, col)
+    }
+  }
+
   # Create a copy of the matrix
   merged_matrix <- prob_matrix
 
-  # Merge MDS/TP53 classes - use max probability instead of sum
+  merge_fun <- if (merge_prob_method == "max") {
+    function(x) apply(x, 1, max, na.rm = TRUE)
+  } else {
+    function(x) rowSums(x, na.rm = TRUE)
+  }
+
+  # Merge MDS/TP53 classes
   if (length(mds_classes) > 0) {
-    cat(sprintf("    Merging %d classes to MDS.r (max prob method): %s\n",
-                length(mds_classes),
-                paste(mds_classes, collapse = ", ")))
-
-    # Use max probability for MDS/TP53 classes (not sum)
-    merged_matrix$MDS.r <- apply(merged_matrix[, mds_classes, drop = FALSE], 1, max, na.rm = TRUE)
-
-    # Remove individual classes
+    cat(sprintf("    Merging %d classes to MDS.r (%s method): %s\n",
+                length(mds_classes), method_label, paste(mds_classes, collapse = ", ")))
+    merged_matrix$MDS.r <- merge_fun(merged_matrix[, mds_classes, drop = FALSE])
     merged_matrix <- merged_matrix[, !colnames(merged_matrix) %in% mds_classes, drop = FALSE]
   }
 
-  # Merge other KMT2A classes (only if merge_mds_only is FALSE) - use max probability instead of sum
-  if (!merge_mds_only && length(other_kmt2a_classes) > 0) {
-    cat(sprintf("    Merging %d classes to other.KMT2A (max prob method): %s\n",
-                length(other_kmt2a_classes),
-                paste(other_kmt2a_classes, collapse = ", ")))
-
-    # Use max probability for other KMT2A classes (not sum)
-    merged_matrix$other.KMT2A <- apply(merged_matrix[, other_kmt2a_classes, drop = FALSE], 1, max, na.rm = TRUE)
-
-    # Remove individual classes
+  # Merge other KMT2A classes
+  if (length(other_kmt2a_classes) > 0) {
+    cat(sprintf("    Merging %d classes to other.KMT2A (%s method): %s\n",
+                length(other_kmt2a_classes), method_label, paste(other_kmt2a_classes, collapse = ", ")))
+    merged_matrix$other.KMT2A <- merge_fun(merged_matrix[, other_kmt2a_classes, drop = FALSE])
     merged_matrix <- merged_matrix[, !colnames(merged_matrix) %in% other_kmt2a_classes, drop = FALSE]
+  }
+
+  # Merge MECOM rearrangement classes
+  if (length(mecom_classes) > 0) {
+    cat(sprintf("    Merging %d classes to MECOM (%s method): %s\n",
+                length(mecom_classes), method_label, paste(mecom_classes, collapse = ", ")))
+    merged_matrix$MECOM <- merge_fun(merged_matrix[, mecom_classes, drop = FALSE])
+    merged_matrix <- merged_matrix[, !colnames(merged_matrix) %in% mecom_classes, drop = FALSE]
   }
 
   # Normalize probabilities to sum to 1 for each sample (only probability columns)
@@ -1755,9 +1773,8 @@ merge_probability_matrix_classes <- function(prob_matrix, non_prob_cols = c("y",
 
 #' Merge true labels to match merged class structure
 #' @param true_labels Vector of true labels (character or factor)
-#' @param merge_mds_only If TRUE, only merge MDS classes and keep KMT2A classes separate (default: FALSE)
 #' @return Vector of merged true labels
-merge_true_labels <- function(true_labels, merge_mds_only = FALSE) {
+merge_true_labels <- function(true_labels) {
   # Convert to character if factor
   if (is.factor(true_labels)) {
     true_labels <- as.character(true_labels)
@@ -1769,11 +1786,13 @@ merge_true_labels <- function(true_labels, merge_mds_only = FALSE) {
   # Merge MDS/TP53 labels
   merged_labels[grepl("MDS|TP53", merged_labels, ignore.case = TRUE)] <- "MDS.r"
 
-  # Merge other KMT2A labels (excluding MLLT3) only if merge_mds_only is FALSE
-  if (!merge_mds_only) {
-    merged_labels[grepl("KMT2A", merged_labels, ignore.case = TRUE) &
-                  !grepl("MLLT3", merged_labels, ignore.case = TRUE)] <- "other.KMT2A"
-  }
+  # Merge other KMT2A labels (excluding MLLT3)
+  merged_labels[grepl("KMT2A", merged_labels, ignore.case = TRUE) &
+                !grepl("MLLT3", merged_labels, ignore.case = TRUE)] <- "other.KMT2A"
+
+  # Merge MECOM rearrangement labels (e.g. GATA2;MECOM and MECOM other) -> "MECOM"
+  # (Display name "MECOM rearrangement" is applied in analyse_results.Rmd via fix_names mapping.)
+  merged_labels[grepl("MECOM", merged_labels, ignore.case = TRUE)] <- "MECOM"
 
   # Convert to make.names format for consistency
   merged_labels <- make.names(merged_labels)
@@ -1784,15 +1803,16 @@ merge_true_labels <- function(true_labels, merge_mds_only = FALSE) {
 #' Apply class merging to a probability matrix and its true labels
 #' @param prob_matrix Probability matrix data frame
 #' @param non_prob_cols Vector of column names that are not probability columns
-#' @param merge_mds_only If TRUE, only merge MDS classes and keep KMT2A classes separate (default: FALSE)
+#' @param merge_prob_method "max" or "sum" for merging probabilities (see merge_probability_matrix_classes).
 #' @return Modified probability matrix with merged classes and updated true labels
-merge_classes_in_matrix <- function(prob_matrix, non_prob_cols = c("y", "inner_fold", "outer_fold", "indices", "study", "sample_indices"), merge_mds_only = FALSE) {
+merge_classes_in_matrix <- function(prob_matrix, non_prob_cols = c("y", "inner_fold", "outer_fold", "indices", "study", "sample_indices"), merge_prob_method = c("max", "sum")) {
+  merge_prob_method <- match.arg(merge_prob_method)
   # Merge probability matrix classes
-  merged_matrix <- merge_probability_matrix_classes(prob_matrix, non_prob_cols, merge_mds_only)
+  merged_matrix <- merge_probability_matrix_classes(prob_matrix, non_prob_cols, merge_prob_method)
 
   # Merge true labels if present
   if ("y" %in% colnames(merged_matrix)) {
-    merged_matrix$y <- merge_true_labels(merged_matrix$y, merge_mds_only)
+    merged_matrix$y <- merge_true_labels(merged_matrix$y)
   }
 
   return(merged_matrix)
