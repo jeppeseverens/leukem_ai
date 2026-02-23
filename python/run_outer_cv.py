@@ -38,6 +38,11 @@ def main():
         'best_params_path': {
             'type': str,
             'help': 'Path to the best parameters CSV file from inner CV'
+        },
+        'fs_method': {
+            'type': str,
+            'default': 'mad',
+            'help': 'Feature selection method: \"mad\" (intersection MVGs, default) or \"eta2\" (eta2_subtype - eta2_study)'
         }
     }
 
@@ -52,6 +57,7 @@ def main():
     
     print(f"Using model {args.model_type} with {args.multi_type} strategy and {args.fold_type} fold type", flush=True)
     print(f"Best parameters from: {args.best_params_path}", flush=True)
+    print(f"Feature selection method: {args.fs_method}", flush=True)
     
     # Get the current date and time in string format
     time = datetime.datetime.now().strftime("%Y%m%d_%H%M")
@@ -61,7 +67,9 @@ def main():
     project_root = base_path.parent
     
     # Create the output directory if it doesn't exist (use absolute path)
-    output_dir = project_root / "data" / "out" / "outer_cv" / f"{args.model_type}_n10"
+    fs_method_lower = args.fs_method.lower()
+    fs_suffix = "_fs_eta" if fs_method_lower == "eta2" else ""
+    output_dir = project_root / "data" / "out" / "outer_cv" / f"{args.model_type}_n10{fs_suffix}"
     output_dir.mkdir(parents=True, exist_ok=True)
     print(f"Output dir is {output_dir}", flush=True)
 
@@ -83,11 +91,21 @@ def main():
         model = classifiers.NeuralNet
     else:
         raise ValueError(f"Model type {args.model_type} not supported")
-
+    
+    # Select feature selection method
+    if fs_method_lower == "eta2":
+        feature_selector = transformers.FeatureSelectionEta()
+        print("Using eta2-based feature selection (eta2_subtype - eta2_study).", flush=True)
+    elif fs_method_lower == "mad":
+        feature_selector = transformers.FeatureSelection2()
+        print("Using MAD-based intersecting MVG feature selection (default).", flush=True)
+    else:
+        raise ValueError(f"Unknown fs_method '{args.fs_method}'. Use 'mad' or 'eta2'.")
+    
     # Define the pipeline
     pipe = Pipeline([
         ('DEseq2', transformers.DESeq2RatioNormalizer()),
-        ('feature_selection', transformers.FeatureSelection2()),
+        ('feature_selection', feature_selector),
         ('scaler', StandardScaler())
     ])
     print("Pipeline set up", flush=True)
@@ -119,7 +137,7 @@ def main():
     df = train_test.restore_labels(df, label_mapping)
     
     # Save results to CSV file with model type, strategy and timestamp
-    output_filename = f"{args.model_type}_outer_cv_{args.fold_type}_{args.multi_type}_{time}.csv"
+    output_filename = f"{args.model_type}_outer_cv_{args.fold_type}_{args.multi_type}{fs_suffix}_{time}.csv"
     output_path = output_dir / output_filename
     df.to_csv(output_path)
     print(f"Results saved to {output_path}")

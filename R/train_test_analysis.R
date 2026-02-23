@@ -108,9 +108,9 @@ main_train_test_analysis <- function(merge_classes = FALSE){
           # Get matrix for this fold
           the_matrix <- probability_matrices_method[[fold_name]]
 
-          # Extract true labels and remove from probability matrix
+          # Extract true labels and remove non-probability / meta columns
           truth <- the_matrix$y
-          prob_matrix <- the_matrix[, !colnames(the_matrix) %in% c("y", "inner_fold", "outer_fold", "indices", "study"), drop = FALSE]
+          prob_matrix <- the_matrix[, !colnames(the_matrix) %in% c("y", "inner_fold", "outer_fold", "indices", "study", "confidence_calibrated"), drop = FALSE]
 
           # Get predictions
           preds <- colnames(prob_matrix)[apply(prob_matrix, 1, which.max)]
@@ -214,12 +214,6 @@ main_train_test_analysis <- function(merge_classes = FALSE){
   #' Uses the unified function from utility_functions.R
   align_probability_matrices_train_test <- function(prob_matrices, outer_fold_name, type) {
     align_probability_matrices(prob_matrices, outer_fold_name, inner_fold_name = NULL, type)
-  }
-
-  #' Perform One-vs-Rest ensemble analysis for train/test (parallelized)
-  #' Uses the unified function from utility_functions.R
-  perform_ovr_ensemble_analysis_train_test <- function(results, weights, type = "cv") {
-    perform_ovr_ensemble_analysis_unified(results, weights, type, has_inner_folds = FALSE)
   }
 
   #' Perform global ensemble optimization using overall kappa for train/test (parallelized)
@@ -536,9 +530,9 @@ main_train_test_analysis <- function(merge_classes = FALSE){
       # Get the optimized matrix for this outer fold
       optimized_matrix <- optimized_matrices[[outer_fold_name]]
 
-      # Extract true labels and remove from probability matrix
+      # Extract true labels and remove non-probability / meta columns
       truth <- optimized_matrix$y
-      prob_matrix <- optimized_matrix[, !colnames(optimized_matrix) %in% c("y", "inner_fold", "outer_fold", "indices", "study"), drop = FALSE]
+      prob_matrix <- optimized_matrix[, !colnames(optimized_matrix) %in% c("y", "inner_fold", "outer_fold", "indices", "study", "confidence_calibrated"), drop = FALSE]
 
       # Get predictions
       preds <- colnames(prob_matrix)[apply(prob_matrix, 1, which.max)]
@@ -827,36 +821,38 @@ main_train_test_analysis <- function(merge_classes = FALSE){
     # Analyze globally optimized ensemble performance
     global_optimized_ensemble_performance <- analyze_optimized_ensemble_performance_train_test(global_optimized_ensemble_matrices, analysis_type)
 
-    # Perform One-vs-Rest ensemble analysis
-    ovr_ensemble_results <- perform_ovr_ensemble_analysis_train_test(
-      list(probability_matrices = probability_matrices),
-      generate_weights(),
-      analysis_type
-    )
-
-    # Generate One-vs-Rest optimized ensemble matrices
-    ovr_optimized_result <- generate_ovr_optimized_ensemble_matrices_train_test(
-      list(probability_matrices = probability_matrices),
-      generate_weights(),
-      analysis_type,
-      ovr_ensemble_results
-    )
-
-    # Analyze One-vs-Rest ensemble multiclass performance
-    ovr_ensemble_multiclass_performance <- analyze_optimized_ensemble_performance_train_test(ovr_optimized_result, analysis_type)
-
-    # Store results for this analysis type
+    # Store results for this analysis type (Global ensemble only; OvR removed)
     ensemble_results[[analysis_type]] <- list(
       global_ensemble_results = global_ensemble_results,
       global_optimized_ensemble_matrices = global_optimized_ensemble_matrices,
       global_optimized_ensemble_performance = global_optimized_ensemble_performance,
-      global_ensemble_weights_used = global_optimized_ensemble_matrices$weights_used,
-
-      ovr_ensemble_results = ovr_ensemble_results,
-      ovr_optimized_ensemble_matrices = ovr_optimized_result$matrices,
-      ovr_ensemble_multiclass_performance = ovr_ensemble_multiclass_performance,
-      ovr_ensemble_weights_used = ovr_optimized_result$weights_used
+      global_ensemble_weights_used = global_optimized_ensemble_matrices$weights_used
     )
+  }
+
+  # Apply Platt scaling to probability matrices for rejection (out-of-sample per outer fold)
+  cat("Applying Platt scaling to probability matrices for rejection (train/test)...\n")
+  # Calibrate individual models
+  for (model_name in names(probability_matrices)) {
+    if (!"cv" %in% names(probability_matrices[[model_name]])) next
+    fold_list <- probability_matrices[[model_name]][["cv"]]
+    if (!is.list(fold_list) || length(fold_list) < 2L) next
+    calibrated_list <- apply_platt_to_inner_fold_matrices(fold_list)
+    for (fold_name in names(calibrated_list)) {
+      probability_matrices[[model_name]][["cv"]][[fold_name]] <- calibrated_list[[fold_name]]
+    }
+  }
+  # Calibrate global ensemble matrices
+  if ("cv" %in% names(ensemble_results) &&
+      "global_optimized_ensemble_matrices" %in% names(ensemble_results[["cv"]]) &&
+      "matrices" %in% names(ensemble_results[["cv"]]$global_optimized_ensemble_matrices)) {
+    fold_list <- ensemble_results[["cv"]]$global_optimized_ensemble_matrices$matrices
+    if (is.list(fold_list) && length(fold_list) >= 2L) {
+      calibrated_list <- apply_platt_to_inner_fold_matrices(fold_list)
+      for (fold_name in names(calibrated_list)) {
+        ensemble_results[["cv"]]$global_optimized_ensemble_matrices$matrices[[fold_name]] <- calibrated_list[[fold_name]]
+      }
+    }
   }
 
   # Run rejection analysis
@@ -872,9 +868,8 @@ main_train_test_analysis <- function(merge_classes = FALSE){
       next
     }
 
-    # Extract ensemble matrices for this analysis type
+    # Extract ensemble matrices for this analysis type (Global only)
     ensemble_matrices <- list(
-      ovr_optimized_ensemble_matrices = ensemble_results[[analysis_type]]$ovr_optimized_ensemble_matrices,
       global_optimized_ensemble_matrices = ensemble_results[[analysis_type]]$global_optimized_ensemble_matrices$matrices
     )
 
@@ -919,6 +914,78 @@ main_train_test_analysis <- function(merge_classes = FALSE){
     cat("Warning: No optimal cutoffs found to save\n")
   }
 
+  # Fit and save Platt calibration parameters for deployment (pooled across CV folds)
+  cat("Fitting Platt calibration models for deployment...\n")
+  platt_param_list <- list()
+
+  # Helper to fit a single Platt model from a list of matrices
+  fit_platt_from_matrices <- function(matrices_list, model_label) {
+    pool_max <- numeric(0)
+    pool_correct <- integer(0)
+    for (m in matrices_list) {
+      if (is.null(m) || nrow(m) == 0) next
+      out <- get_max_prob_and_correct_from_matrix(m)
+      pool_max <- c(pool_max, out$max_prob)
+      pool_correct <- c(pool_correct, out$correct)
+    }
+    if (length(pool_max) < 10L || length(unique(pool_correct)) < 2L) {
+      return(NULL)
+    }
+    fit <- tryCatch(
+      stats::glm(pool_correct ~ pool_max, family = stats::binomial),
+      error = function(e) NULL
+    )
+    if (is.null(fit)) return(NULL)
+    coefs <- stats::coef(fit)
+    intercept <- unname(coefs[1])
+    slope <- if (length(coefs) >= 2L) unname(coefs[2]) else NA_real_
+    data.frame(
+      model = model_label,
+      intercept = intercept,
+      slope = slope,
+      stringsAsFactors = FALSE
+    )
+  }
+
+  # Fit Platt for individual models
+  for (model_name in c("svm", "xgboost", "neural_net")) {
+    if (!model_name %in% names(probability_matrices)) next
+    if (!"cv" %in% names(probability_matrices[[model_name]])) next
+    fold_list <- probability_matrices[[model_name]][["cv"]]
+    res <- fit_platt_from_matrices(fold_list, model_name)
+    if (!is.null(res)) {
+      platt_param_list[[length(platt_param_list) + 1L]] <- res
+    }
+  }
+
+  # Fit Platt for global ensemble
+  if ("cv" %in% names(ensemble_results) &&
+      "global_optimized_ensemble_matrices" %in% names(ensemble_results[["cv"]]) &&
+      "matrices" %in% names(ensemble_results[["cv"]]$global_optimized_ensemble_matrices)) {
+    fold_list <- ensemble_results[["cv"]]$global_optimized_ensemble_matrices$matrices
+    if (is.list(fold_list) && length(fold_list) > 0L) {
+      res <- fit_platt_from_matrices(fold_list, "Global_Optimized")
+      if (!is.null(res)) {
+        platt_param_list[[length(platt_param_list) + 1L]] <- res
+      }
+    }
+  }
+
+  if (length(platt_param_list) > 0L) {
+    platt_params_df <- do.call(rbind, platt_param_list)
+    platt_dir <- paste0("../data/out/final_train_test/platt_params", merge_suffix)
+    dir.create(platt_dir, recursive = TRUE)
+    write.csv(
+      platt_params_df,
+      file.path(platt_dir, paste0("platt_params", merge_suffix, ".csv")),
+      row.names = FALSE
+    )
+    cat("Saved Platt parameters to:\n")
+    cat(sprintf("  %s\n", file.path(platt_dir, paste0("platt_params", merge_suffix, ".csv"))))
+  } else {
+    cat("Warning: Not enough data to fit any Platt models for deployment\n")
+  }
+
   # Calculate performance comparisons (CV only)
   cat("Calculating performance comparisons (CV)...\n")
   performance_comparisons <- list()
@@ -935,9 +1002,9 @@ main_train_test_analysis <- function(merge_classes = FALSE){
           for (outer_fold in names(probability_matrices[[model_name]][[analysis_type]])) {
             optimized_matrix <- probability_matrices[[model_name]][[analysis_type]][[outer_fold]]
 
-            # Extract true labels and remove from probability matrix
+            # Extract true labels and remove non-probability / meta columns
             truth <- make.names(optimized_matrix$y)
-            prob_matrix <- optimized_matrix[, !colnames(optimized_matrix) %in% c("y", "inner_fold", "outer_fold", "indices", "study"), drop = FALSE]
+            prob_matrix <- optimized_matrix[, !colnames(optimized_matrix) %in% c("y", "inner_fold", "outer_fold", "indices", "study", "confidence_calibrated"), drop = FALSE]
 
             # Get predictions
             preds <- colnames(prob_matrix)[apply(prob_matrix, 1, which.max)]
@@ -964,29 +1031,20 @@ main_train_test_analysis <- function(merge_classes = FALSE){
         }
       }
 
-      # Ensemble performance
-      ensemble_methods <- list(
-        "OvR_Ensemble" = ensemble_results[[analysis_type]]$ovr_ensemble_multiclass_performance,
-        "Global_Optimized" = ensemble_results[[analysis_type]]$global_optimized_ensemble_performance
-      )
-
-      for (method_name in names(ensemble_methods)) {
-        method_performance <- ensemble_methods[[method_name]]
-        all_kappas <- c()
-
-        for (outer_fold in names(method_performance)) {
-          cm <- method_performance[[outer_fold]]
-          if (inherits(cm, "confusionMatrix")) {
-            all_kappas <- c(all_kappas, cm$overall["Kappa"])
-          }
+      # Ensemble performance (Global only; OvR removed)
+      method_performance <- ensemble_results[[analysis_type]]$global_optimized_ensemble_performance
+      all_kappas <- c()
+      for (outer_fold in names(method_performance)) {
+        cm <- method_performance[[outer_fold]]
+        if (inherits(cm, "confusionMatrix")) {
+          all_kappas <- c(all_kappas, cm$overall["Kappa"])
         }
-
-        individual_performance[[method_name]] <- list(
-          mean_kappa = mean(all_kappas, na.rm = TRUE),
-          sd_kappa = sd(all_kappas, na.rm = TRUE),
-          fold_kappas = all_kappas
-        )
       }
+      individual_performance[["Global_Optimized"]] <- list(
+        mean_kappa = mean(all_kappas, na.rm = TRUE),
+        sd_kappa = sd(all_kappas, na.rm = TRUE),
+        fold_kappas = all_kappas
+      )
 
       # Create summary data frame
       summary_df <- data.frame(

@@ -25,6 +25,8 @@ echo "=================================="
 
 # Define your arguments for each array job
 MODEL_TYPE="SVM"
+# Feature selection: "mad" (intersecting MVGs) or "eta2" (eta2_subtype - eta2_study)
+FS_METHOD="eta2"
 
 # Run CV fold type for final selection
 python python/run_final_selection_array.py \
@@ -33,6 +35,7 @@ python python/run_final_selection_array.py \
     --k_folds 5 \
     --n_max_param 96 \
     --fold_type "CV" \
-    --run_name "final_cv_svm_28jan26"
+    --run_name "final_cv_svm_28jan26_eta2" \
+    --fs_method "$FS_METHOD"
 
 deactivate

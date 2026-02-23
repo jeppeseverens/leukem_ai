@@ -9,6 +9,11 @@ source .venv/bin/activate
 echo "Starting all outer CV experiments..."
 echo "=================================="
 
+# Feature selection method for outer CV:
+#   - "mad"  : intersecting MVGs (default)
+#   - "eta2" : eta2_subtype - eta2_study
+FS_METHOD="eta2"
+
 # Function to run outer CV for a specific model and strategy
 run_outer_cv() {
     local model_type=$1
@@ -24,7 +29,8 @@ run_outer_cv() {
         --model_type "$model_type" \
         --multi_type "$multi_type" \
         --fold_type "$fold_type" \
-        --best_params_path "$best_params_file"
+        --best_params_path "$best_params_file" \
+        --fs_method "$FS_METHOD"
 
     echo "Completed: $model_type - $multi_type - $fold_type"
     echo ""

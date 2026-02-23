@@ -13,7 +13,7 @@ output:
 
 ```{r}
 #setwd("~/leukem_ai/R")
-#source("inner_cv_analysis.R")
+source("inner_cv_analysis.R")
 #inner_cv_results_merged <- readRDS("../data/out/inner_cv/inner_cv_results_10feb2026_merged_maxprob.rds")
 #inner_cv_results_merged_summed <- readRDS("../data/out/inner_cv/inner_cv_results_10feb2026_merged_summed.rds")
 
@@ -21,23 +21,32 @@ output:
 #inner_cv_results_merged_summed$final_results
 ```
 
+```{r}
+readRDS("../data/out/inner_cv/inner_cv_results_10feb2026_merged_summed.rds")$final_results
+```
 
 
 ```{r}
 #source("outer_cv_analysis.R")
-#outer_cv_results_unmerged[["performance_summaries"]]
-#outer_cv_results_merged[["performance_summaries"]]
+#outer_cv_results_unmerged[["performance_comparison"]][["cv"]][,c("Model","Original_Kappa",  "Rejection_Kappa", "Mean_Percent_Rejected")]
+#outer_cv_results_merged[["performance_comparison"]][["cv"]][,c("Model", "Original_Kappa", "Rejection_Kappa", "Mean_Percent_Rejected")]
+```
+```{r}
+#readRDS("../data/out/outer_cv/outer_cv_results_10feb26_unmerged_maxprob.rds")[["performance_comparison"]][["cv"]][,c("Model", "Original_Kappa", "Rejection_Kappa", "Mean_Percent_Rejected")]
+#readRDS("../data/out/outer_cv/outer_cv_results_10feb26_merged_summed.rds")[["performance_comparison"]][["cv"]][,c("Model", "Original_Kappa", "Rejection_Kappa", "Mean_Percent_Rejected")]
 ```
 
 ```{r}
-outer_unmerged <-  readRDS("../data/out/outer_cv/outer_cv_results_10feb26_unmerged_maxprob.rds")
-outer_merged <- readRDS("../data/out/outer_cv/outer_cv_results_10feb26_merged_summed.rds")
+outer_unmerged <-  readRDS("../data/out/outer_cv/outer_cv_results_10feb26_2_unmerged_maxprob.rds")
+outer_merged <- readRDS("../data/out/outer_cv/outer_cv_results_10feb26_2_merged_summed.rds")
 ```
 
 
 
 ```{r}
-source("train_test_analysis.R")
+#source("train_test_analysis.R")
+
+#train_test_results_merged$performance_comparisons
 ```
 
 # Load data
@@ -2623,7 +2632,7 @@ mean_by_study <- rs_study / n_study
 SS_between_study <- colSums(n_study * (mean_by_study - rep(mean_g, each = nrow(mean_by_study)))^2)
 eta2_study <- SS_between_study / SS_total
 
-subtype_f <- factor(modify_classes(filtered_leukemia_subtypes))
+subtype_f <- factor((filtered_leukemia_subtypes))
 rs_subtype <- rowsum(X, subtype_f)
 n_subtype <- as.vector(table(subtype_f))
 mean_by_subtype <- rs_subtype / n_subtype
@@ -2892,8 +2901,8 @@ map_truth_to_canonical <- function(truth_labels) {
     "AML-RUNX1::RUNX1T1" = "AML with t(8;21)/RUNX1::RUNX1T1",
     "AML-KMT2A::MLLT3" = "AML with t(9;11)/MLLT3::KMT2A",
     "APL-PML::RARA" = "APL, t(15;17)/PML::RARA",
-    "AML-GATA2::MECOM" = "MECOM rearrangement",
-    "AML-otherMECOM" = "MECOM rearrangement"
+    "AML-GATA2::MECOM" = "GATA2;MECOM",
+    "AML-otherMECOM" = "MECOM, other"
   )
   
   sapply(truth_labels, function(x) {
@@ -2905,14 +2914,18 @@ map_truth_to_canonical <- function(truth_labels) {
   }, USE.NAMES = FALSE)
 }
 
-files <- list.files("../data/MLL_lab/STAR_AML_MLLlab_predictions", full.names = T)
+files <- list.files("../data/STAR_AML_MLLlab_predictions", full.names = T)
 
 #get_kappa <- function(file){
-  MLL_lab <- read.csv("../data/MLL_lab/20231017_SampleMetadata.csv", sep = ";")
+MLL_lab <- read.csv("../data/MLL_lab/20231017_SampleMetadata.csv", sep = ";")
 MLL_lab_truth <- MLL_lab$ICC_2022
-MLL_lab_pred_df <- read.csv(files[1])
+MLL_lab_pred_df_unmerged <- read.csv(files[2])
+MLL_lab_pred_df_merged <- read.csv(files[1])
+
+#MLL_lab_truth[MLL_lab$WHO_2022 == "AML-CEBPA" | MLL_lab$WHO_2022 == "AML with biallelic CEBPA"] <- "AML-CEBPA"
 MLL_lab_truth <- map_truth_to_canonical(MLL_lab_truth)
-#MLL_lab_truth[(MLL_lab$WHO_2022 == "AML-CEBPA" & MLL_lab$WHO_2017 == "AML with biallelic CEBPA" & MLL_lab$ICC_2022 != "AML-CEBPA")] <- "AML with in frame bZIP CEBPA"
+table(MLL_lab_truth)
+MLL_lab_truth[(MLL_lab$WHO_2022 == "AML-CEBPA" & MLL_lab$WHO_2017 == "AML with biallelic CEBPA" & MLL_lab$ICC_2022 != "AML-CEBPA")] <- "AML with in frame bZIP CEBPA"
 MLL_lab_truth[grepl("MDS|TP53", MLL_lab_truth)] <- "AML MDS"
 MLL_lab_truth[grepl("KMT2A",MLL_lab_truth) & !grepl("MLLT3", MLL_lab_truth)] <- "Other KMT2A"
 # MECOM merged to same display name as elsewhere (MECOM rearrangement)
@@ -2920,8 +2933,7 @@ MLL_lab_truth[grepl("MECOM", MLL_lab_truth)] <- "MECOM rearrangement"
 MLL_lab_truth <- make.names(MLL_lab_truth)
 
 
-MLL_lab_predictions <- MLL_lab_pred_df$prediction
-table(MLL_lab_predictions)
+MLL_lab_predictions <- MLL_lab_pred_df_merged$prediction
 MLL_lab_predictions[grepl("MDS|TP53", MLL_lab_predictions)]<- "AML MDS"
 MLL_lab_predictions[grepl("KMT2A",MLL_lab_predictions) & !grepl("MLLT3", MLL_lab_predictions)] <- "Other KMT2A"
 # MECOM merged to same display name as elsewhere (MECOM rearrangement)
@@ -2974,7 +2986,8 @@ MLL_lab_counts$Subtype <- gsub("AML with mutated NPM1", "Mutated NPM1", MLL_lab_
 MLL_lab_counts$Subtype <- gsub("AML with t 8 21  RUNX1  RUNX1T1", "RUNX1::RUNX1T1", MLL_lab_counts$Subtype)
 MLL_lab_counts$Subtype <- gsub("AML with in frame bZIP CEBPA", "CEBPA bZIP in-frame", MLL_lab_counts$Subtype)
 MLL_lab_counts$Subtype <- gsub("AML with t 9 11  MLLT3  KMT2A", "MLLT3::KMT2A", MLL_lab_counts$Subtype)
-MLL_lab_counts$Subtype <- gsub("AML MDS or MECOM", "MDS-related and MECOM rearrangement", MLL_lab_counts$Subtype)
+MLL_lab_counts$Subtype <- gsub("MDS", "MDS-related", MLL_lab_counts$Subtype)
+#MLL_lab_counts$Subtype <- gsub("MECOM", "MECOM rearrangement", MLL_lab_counts$Subtype)
 
 # Add total row
 total_row <- data.frame(
@@ -3026,12 +3039,12 @@ MLL_lab[which(MLL_lab_predictions == "AML.with.in.frame.bZIP.CEBPA" & MLL_lab_tr
 ###  --Performance with Probability Cutoff 
 
 ```{r}
-cutoff <- read.csv("../data/out/final_train_test/cutoffs_merged/train_test_cutoffs_merged.csv")
-MLL_lab_predictions_passes <- as.logical(MLL_lab_pred_df$prediction_passed_cutoff)
+cutoff <- read.csv("../data/out/final_train_test/cutoffs_merged_summed/train_test_cutoffs_merged_summed.csv")
+MLL_lab_predictions_passes <- as.logical(MLL_lab_pred_df_merged$prediction_passed_cutoff)
 
 res_MLL_cutoff <- caret::confusionMatrix(MLL_lab_predictions[MLL_lab_truth != "AML..NOS" & MLL_lab_predictions_passes], MLL_lab_truth[MLL_lab_truth != "AML..NOS" & MLL_lab_predictions_passes])
 
-perc_rej <- 100 - sum(MLL_lab_predictions_passes & MLL_lab_truth != "AML..NOS") / n * 100 
+perc_rej <- 100 - sum(MLL_lab_predictions_passes & MLL_lab_truth != "AML..NOS") / length(MLL_lab_predictions_passes[MLL_lab_truth != "AML..NOS"]) * 100 
 round(perc_rej, 3)
 round(res_MLL_cutoff$overall, 3)
 ```

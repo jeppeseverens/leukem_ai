@@ -387,7 +387,7 @@ def load_models_and_metadata(models_dir, pipelines_dir=None):
 
 def load_ensemble_weights(weights_dir):
     """
-    Load ensemble weights for both global and OvR ensemble methods.
+    Load ensemble weights for the global ensemble method.
     
     Parameters:
     -----------
@@ -409,16 +409,7 @@ def load_ensemble_weights(weights_dir):
         print("Loaded global ensemble weights (CV)")
     else:
         print(f"WARNING: Global ensemble weights not found at {global_weights_path}")
-    
-    # Load OvR ensemble weights (CV only, not LOSO)
-    ovr_weights_path = os.path.join(weights_dir, "cv", "ovr_ensemble_weights_used.csv")
-    if os.path.exists(ovr_weights_path):
-        ovr_weights = pd.read_csv(ovr_weights_path)
-        ensemble_weights['ovr'] = ovr_weights
-        print("Loaded OvR ensemble weights (CV)")
-    else:
-        print(f"WARNING: OvR ensemble weights not found at {ovr_weights_path}")
-    
+
     return ensemble_weights
 
 
@@ -452,6 +443,41 @@ def load_cutoffs(cutoffs_path):
     print(f"Loaded cutoffs for {len(cutoffs)} models")
     return cutoffs
 
+
+def load_platt_params(platt_path):
+    """
+    Load Platt calibration parameters (intercept and slope) per model.
+
+    Parameters
+    ----------
+    platt_path : str
+        Path to the Platt parameters CSV file.
+
+    Returns
+    -------
+    dict
+        Mapping from model key to (intercept, slope).
+    """
+    if not os.path.exists(platt_path):
+        print(f"WARNING: Platt parameters file not found at {platt_path}")
+        return {}
+
+    df = pd.read_csv(platt_path)
+    if df.empty:
+        print(f"WARNING: Platt parameters file {platt_path} is empty")
+        return {}
+
+    params = {}
+    for _, row in df.iterrows():
+        model_key = row.get("model")
+        if model_key is None:
+            continue
+        intercept = float(row.get("intercept", 0.0))
+        slope = float(row.get("slope", 0.0))
+        params[str(model_key)] = (intercept, slope)
+
+    print(f"Loaded Platt parameters for {len(params)} models from {platt_path}")
+    return params
 
 def predict_nn_standard(X, models, sample_names):
     """
@@ -956,17 +982,19 @@ def apply_cutoffs(predictions_dict, cutoffs):
         'NN': 'neural_net',
         'SVM': 'svm',
         'XGBOOST': 'xgboost',
-        'Global_Ensemble': 'Global_Optimized',
-        'OvR_Ensemble': 'OvR_Ensemble'
+        'Global_Ensemble': 'Global_Optimized'
     }
     
     for model_name, df in predictions_dict.items():
         cutoff_key = cutoff_mapping.get(model_name, model_name)
-        
+
+        # Use calibrated probability if available, else raw prediction_prob
+        score_col = 'prediction_prob_calibrated' if 'prediction_prob_calibrated' in df.columns else 'prediction_prob'
+
         if cutoff_key in cutoffs:
             cutoff_value = cutoffs[cutoff_key]
-            df['prediction_passed_cutoff'] = df['prediction_prob'] >= cutoff_value
-            print(f"Applied cutoff {cutoff_value:.2f} to {model_name}")
+            df['prediction_passed_cutoff'] = df[score_col] >= cutoff_value
+            print(f"Applied cutoff {cutoff_value:.2f} to {model_name} using {score_col}")
         else:
             print(f"No cutoff found for {model_name}")
             df['prediction_passed_cutoff'] = True  # Default to True if no cutoff
@@ -1010,7 +1038,7 @@ def save_predictions(predictions_dict, prob_matrices_dict, output_dir, input_fil
         print(f"Saved {model_name} probability matrix to {filename}")
 
 
-def run_predictions(X, sample_names, models, ensemble_weights, cutoffs, merge_classes=False):
+def run_predictions(X, sample_names, models, ensemble_weights, cutoffs, platt_params=None, merge_classes=False):
     """
     Run prediction pipeline for a single version (merged or unmerged).
     
@@ -1064,19 +1092,29 @@ def run_predictions(X, sample_names, models, ensemble_weights, cutoffs, merge_cl
         predictions['Global_Ensemble'], prob_matrices['Global_Ensemble'] = predict_ensemble_global(
             predictions, prob_matrices, ensemble_weights, sample_names
         )
-    
-    if 'ovr' in ensemble_weights:
-        predictions['OvR_Ensemble'], prob_matrices['OvR_Ensemble'] = predict_ensemble_ovr(
-            predictions, prob_matrices, ensemble_weights, sample_names
-        )
-    
+
     # Apply class merging to ensemble probability matrices if requested
-    if merge_classes:
-        for model_name in ['Global_Ensemble', 'OvR_Ensemble']:
-            if model_name in prob_matrices:
-                prob_matrices[model_name] = merge_probability_classes(prob_matrices[model_name].copy())
+    if merge_classes and 'Global_Ensemble' in prob_matrices:
+        prob_matrices['Global_Ensemble'] = merge_probability_classes(prob_matrices['Global_Ensemble'].copy())
     
-    # Apply cutoffs to predictions
+    # Apply Platt calibration to prediction probabilities if parameters are available
+    if platt_params:
+        print("Applying Platt calibration to prediction probabilities...")
+        platt_mapping = {
+            'NN': 'neural_net',
+            'SVM': 'svm',
+            'XGBOOST': 'xgboost',
+            'Global_Ensemble': 'Global_Optimized'
+        }
+        for model_name, df in predictions.items():
+            cutoff_key = platt_mapping.get(model_name, model_name)
+            if cutoff_key in platt_params:
+                intercept, slope = platt_params[cutoff_key]
+                # Sigmoid of linear function: calibrated probability of being correct
+                z = intercept + slope * df['prediction_prob'].values
+                df['prediction_prob_calibrated'] = 1.0 / (1.0 + np.exp(-z))
+
+    # Apply cutoffs to predictions (uses calibrated prob if present)
     predictions = apply_cutoffs(predictions, cutoffs)
     
     return predictions, prob_matrices
@@ -1161,10 +1199,15 @@ def main():
         cutoffs_file_unmerged = os.path.join(str(args.cutoffs_file), "cutoffs_unmerged_maxprob", "train_test_cutoffs_unmerged_maxprob.csv")
         print(f"\nLoading unmerged cutoffs from: {cutoffs_file_unmerged}")
         cutoffs_unmerged = load_cutoffs(cutoffs_file_unmerged)
+
+        # Load unmerged Platt parameters (matches R: platt_params_unmerged_maxprob)
+        platt_file_unmerged = os.path.join(str(args.cutoffs_file), "platt_params_unmerged_maxprob", "platt_params_unmerged_maxprob.csv")
+        print(f"\nLoading unmerged Platt parameters from: {platt_file_unmerged}")
+        platt_params_unmerged = load_platt_params(platt_file_unmerged)
         
         # Run predictions
         predictions_unmerged, prob_matrices_unmerged = run_predictions(
-            X, sample_names, models, ensemble_weights_unmerged, cutoffs_unmerged, merge_classes=False
+            X, sample_names, models, ensemble_weights_unmerged, cutoffs_unmerged, platt_params_unmerged, merge_classes=False
         )
         
         # Save unmerged predictions
@@ -1187,10 +1230,15 @@ def main():
         cutoffs_file_merged = os.path.join(str(args.cutoffs_file), "cutoffs_merged_summed", "train_test_cutoffs_merged_summed.csv")
         print(f"\nLoading merged cutoffs (summed) from: {cutoffs_file_merged}")
         cutoffs_merged = load_cutoffs(cutoffs_file_merged)
+
+        # Load merged Platt parameters (summed method)
+        platt_file_merged = os.path.join(str(args.cutoffs_file), "platt_params_merged_summed", "platt_params_merged_summed.csv")
+        print(f"\nLoading merged Platt parameters (summed) from: {platt_file_merged}")
+        platt_params_merged = load_platt_params(platt_file_merged)
         
         # Run predictions
         predictions_merged, prob_matrices_merged = run_predictions(
-            X, sample_names, models, ensemble_weights_merged, cutoffs_merged, merge_classes=True
+            X, sample_names, models, ensemble_weights_merged, cutoffs_merged, platt_params_merged, merge_classes=True
         )
         
         # Save merged predictions

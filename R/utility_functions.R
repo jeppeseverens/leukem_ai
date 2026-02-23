@@ -921,12 +921,15 @@ evaluate_single_cutoff <- function(cutoff, max_probs, truth, preds, model_name, 
 #' @param fold_name Name of the fold being analyzed
 #' @param model_name Name of the model being analyzed
 #' @param type Type of analysis ("cv" or "loso")
-#' @param cutoff_step Step size for probability cutoffs (default: 0.01)
+#' @param cutoff_step Step size for probability cutoffs (default: 0.05 for stability)
 #' @return Data frame with rejection analysis results
-evaluate_single_matrix_with_rejection_vectorized <- function(prob_matrix, fold_name, model_name, type, cutoff_step = 0.01) {
-  # Extract true labels and remove from probability matrix
+evaluate_single_matrix_with_rejection_vectorized <- function(prob_matrix, fold_name, model_name, type, cutoff_step = 0.05) {
+  # Non-probability columns to exclude (including optional Platt-calibrated confidence)
+  meta_cols <- c("y", "inner_fold", "outer_fold", "indices", "study", "confidence_calibrated")
+  prob_matrix_clean <- prob_matrix[, !colnames(prob_matrix) %in% meta_cols, drop = FALSE]
+
+  # Extract true labels
   truth <- prob_matrix$y
-  prob_matrix_clean <- prob_matrix[, !colnames(prob_matrix) %in% c("y", "inner_fold", "outer_fold", "indices", "study"), drop = FALSE]
 
   # Clean class labels
   truth <- gsub("Class. ", "", truth)
@@ -937,8 +940,12 @@ evaluate_single_matrix_with_rejection_vectorized <- function(prob_matrix, fold_n
   preds <- colnames(prob_matrix_clean)[pred_indices]
   preds <- gsub("Class. ", "", preds)
 
-  # Vectorized: Get max probabilities
-  max_probs <- prob_mat[cbind(seq_len(nrow(prob_mat)), pred_indices)]
+  # Use Platt-calibrated confidence if present, else max probability
+  if ("confidence_calibrated" %in% colnames(prob_matrix)) {
+    confidence_vals <- prob_matrix$confidence_calibrated
+  } else {
+    confidence_vals <- prob_mat[cbind(seq_len(nrow(prob_mat)), pred_indices)]
+  }
 
   # Ensure all classes are represented
   all_classes <- unique(c(truth, preds))
@@ -949,9 +956,9 @@ evaluate_single_matrix_with_rejection_vectorized <- function(prob_matrix, fold_n
   correct <- as.integer(truth == preds)
   total_samples <- length(truth)
 
-  # Sort by max_probs for efficient cumulative processing
-  sort_order <- order(max_probs)
-  sorted_probs <- max_probs[sort_order]
+  # Sort by confidence for efficient cumulative processing
+  sort_order <- order(confidence_vals)
+  sorted_probs <- confidence_vals[sort_order]
   sorted_correct <- correct[sort_order]
   sorted_truth <- truth[sort_order]
   sorted_preds <- preds[sort_order]
@@ -1029,9 +1036,9 @@ evaluate_single_matrix_with_rejection_vectorized <- function(prob_matrix, fold_n
 #' @param fold_name Name of the fold being analyzed
 #' @param model_name Name of the model being analyzed
 #' @param type Type of analysis ("cv" or "loso")
-#' @param cutoff_step Step size for probability cutoffs (default: 0.01, use 0.05 for faster analysis)
+#' @param cutoff_step Step size for probability cutoffs (default: 0.05)
 #' @return Data frame with rejection analysis results
-evaluate_single_matrix_with_rejection_parallel <- function(prob_matrix, fold_name, model_name, type, cutoff_step = 0.01) {
+evaluate_single_matrix_with_rejection_parallel <- function(prob_matrix, fold_name, model_name, type, cutoff_step = 0.05) {
   # Use the faster vectorized implementation
   evaluate_single_matrix_with_rejection_vectorized(prob_matrix, fold_name, model_name, type, cutoff_step)
 }
@@ -1569,6 +1576,103 @@ perform_ovr_ensemble_analysis_unified <- function(results, weights, type = "cv",
   df_list
 }
 
+# =============================================================================
+# Platt scaling for rejection confidence (out-of-sample per inner fold)
+# =============================================================================
+
+#' Extract max probability and correctness per row from a probability matrix
+#' @param prob_matrix Data frame with class prob columns and "y" (true label)
+#' @return List with max_prob numeric vector and correct integer vector (0/1)
+get_max_prob_and_correct_from_matrix <- function(prob_matrix) {
+  meta_cols <- c("y", "inner_fold", "outer_fold", "indices", "study", "sample_indices", "confidence_calibrated")
+  prob_cols <- colnames(prob_matrix)[!colnames(prob_matrix) %in% meta_cols]
+  prob_mat <- as.matrix(prob_matrix[, prob_cols, drop = FALSE])
+  pred_indices <- max.col(prob_mat, ties.method = "first")
+  max_prob <- prob_mat[cbind(seq_len(nrow(prob_mat)), pred_indices)]
+  truth <- gsub("Class\\. ", "", prob_matrix$y)
+  preds <- gsub("Class\\. ", "", prob_cols[pred_indices])
+  correct <- as.integer(truth == preds)
+  list(max_prob = max_prob, correct = correct)
+}
+
+#' Fit Platt (logistic) calibration on pooled (max_prob, correct) and apply to target
+#' @param pool_matrices List of probability matrices to pool for fitting
+#' @param target_matrix Single matrix to calibrate (apply fitted Platt to)
+#' @return Target matrix with confidence_calibrated column added, or target unchanged on failure
+apply_platt_to_target_from_pool <- function(pool_matrices, target_matrix) {
+  # Pool max_prob and correct from all matrices in pool_matrices
+  pool_max <- numeric(0)
+  pool_correct <- integer(0)
+  for (m in pool_matrices) {
+    if (is.null(m) || nrow(m) == 0) next
+    out <- get_max_prob_and_correct_from_matrix(m)
+    pool_max <- c(pool_max, out$max_prob)
+    pool_correct <- c(pool_correct, out$correct)
+  }
+  if (length(pool_max) < 10L || length(unique(pool_correct)) < 2L) {
+    return(target_matrix)
+  }
+  fit <- tryCatch(
+    stats::glm(pool_correct ~ pool_max, family = stats::binomial),
+    error = function(e) NULL
+  )
+  if (is.null(fit)) return(target_matrix)
+  out_target <- get_max_prob_and_correct_from_matrix(target_matrix)
+  calibrated <- tryCatch(
+    as.numeric(stats::predict(fit, newdata = data.frame(pool_max = out_target$max_prob), type = "response")),
+    error = function(e) NULL
+  )
+  if (is.null(calibrated)) return(target_matrix)
+  target_matrix$confidence_calibrated <- calibrated
+  target_matrix
+}
+
+#' Add Platt-calibrated confidence to each inner-fold matrix using other folds as pool
+#' @param inner_fold_matrices Named list of probability matrices (one per inner fold)
+#' @return List of matrices with confidence_calibrated column added where possible
+apply_platt_to_inner_fold_matrices <- function(inner_fold_matrices) {
+  n_folds <- length(inner_fold_matrices)
+  if (n_folds < 2L) return(inner_fold_matrices)
+  fold_names <- names(inner_fold_matrices)
+  result <- list()
+  for (k in seq_along(fold_names)) {
+    target <- inner_fold_matrices[[fold_names[k]]]
+    others <- inner_fold_matrices[setdiff(fold_names, fold_names[k])]
+    result[[fold_names[k]]] <- apply_platt_to_target_from_pool(others, target)
+  }
+  result
+}
+
+#' Add confidence_calibrated to all probability and ensemble matrices (in place) when has_inner_folds
+apply_platt_to_all_rejection_matrices <- function(probability_matrices, ensemble_matrices, type, has_inner_folds) {
+  if (!has_inner_folds) return(invisible(NULL))
+  # Individual models: probability_matrices[[model]][[type]][[outer_fold]] = list(inner_fold -> matrix)
+  for (model_name in names(probability_matrices)) {
+    if (!type %in% names(probability_matrices[[model_name]])) next
+    outer_fold_matrices <- probability_matrices[[model_name]][[type]]
+    for (outer_fold_name in names(outer_fold_matrices)) {
+      inner_list <- outer_fold_matrices[[outer_fold_name]]
+      calibrated_list <- apply_platt_to_inner_fold_matrices(inner_list)
+      for (inner_name in names(calibrated_list)) {
+        probability_matrices[[model_name]][[type]][[outer_fold_name]][[inner_name]] <- calibrated_list[[inner_name]]
+      }
+    }
+  }
+  # Ensembles: global only (OvR removed); outer_fold -> inner_fold -> matrix
+  outer_list <- ensemble_matrices$global_optimized_ensemble_matrices
+  if (!is.null(outer_list)) {
+    for (outer_fold_name in names(outer_list)) {
+      inner_list <- outer_list[[outer_fold_name]]
+      if (!is.list(inner_list) || length(inner_list) == 0) next
+      calibrated_list <- apply_platt_to_inner_fold_matrices(inner_list)
+      for (inner_name in names(calibrated_list)) {
+        ensemble_matrices$global_optimized_ensemble_matrices[[outer_fold_name]][[inner_name]] <- calibrated_list[[inner_name]]
+      }
+    }
+  }
+  invisible(NULL)
+}
+
 #' Evaluate rejection analysis for all probability matrices (unified)
 #' @param probability_matrices List of probability matrices for all models
 #' @param ensemble_matrices List of ensemble probability matrices
@@ -1577,6 +1681,12 @@ perform_ovr_ensemble_analysis_unified <- function(results, weights, type = "cv",
 #' @return Data frame with rejection analysis results for all models and ensembles
 evaluate_all_matrices_with_rejection_unified <- function(probability_matrices, ensemble_matrices, type = "cv", has_inner_folds = TRUE) {
   cat(sprintf("Performing rejection analysis (%s)...\n", ifelse(has_inner_folds, "with inner folds", "train/test")))
+
+  # Out-of-sample Platt calibration for confidence (inner folds only)
+  if (has_inner_folds) {
+    cat("  Applying Platt scaling for confidence (out-of-sample per inner fold)...\n")
+    apply_platt_to_all_rejection_matrices(probability_matrices, ensemble_matrices, type, has_inner_folds)
+  }
 
   # Build list of all tasks to process
   tasks <- list()
@@ -1617,15 +1727,10 @@ evaluate_all_matrices_with_rejection_unified <- function(probability_matrices, e
     }
   }
 
-  # Collect ensemble tasks
-  ensemble_methods <- list(
-    "OvR_Ensemble" = ensemble_matrices$ovr_optimized_ensemble_matrices,
-    "Global_Optimized" = ensemble_matrices$global_optimized_ensemble_matrices
-  )
-
-  for (ensemble_name in names(ensemble_methods)) {
-    ensemble_outer_fold_matrices <- ensemble_methods[[ensemble_name]]
-    if (is.null(ensemble_outer_fold_matrices)) next
+  # Collect ensemble tasks (Global only; OvR removed)
+  ensemble_outer_fold_matrices <- ensemble_matrices$global_optimized_ensemble_matrices
+  if (!is.null(ensemble_outer_fold_matrices)) {
+    ensemble_name <- "Global_Optimized"
 
     for (outer_fold_name in names(ensemble_outer_fold_matrices)) {
       if (has_inner_folds) {

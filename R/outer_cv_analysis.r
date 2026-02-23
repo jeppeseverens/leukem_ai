@@ -823,31 +823,27 @@ apply_rejection_analysis_to_outer_cv <- function(probability_matrices, optimal_c
           }
         }
       }
-    } else {
-      # Check if it's an ensemble method
+    } else if (model_name == "Global_Optimized") {
+      # Ensemble method (Global only; OvR removed)
       ensemble_found <- FALSE
-      for (ensemble_type in c("OvR_Ensemble", "Global_Optimized")) {
-        if (ensemble_type %in% names(probability_matrices) && type %in% names(probability_matrices[[ensemble_type]])) {
-          ensemble_matrices <- probability_matrices[[ensemble_type]][[type]]
+      if ("Global_Optimized" %in% names(probability_matrices) && type %in% names(probability_matrices[["Global_Optimized"]])) {
+        ensemble_matrices <- probability_matrices[["Global_Optimized"]][[type]]
 
-          for (fold_name in names(ensemble_matrices)) {
-            prob_matrix <- ensemble_matrices[[fold_name]]
-            mean_cutoff <- optimal_cutoffs$optimal_cutoffs[
-              optimal_cutoffs$optimal_cutoffs$model == ensemble_type &
-                optimal_cutoffs$optimal_cutoffs$source == type &
-                optimal_cutoffs$optimal_cutoffs$outer_fold == fold_name, "mean_cutoff"
-            ]
-            if (!is.null(prob_matrix) && nrow(prob_matrix) > 0) {
-              # Apply rejection analysis
-              rejection_result <- evaluate_single_matrix_with_rejection_and_cutoff(
-                prob_matrix, fold_name, model_name, type, mean_cutoff
-              )
-
-              if (!is.null(rejection_result)) {
-                rejection_results[[paste(model_name, fold_name, sep = "_")]] <- rejection_result
-              }
-              ensemble_found <- TRUE
+        for (fold_name in names(ensemble_matrices)) {
+          prob_matrix <- ensemble_matrices[[fold_name]]
+          mean_cutoff <- optimal_cutoffs$optimal_cutoffs[
+            optimal_cutoffs$optimal_cutoffs$model == "Global_Optimized" &
+              optimal_cutoffs$optimal_cutoffs$source == type &
+              optimal_cutoffs$optimal_cutoffs$outer_fold == fold_name, "mean_cutoff"
+          ]
+          if (length(mean_cutoff) > 0 && !is.null(prob_matrix) && nrow(prob_matrix) > 0) {
+            rejection_result <- evaluate_single_matrix_with_rejection_and_cutoff(
+              prob_matrix, fold_name, "Global_Optimized", type, mean_cutoff[1]
+            )
+            if (!is.null(rejection_result)) {
+              rejection_results[[paste("Global_Optimized", fold_name, sep = "_")]] <- rejection_result
             }
+            ensemble_found <- TRUE
           }
         }
       }
@@ -855,6 +851,8 @@ apply_rejection_analysis_to_outer_cv <- function(probability_matrices, optimal_c
       if (!ensemble_found) {
         cat(sprintf("    No probability matrices found for %s, skipping\n", model_name))
       }
+    } else {
+      cat(sprintf("    Skipping %s (no longer used)\n", model_name))
     }
   }
 
@@ -869,29 +867,32 @@ apply_rejection_analysis_to_outer_cv <- function(probability_matrices, optimal_c
 #' @param cutoff Probability cutoff to apply
 #' @return List with rejection analysis results and per-class metrics
 evaluate_single_matrix_with_rejection_and_cutoff <- function(prob_matrix, fold_name, model_name, type, cutoff) {
-  # Extract true labels and remove from probability matrix
-  truth <- prob_matrix$y
-  prob_matrix_clean <- prob_matrix[, !colnames(prob_matrix) %in% c("y", "outer_fold", "sample_indices"), drop = FALSE]
+  # Exclude meta columns and optional Platt-calibrated confidence from prob columns
+  meta_cols <- c("y", "outer_fold", "sample_indices", "confidence_calibrated")
+  prob_matrix_clean <- prob_matrix[, !colnames(prob_matrix) %in% meta_cols, drop = FALSE]
 
-  # Clean class labels
+  truth <- prob_matrix$y
   truth <- gsub("Class.", "", truth)
 
-  # Get predictions (class with highest probability)
+  # Predictions from class probabilities
   pred_indices <- apply(prob_matrix_clean, 1, which.max)
   preds <- colnames(prob_matrix_clean)[pred_indices]
   preds <- gsub("Class.", "", preds)
 
-  # Get max probabilities for each sample
-  max_probs <- apply(prob_matrix_clean, 1, max)
+  # Use Platt-calibrated confidence for rejection if present, else max probability
+  if ("confidence_calibrated" %in% colnames(prob_matrix)) {
+    confidence_vals <- prob_matrix$confidence_calibrated
+  } else {
+    confidence_vals <- apply(prob_matrix_clean, 1, max)
+  }
 
-  # Ensure all classes are represented
   all_classes <- unique(c(truth, preds))
   truth <- factor(truth, levels = all_classes)
   preds <- factor(preds, levels = all_classes)
 
   # Apply rejection using the specific cutoff
-  rejected_indices <- which(max_probs < cutoff)
-  accepted_indices <- which(max_probs >= cutoff)
+  rejected_indices <- which(confidence_vals < cutoff)
+  accepted_indices <- which(confidence_vals >= cutoff)
 
   # Calculate metrics for accepted samples only
   if (length(accepted_indices) == 0) {
@@ -1267,15 +1268,7 @@ main_outer_cv <- function(merge_classes = FALSE) {
     cat(sprintf("Processing %s ensemble...\n", toupper(type)))
     ensemble_matrices[[type]] <- list()
 
-    # Generate OvR ensemble
-    ovr_ensemble <- apply_ensemble_weights_to_outer_cv(
-      outer_probability_matrices, ensemble_weights[[type]], type, "ovr"
-    )
-    if (!is.null(ovr_ensemble)) {
-      ensemble_matrices[[type]][["ovr_ensemble"]] <- ovr_ensemble
-    }
-
-    # Generate global ensemble
+    # Generate global ensemble only (OvR removed)
     global_ensemble <- apply_ensemble_weights_to_outer_cv(
       outer_probability_matrices, ensemble_weights[[type]], type, "global"
     )
@@ -1290,14 +1283,11 @@ main_outer_cv <- function(merge_classes = FALSE) {
 
   for (type in c("cv", "loso")) {
     if (type %in% names(ensemble_matrices)) {
-      for (ensemble_name in names(ensemble_matrices[[type]])) {
-        # Map ensemble names to match rejection analysis expectations
-        mapped_name <- if (ensemble_name == "ovr_ensemble") "OvR_Ensemble" else "Global_Optimized"
-
-        if (!mapped_name %in% names(all_probability_matrices)) {
-          all_probability_matrices[[mapped_name]] <- list()
+      if ("global_ensemble" %in% names(ensemble_matrices[[type]])) {
+        if (!"Global_Optimized" %in% names(all_probability_matrices)) {
+          all_probability_matrices[["Global_Optimized"]] <- list()
         }
-        all_probability_matrices[[mapped_name]][[type]] <- ensemble_matrices[[type]][[ensemble_name]]
+        all_probability_matrices[["Global_Optimized"]][[type]] <- ensemble_matrices[[type]][["global_ensemble"]]
       }
     }
   }
@@ -1318,6 +1308,20 @@ main_outer_cv <- function(merge_classes = FALSE) {
 
     # Generate per-class performance summary
     per_class_summaries[[type]] <- summarize_per_class_performance(detailed_performance[[type]])
+  }
+
+  # Apply Platt scaling for rejection confidence (out-of-sample per outer fold)
+  cat("Applying Platt scaling to probability matrices for rejection...\n")
+  for (model_name in names(all_probability_matrices)) {
+    for (type in c("cv", "loso")) {
+      if (!type %in% names(all_probability_matrices[[model_name]])) next
+      fold_list <- all_probability_matrices[[model_name]][[type]]
+      if (!is.list(fold_list) || length(fold_list) < 2L) next
+      calibrated_list <- apply_platt_to_inner_fold_matrices(fold_list)
+      for (fold_name in names(calibrated_list)) {
+        all_probability_matrices[[model_name]][[type]][[fold_name]] <- calibrated_list[[fold_name]]
+      }
+    }
   }
 
   # Load optimal cutoffs for rejection analysis (use correct directory based on merge_classes)
@@ -1429,7 +1433,7 @@ main_outer_cv <- function(merge_classes = FALSE) {
   }
   outer_cv_results$merge_classes <- merge_classes  # Store merge status in results
 
-  saveRDS(outer_cv_results, paste0("../data/out/outer_cv/outer_cv_results_10feb26", merge_suffix, ".rds"))
+  saveRDS(outer_cv_results, paste0("../data/out/outer_cv/outer_cv_results_10feb26_2", merge_suffix, ".rds"))
 
 
   return(outer_cv_results)

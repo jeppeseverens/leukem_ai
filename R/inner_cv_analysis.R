@@ -751,35 +751,12 @@ main_inner_cv <- function(merge_classes = FALSE, merge_prob_method = c("max", "s
       # Analyze globally optimized ensemble performance
       global_optimized_ensemble_performance <- analyze_optimized_ensemble_performance(global_optimized_ensemble_matrices, analysis_type)
 
-      # Perform One-vs-Rest ensemble analysis (properly handles OvR classification)
-      ovr_ensemble_results <- perform_ovr_ensemble_analysis(
-        list(probability_matrices = probability_matrices),
-        weights,
-        analysis_type
-      )
-
-      # Generate One-vs-Rest optimized ensemble matrices
-      ovr_optimized_result <- generate_ovr_optimized_ensemble_matrices(
-        list(probability_matrices = probability_matrices),
-        weights,
-        analysis_type,
-        ovr_ensemble_results
-      )
-
-      # Analyze One-vs-Rest ensemble multiclass performance
-      ovr_ensemble_multiclass_performance <- analyze_ovr_ensemble_multiclass_performance(ovr_optimized_result, analysis_type)
-
-      # Store results for this analysis type
+      # Store results for this analysis type (OvR ensemble removed; Global only)
       results[[analysis_type]] <- list(
         global_ensemble_results = global_ensemble_results,
         global_optimized_ensemble_matrices = global_optimized_ensemble_matrices,
         global_optimized_ensemble_performance = global_optimized_ensemble_performance,
-        global_ensemble_weights_used = global_optimized_ensemble_matrices$weights_used,
-
-        ovr_ensemble_results = ovr_ensemble_results,
-        ovr_optimized_ensemble_matrices = ovr_optimized_result$matrices,
-        ovr_ensemble_multiclass_performance = ovr_ensemble_multiclass_performance,
-        ovr_ensemble_weights_used = ovr_optimized_result$weights_used
+        global_ensemble_weights_used = global_optimized_ensemble_matrices$weights_used
       )
     }
 
@@ -838,9 +815,8 @@ main_inner_cv <- function(merge_classes = FALSE, merge_prob_method = c("max", "s
     )
   }
 
-  # Ensemble method performance - need to aggregate across nested structure
+  # Ensemble method performance (Global only; OvR removed)
   ensemble_methods <- list(
-    "OvR_Ensemble" = results$ovr_ensemble_multiclass_performance,
     "Global_Optimized" = results$global_optimized_ensemble_performance
   )
 
@@ -910,10 +886,9 @@ main_inner_cv <- function(merge_classes = FALSE, merge_prob_method = c("max", "s
         next
       }
 
-      # Create results list for performance comparison
+      # Create results list for performance comparison (Global only)
       comparison_results <- list(
         probability_matrices = results$probability_matrices,
-        ovr_ensemble_multiclass_performance = results[[analysis_type]]$ovr_ensemble_multiclass_performance,
         global_optimized_ensemble_performance = results[[analysis_type]]$global_optimized_ensemble_performance
       )
 
@@ -975,6 +950,7 @@ main_inner_cv <- function(merge_classes = FALSE, merge_prob_method = c("max", "s
       filter(mean_rejected_accuracy < 0.5, mean_perc_rejected < 0.05) %>%
       group_by(model, outer_fold) %>%
       slice_max(mean_kappa) %>%
+      slice_min(mean_perc_rejected, with_ties = FALSE) %>%
       slice_min(mean_rejected_accuracy, with_ties = FALSE) %>%
       ungroup()
 
@@ -1036,9 +1012,8 @@ main_inner_cv <- function(merge_classes = FALSE, merge_prob_method = c("max", "s
         next
       }
 
-      # Extract ensemble matrices for this analysis type
+      # Extract ensemble matrices for this analysis type (Global only)
       ensemble_matrices <- list(
-        ovr_optimized_ensemble_matrices = ensemble_results[[analysis_type]]$ovr_optimized_ensemble_matrices,
         global_optimized_ensemble_matrices = ensemble_results[[analysis_type]]$global_optimized_ensemble_matrices$matrices
       )
 
@@ -1135,24 +1110,24 @@ main_inner_cv <- function(merge_classes = FALSE, merge_prob_method = c("max", "s
     svm = list(
       classification_type = "OvR",
       file_paths = list(
-        cv = "../data/out/inner_cv/SVM_array/cv_28jan26_all/",
-        loso = "../data/out/inner_cv/SVM_array/loso_28jan26_all/"
+        cv = "../data/out/inner_cv/SVM_array/cv_10feb26_eta2/",
+        loso = "../data/out/inner_cv/SVM_array/loso_10feb26_eta2/"
       ),
       output_dir = "../data/out/inner_cv/inner_cv_best_params/SVM_10feb26"
     ),
     xgboost = list(
       classification_type = "OvR",
       file_paths = list(
-        cv = "../data/out/inner_cv/XGBOOST_array/cv_28jan26_all/",
-        loso = "../data/out/inner_cv/XGBOOST_array/loso_28jan26_all/"
+        cv = "../data/out/inner_cv/XGBOOST_array/cv_10feb26_eta2/",
+        loso = "../data/out/inner_cv/XGBOOST_array/loso_10feb26_eta2/"
       ),
       output_dir = "../data/out/inner_cv/inner_cv_best_params/XGBOOST_10feb26"
     ),
     neural_net = list(
       classification_type = "standard",
       file_paths = list(
-        cv = "../data/out/inner_cv/NN_array/cv_28jan26_all/",
-        loso = "../data/out/inner_cv/NN_array/loso_28jan26_all/"
+        cv = "../data/out/inner_cv/NN_array/cv_10feb26_eta2/",
+        loso = "../data/out/inner_cv/NN_array/loso_10feb26_eta2/"
       ),
       output_dir = "../data/out/inner_cv/inner_cv_best_params/NN_10feb26"
     )
@@ -1243,11 +1218,11 @@ main_inner_cv <- function(merge_classes = FALSE, merge_prob_method = c("max", "s
 
   # Determine suffix for file paths (max vs summed merge method when merged)
   if (!merge_classes) {
-    merge_suffix <- "_unmerged_maxprob"
+    merge_suffix <- "_unmerged_eta2"
   } else if (merge_prob_method == "sum") {
-    merge_suffix <- "_merged_summed"
+    merge_suffix <- "_merged_summed_eta2"
   } else {
-    merge_suffix <- "_merged_maxprob"
+    merge_suffix <- "_merged_maxprob_eta2"
   }
   weights_dir <- paste0("../data/out/inner_cv/ensemble_weights", merge_suffix)
   save_ensemble_weights(ensemble_results,  weights_dir)
@@ -1338,7 +1313,7 @@ main_inner_cv <- function(merge_classes = FALSE, merge_prob_method = c("max", "s
   inner_cv_results$merge_classes <- merge_classes
   inner_cv_results$merge_prob_method <- merge_prob_method
   print(inner_cv_results$final_results)
-  saveRDS(inner_cv_results, paste0("../data/out/inner_cv/inner_cv_results_10feb2026", merge_suffix, ".rds"))
+  saveRDS(inner_cv_results, paste0("../data/out/inner_cv/inner_cv_results_10feb2026_eta2", merge_suffix, ".rds"))
 
   # Save filtering statistics to CSV for easy inspection
   if (length(filtering_statistics) > 0) {
@@ -1359,10 +1334,7 @@ main_inner_cv <- function(merge_classes = FALSE, merge_prob_method = c("max", "s
 
 # Run unmerged, merged (max), and merged (summed) for comparison
 #cat("=== Running Inner CV Analysis (Unmerged) ===\n")
-#inner_cv_results_unmerged <- main_inner_cv(merge_classes = FALSE)
-
-#cat("=== Running Inner CV Analysis (Merged MDS/KMT2A/MECOM - Max Method) ===\n")
-#inner_cv_results_merged <- main_inner_cv(merge_classes = TRUE, merge_prob_method = "max")
+inner_cv_results_unmerged <- main_inner_cv(merge_classes = FALSE)
 
 cat("=== Running Inner CV Analysis (Merged MDS/KMT2A/MECOM - Summed Method) ===\n")
 inner_cv_results_merged_summed <- main_inner_cv(merge_classes = TRUE, merge_prob_method = "sum")
