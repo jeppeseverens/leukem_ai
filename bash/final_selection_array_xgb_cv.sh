@@ -33,7 +33,7 @@ python python/run_final_selection_array.py \
     --model_type "$MODEL_TYPE" \
     --param_index $SLURM_ARRAY_TASK_ID \
     --k_folds 5 \
-    --n_max_param 96 \
+    --n_max_param 120 \
     --fold_type "CV" \
     --run_name "final_cv_xgb_28jan26_eta2" \
     --fs_method "$FS_METHOD"

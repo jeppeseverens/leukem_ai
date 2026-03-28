@@ -149,7 +149,7 @@ def main():
 
     # If using eta2-based feature selection, restrict n_genes to smaller values
     if args.fs_method.lower() == "eta2" and 'n_genes' in param_grid:
-        param_grid['n_genes'] = [250, 500, 1000]
+        param_grid['n_genes'] = [250, 500, 1000, 1500]
 
     # Generate full parameter list (same logic as original)
     full_param_list = list(ParameterGrid(param_grid))
@@ -161,11 +161,11 @@ def main():
             if not (params['use_batch_norm'] and params['dropout_rate'] > 0)
         ]
 
-    # Downsample if needed (using same random seed for reproducibility)
+    # If the grid is larger than n_max_param, keep exactly n_max_param draws (reproducible via random_seed)
     random.seed(args.random_seed)
-    n_downsample = args.n_max_param
-    if len(full_param_list) > n_downsample:
-        param_list = random.sample(full_param_list, k=n_downsample)
+    n_cap = args.n_max_param
+    if len(full_param_list) > n_cap:
+        param_list = random.sample(full_param_list, k=n_cap)
     else:
         param_list = full_param_list
 

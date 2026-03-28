@@ -34,7 +34,7 @@ python python/run_inner_cv_array.py \
     --param_index $SLURM_ARRAY_TASK_ID \
     --k_out 5 \
     --k_in 5 \
-    --n_max_param 60 \
+    --n_max_param 80 \
     --fold_type "CV" \
     --run_name "cv_10feb26_eta2" \
     --fs_method "$FS_METHOD"
