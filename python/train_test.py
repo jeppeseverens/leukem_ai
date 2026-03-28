@@ -1892,6 +1892,105 @@ def run_outer_cv_loso_leftout(
     return pd.DataFrame(all_leftout_results)
 
 
+# Sentinel outer_fold for full-data final models (not a CV fold index).
+FINAL_LEFTOUT_OUTER_FOLD = -1
+
+
+def predict_leftout_final(
+    trained_models,
+    X_leftout,
+    y_leftout,
+    leftout_global_idx,
+    multi_type="standard",
+):
+    """
+    Score left-out samples with final trained models (fit on all included data).
+
+    Output shape matches predict_leftout_for_fold / outer CV left-out CSVs;
+    outer_fold is FINAL_LEFTOUT_OUTER_FOLD (-1) to distinguish from per-fold CV.
+    """
+    if len(X_leftout) == 0:
+        return pd.DataFrame()
+
+    y_leftout = np.asarray(y_leftout)
+    leftout_global_idx = np.asarray(leftout_global_idx)
+    fold_tag = FINAL_LEFTOUT_OUTER_FOLD
+
+    if multi_type == "standard":
+        if not trained_models:
+            raise ValueError("No trained models for left-out prediction.")
+        model_info, clf = trained_models[0]
+        pipe = model_info["preprocessing_pipeline"]
+        label_encoder = model_info["label_encoder"]
+        n_genes = model_info["n_genes"]
+        out_params = dict(model_info["params"])
+        out_params["n_genes"] = n_genes
+
+        X_leftout_proc = pipe.transform(X_leftout).astype(np.float32)
+        preds_prob = clf.predict_proba(X_leftout_proc)
+        preds_encoded = np.argmax(preds_prob, axis=1)
+        preds = label_encoder.inverse_transform(preds_encoded)
+        classes = label_encoder.classes_
+        preds_prob_flat = np.round(preds_prob.flatten(), 4).tolist()
+
+        return pd.DataFrame(
+            [
+                {
+                    "outer_fold": fold_tag,
+                    "classes": list(classes),
+                    "params": out_params,
+                    "accuracy": 0,
+                    "f1_macro": 0,
+                    "mcc": 0,
+                    "kappa": 0,
+                    "y_val": y_leftout,
+                    "preds": preds,
+                    "preds_prob": json.dumps(preds_prob_flat),
+                    "sample_indices": leftout_global_idx,
+                }
+            ]
+        )
+
+    if multi_type == "OvR":
+        rows = []
+        for model_info, clf in trained_models:
+            class_val = model_info["class"]
+            n_genes = model_info["n_genes"]
+            out_params = dict(model_info["params"])
+            out_params["n_genes"] = n_genes
+            pipe = model_info["preprocessing_pipeline"]
+
+            X_leftout_proc = pipe.transform(X_leftout).astype(np.float32)
+            y_leftout_bin = np.zeros(len(y_leftout), dtype=np.int32)
+
+            preds_prob = clf.predict_proba(X_leftout_proc)
+            pos_class_index = list(clf.classes_).index(1)
+            preds_prob_pos = preds_prob[:, pos_class_index]
+            preds = (preds_prob_pos >= 0.5).astype(int)
+            preds_prob_list = np.round(preds_prob_pos, 4).tolist()
+
+            rows.append(
+                {
+                    "outer_fold": fold_tag,
+                    "class": class_val,
+                    "params": out_params,
+                    "accuracy": 0,
+                    "f1_binary": 0,
+                    "mcc": 0,
+                    "kappa": 0,
+                    "y_val": y_leftout_bin,
+                    "preds": preds,
+                    "preds_prob": json.dumps(preds_prob_list),
+                    "sample_indices": leftout_global_idx,
+                }
+            )
+        return pd.DataFrame(rows)
+
+    raise ValueError(
+        f"Left-out prediction for final train not implemented for multi_type={multi_type}"
+    )
+
+
 ###################################################################################
 # Pipeline management functions                                                   #
 ###################################################################################

@@ -14,6 +14,7 @@ import argparse
 import ast
 import joblib
 import json
+import numpy as np
 
 from pathlib import Path
 
@@ -60,13 +61,21 @@ def main():
             **config
         )
 
+    parser.add_argument(
+        '--include_leftout',
+        action='store_true',
+        help='Also predict on left-out class samples (rare/excluded subtypes). '
+        'Writes a CSV alongside the models, same schema as outer CV left-out output.',
+    )
+
     args = parser.parse_args()
     
     print(f"Training final {args.model_type} model with {args.multi_type} strategy using {args.fold_type} best parameters")
     print(f"Best parameters from: {args.best_params_path}")
     print(f"Output directory: {args.output_dir}")
     print(f"Feature selection method: {args.fs_method}")
-    
+    print(f"Include left-out predictions: {args.include_leftout}")
+
     # Get the current date and time in string format
     time = datetime.datetime.now().strftime("%Y%m%d_%H%M")
 
@@ -79,8 +88,21 @@ def main():
 
     base_path = Path(__file__).resolve().parent
     data_path = base_path.parent / "data"
-    X, y, study_labels = train_test.load_data(data_path)
-    X, y, study_labels = train_test.filter_data(X, y, study_labels, min_n=10)
+    X_all, y_all, study_all = train_test.load_data(data_path)
+
+    has_leftout = False
+    if args.include_leftout:
+        X_leftout, y_leftout, _, leftout_global_idx = (
+            train_test.get_leftout_samples(X_all, y_all, study_all, min_n=10)
+        )
+        has_leftout = len(leftout_global_idx) > 0
+        if not has_leftout:
+            print(
+                "No left-out samples found; skipping left-out predictions.",
+                flush=True,
+            )
+
+    X, y, study_labels = train_test.filter_data(X_all, y_all, study_all, min_n=10)
     y, label_mapping = train_test.encode_labels(y)
 
     # Define the model based on model type
@@ -233,9 +255,27 @@ def main():
         json.dump(label_mapping, f, indent=2)
     print(f"  Saved label mapping: {label_mapping_path}")
 
+    if has_leftout:
+        print("Predicting on left-out samples (final full-data model)...", flush=True)
+        leftout_df = train_test.predict_leftout_final(
+            trained_models,
+            X_leftout,
+            y_leftout,
+            leftout_global_idx,
+            multi_type=args.multi_type,
+        )
+        leftout_df = train_test.restore_labels(leftout_df, label_mapping)
+        fs_suffix = "_fs_eta" if fs_method == "eta2" else ""
+        leftout_filename = (
+            f"{args.model_type}_final_{args.fold_type}_{args.multi_type}"
+            f"_leftout{fs_suffix}_{time}.csv"
+        )
+        leftout_path = os.path.join(args.output_dir, leftout_filename)
+        leftout_df.to_csv(leftout_path, index=False)
+        print(f"  Saved left-out predictions: {leftout_path}")
+
     print("Final model training process finished.")
     print(f"Trained {len(trained_models)} models and saved to {args.output_dir}")
 
 if __name__ == "__main__":
-    import numpy as np
     main()

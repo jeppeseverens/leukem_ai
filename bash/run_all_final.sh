@@ -38,7 +38,8 @@ run_final_model_train() {
         --multi_type "$multi_type" \
         --fold_type "$fold_type" \
         --best_params_path "$best_params_file" \
-        --fs_method "$FS_METHOD"
+        --fs_method "$FS_METHOD" \
+        --include_leftout
 
     echo "Completed: $model_type - $multi_type - $fold_type"
     echo ""
