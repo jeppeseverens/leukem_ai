@@ -6,7 +6,7 @@ cd /Users/jsevere2/leukem_ai
 # Activate the Python virtual environment
 source .venv/bin/activate
 
-echo "Starting all outer CV experiments..."
+echo "Starting all outer CV experiments (with left-out predictions)..."
 echo "=================================="
 
 # Feature selection method for outer CV:
@@ -30,23 +30,22 @@ run_outer_cv() {
         --multi_type "$multi_type" \
         --fold_type "$fold_type" \
         --best_params_path "$best_params_file" \
-        --fs_method "$FS_METHOD"
+        --fs_method "$FS_METHOD" \
+        --include_leftout
 
     echo "Completed: $model_type - $multi_type - $fold_type"
     echo ""
 }
 
 # SVM experiments
-# echo "Running SVM outer CV experiments..."
-run_outer_cv "SVM" "OvR" "CV" "data/out/inner_cv/inner_cv_best_params/SVM_10feb26/SVM_best_param_cv.csv"
-run_outer_cv "SVM" "OvR" "loso" "data/out/inner_cv/inner_cv_best_params/SVM_10feb26/SVM_best_param_loso.csv"
+#run_outer_cv "SVM" "OvR" "CV" "data/out/inner_cv/inner_cv_best_params/SVM_10feb26/SVM_best_param_cv.csv"
+#run_outer_cv "SVM" "OvR" "loso" "data/out/inner_cv/inner_cv_best_params/SVM_10feb26/SVM_best_param_loso.csv"
 
-# # XGBOOST experiments
-# echo "Running XGBOOST outer CV experiments..."
-run_outer_cv "XGBOOST" "OvR" "CV" "data/out/inner_cv/inner_cv_best_params/XGBOOST_10feb26/XGBOOST_best_param_cv.csv"
-run_outer_cv "XGBOOST" "OvR" "loso" "data/out/inner_cv/inner_cv_best_params/XGBOOST_10feb26/XGBOOST_best_param_loso.csv"
+# XGBOOST experiments
+#run_outer_cv "XGBOOST" "OvR" "CV" "data/out/inner_cv/inner_cv_best_params/XGBOOST_10feb26/XGBOOST_best_param_cv.csv"
+#run_outer_cv "XGBOOST" "OvR" "loso" "data/out/inner_cv/inner_cv_best_params/XGBOOST_10feb26/XGBOOST_best_param_loso.csv"
 
-echo "Running NN outer CV experiments..."
+# NN experiments
 run_outer_cv "NN" "standard" "CV" "data/out/inner_cv/inner_cv_best_params/NN_10feb26/NEURAL_NET_best_param_cv.csv"
 run_outer_cv "NN" "standard" "loso" "data/out/inner_cv/inner_cv_best_params/NN_10feb26/NEURAL_NET_best_param_loso.csv"
 

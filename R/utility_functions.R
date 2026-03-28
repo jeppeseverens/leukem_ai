@@ -434,8 +434,8 @@ generate_weights <- function(step = 0.025) {
   # Name the list elements for clarity
   names(ENSEMBLE_WEIGHTS) <- paste0("W", seq_along(ENSEMBLE_WEIGHTS))
   ENSEMBLE_WEIGHTS[["mix"]] <- list(SVM = 0.33, XGB = 0.33, NN = 0.33)
-  # SVM as main fallback since this is in general the best working model
-  ENSEMBLE_WEIGHTS[["ALL"]] <- list(SVM = 1, XGB = 0, NN = 0)
+  # DNN as main fallback (best overall performer)
+  ENSEMBLE_WEIGHTS[["ALL"]] <- list(SVM = 0, XGB = 0, NN = 1)
 
   return(ENSEMBLE_WEIGHTS)
 }
@@ -921,11 +921,14 @@ evaluate_single_cutoff <- function(cutoff, max_probs, truth, preds, model_name, 
 #' @param fold_name Name of the fold being analyzed
 #' @param model_name Name of the model being analyzed
 #' @param type Type of analysis ("cv" or "loso")
-#' @param cutoff_step Step size for probability cutoffs (default: 0.05 for stability)
+#' @param cutoff_step Step size for probability cutoffs
 #' @return Data frame with rejection analysis results
-evaluate_single_matrix_with_rejection_vectorized <- function(prob_matrix, fold_name, model_name, type, cutoff_step = 0.05) {
-  # Non-probability columns to exclude (including optional Platt-calibrated confidence)
-  meta_cols <- c("y", "inner_fold", "outer_fold", "indices", "study", "confidence_calibrated")
+evaluate_single_matrix_with_rejection_vectorized <- function(prob_matrix, fold_name, model_name, type, cutoff_step = 0.01) {
+  # Non-probability columns to exclude (sample_indices would otherwise be used as "prob" and break rejection)
+  meta_cols <- c("y", "inner_fold", "outer_fold", "indices", "study", "sample_indices",
+                 "confidence_calibrated", "confidence_multivariate",
+                 "is_leftout", "n_models_agree", "mean_js_convergence",
+                 "top1_prob_variance_across_models")
   prob_matrix_clean <- prob_matrix[, !colnames(prob_matrix) %in% meta_cols, drop = FALSE]
 
   # Extract true labels
@@ -1038,7 +1041,7 @@ evaluate_single_matrix_with_rejection_vectorized <- function(prob_matrix, fold_n
 #' @param type Type of analysis ("cv" or "loso")
 #' @param cutoff_step Step size for probability cutoffs (default: 0.05)
 #' @return Data frame with rejection analysis results
-evaluate_single_matrix_with_rejection_parallel <- function(prob_matrix, fold_name, model_name, type, cutoff_step = 0.05) {
+evaluate_single_matrix_with_rejection_parallel <- function(prob_matrix, fold_name, model_name, type, cutoff_step = 0.01) {
   # Use the faster vectorized implementation
   evaluate_single_matrix_with_rejection_vectorized(prob_matrix, fold_name, model_name, type, cutoff_step)
 }
@@ -1584,7 +1587,10 @@ perform_ovr_ensemble_analysis_unified <- function(results, weights, type = "cv",
 #' @param prob_matrix Data frame with class prob columns and "y" (true label)
 #' @return List with max_prob numeric vector and correct integer vector (0/1)
 get_max_prob_and_correct_from_matrix <- function(prob_matrix) {
-  meta_cols <- c("y", "inner_fold", "outer_fold", "indices", "study", "sample_indices", "confidence_calibrated")
+  meta_cols <- c("y", "inner_fold", "outer_fold", "indices", "study", "sample_indices",
+                 "confidence_calibrated", "confidence_multivariate",
+                 "is_leftout", "n_models_agree", "mean_js_convergence",
+                 "top1_prob_variance_across_models")
   prob_cols <- colnames(prob_matrix)[!colnames(prob_matrix) %in% meta_cols]
   prob_mat <- as.matrix(prob_matrix[, prob_cols, drop = FALSE])
   pred_indices <- max.col(prob_mat, ties.method = "first")
@@ -1627,6 +1633,126 @@ apply_platt_to_target_from_pool <- function(pool_matrices, target_matrix) {
   target_matrix
 }
 
+
+#' Extract rich rejection features from a probability matrix (for multivariate calibration).
+#' Returns max_prob, margin (top1 - top2), entropy, model top-1 variance, predicted class, and correctness.
+#' @param prob_matrix Data frame with class prob columns and "y" (true label)
+#' @return Data frame with one row per sample: max_prob, margin, entropy, top1_prob_variance_across_models, pred_class, correct
+get_rejection_features_from_matrix <- function(prob_matrix) {
+  meta_cols <- c("y", "inner_fold", "outer_fold", "indices", "study",
+                 "sample_indices", "confidence_calibrated", "confidence_multivariate",
+                 "is_leftout", "n_models_agree", "mean_js_convergence",
+                 "top1_prob_variance_across_models")
+  prob_cols <- colnames(prob_matrix)[!colnames(prob_matrix) %in% meta_cols]
+  prob_mat <- as.matrix(prob_matrix[, prob_cols, drop = FALSE])
+  n <- nrow(prob_mat)
+
+  # Top-1 prediction
+  pred_indices <- max.col(prob_mat, ties.method = "first")
+  max_prob <- prob_mat[cbind(seq_len(n), pred_indices)]
+  pred_class <- gsub("Class\\. ", "", prob_cols[pred_indices])
+
+  # Top-2 for margin: set top-1 to -Inf and find next max
+  prob_mat_mod <- prob_mat
+  prob_mat_mod[cbind(seq_len(n), pred_indices)] <- -Inf
+  second_prob <- prob_mat_mod[cbind(seq_len(n), max.col(prob_mat_mod, ties.method = "first"))]
+  margin <- max_prob - second_prob
+
+  # Normalized entropy captures distributional uncertainty beyond top-1/top-2.
+  prob_clipped <- pmax(prob_mat, 1e-12)
+  n_classes <- ncol(prob_clipped)
+  if (n_classes > 1) {
+    entropy <- -rowSums(prob_clipped * log(prob_clipped)) / log(n_classes)
+    entropy <- pmin(1, pmax(0, entropy))
+  } else {
+    entropy <- rep(0, nrow(prob_clipped))
+  }
+
+  # Ensemble disagreement feature from upstream alignment step.
+  # If absent (non-ensemble path), keep as NA and formula builder will skip it.
+  top1_prob_variance_across_models <- if ("top1_prob_variance_across_models" %in% colnames(prob_matrix)) {
+    as.numeric(prob_matrix$top1_prob_variance_across_models)
+  } else {
+    rep(NA_real_, n)
+  }
+
+  # Correctness
+  truth <- gsub("Class\\. ", "", prob_matrix$y)
+  correct <- as.integer(truth == pred_class)
+
+  data.frame(
+    max_prob = max_prob,
+    margin = margin,
+    entropy = entropy,
+    top1_prob_variance_across_models = top1_prob_variance_across_models,
+    pred_class = pred_class,
+    correct = correct,
+    stringsAsFactors = FALSE
+  )
+}
+
+
+#' Fit multivariate Platt calibration on pool and apply to target (ensemble only).
+#' Uses max_prob + margin + entropy + n_models_agree + top1_prob_variance_across_models as features.
+#' Falls back to univariate if multivariate fit fails.
+#' @param pool_matrices List of probability matrices to pool for fitting
+#' @param target_matrix Single matrix to calibrate
+#' @return Target matrix with confidence_multivariate column added
+apply_multivariate_platt_to_target_from_pool <- function(pool_matrices, target_matrix) {
+  # Pool features from all pool matrices
+  pool_features <- list()
+  for (m in pool_matrices) {
+    if (is.null(m) || nrow(m) == 0) next
+    feats <- get_rejection_features_from_matrix(m)
+    # Add disagreement features if present on the matrix
+    if ("n_models_agree" %in% colnames(m)) {
+      feats$n_models_agree <- m$n_models_agree
+    }
+    pool_features[[length(pool_features) + 1]] <- feats
+  }
+
+  if (length(pool_features) == 0) return(target_matrix)
+  pool_df <- do.call(rbind, pool_features)
+
+  if (nrow(pool_df) < 10L || length(unique(pool_df$correct)) < 2L) {
+    return(target_matrix)
+  }
+
+  # Build formula from whichever engineered features are available and finite.
+  candidate_terms <- c("max_prob", "margin", "entropy", "n_models_agree", "top1_prob_variance_across_models")
+  usable_terms <- candidate_terms[sapply(candidate_terms, function(v) {
+    v %in% colnames(pool_df) && any(is.finite(pool_df[[v]]))
+  })]
+  formula <- stats::as.formula(paste("correct ~", paste(usable_terms, collapse = " + ")))
+
+  fit <- tryCatch(
+    stats::glm(formula, data = pool_df, family = stats::binomial),
+    error = function(e) NULL
+  )
+
+  # Fallback to simpler model if multivariate fails
+  if (is.null(fit)) {
+    fit <- tryCatch(
+      stats::glm(correct ~ max_prob, data = pool_df, family = stats::binomial),
+      error = function(e) NULL
+    )
+  }
+  if (is.null(fit)) return(target_matrix)
+
+  # Extract features for target
+  target_feats <- get_rejection_features_from_matrix(target_matrix)
+
+  calibrated <- tryCatch(
+    as.numeric(stats::predict(fit, newdata = target_feats, type = "response")),
+    error = function(e) NULL
+  )
+  if (is.null(calibrated)) return(target_matrix)
+
+  target_matrix$confidence_multivariate <- calibrated
+  target_matrix
+}
+
+
 #' Add Platt-calibrated confidence to each inner-fold matrix using other folds as pool
 #' @param inner_fold_matrices Named list of probability matrices (one per inner fold)
 #' @return List of matrices with confidence_calibrated column added where possible
@@ -1641,6 +1767,46 @@ apply_platt_to_inner_fold_matrices <- function(inner_fold_matrices) {
     result[[fold_names[k]]] <- apply_platt_to_target_from_pool(others, target)
   }
   result
+}
+
+#' Resample rows (with replacement) of each matrix in nested probability/ensemble structure.
+#' Used for bootstrap CI on risk-coverage curve. Returns a deep copy with resampled matrices.
+#' @param probability_matrices Nested list: [[model]][[type]][[outer_fold]][[inner_fold]] = matrix
+#' @param ensemble_matrices List with global_optimized_ensemble_matrices: [[outer_fold]][[inner_fold]] = matrix
+#' @param type Analysis type ("cv" or "loso")
+#' @param seed Random seed for resampling (set before calling for reproducibility)
+#' @return List with probability_matrices_resampled and ensemble_matrices_resampled (new copies)
+resample_rejection_matrices <- function(probability_matrices, ensemble_matrices, type, seed) {
+  set.seed(seed)
+  resample_df <- function(m) {
+    if (!is.data.frame(m) && !is.matrix(m)) return(m)
+    n <- nrow(m)
+    if (n == 0) return(m)
+    idx <- sample.int(n, n, replace = TRUE)
+    m[idx, , drop = FALSE]
+  }
+  # Deep copy and resample probability matrices
+  out_prob <- list()
+  for (model_name in names(probability_matrices)) {
+    if (!type %in% names(probability_matrices[[model_name]])) next
+    out_prob[[model_name]] <- list()
+    out_prob[[model_name]][[type]] <- list()
+    for (outer_fold_name in names(probability_matrices[[model_name]][[type]])) {
+      inner_list <- probability_matrices[[model_name]][[type]][[outer_fold_name]]
+      out_prob[[model_name]][[type]][[outer_fold_name]] <- lapply(inner_list, resample_df)
+    }
+  }
+  # Deep copy and resample ensemble matrices
+  out_ens <- list(global_optimized_ensemble_matrices = NULL)
+  ens_outer <- ensemble_matrices$global_optimized_ensemble_matrices
+  if (!is.null(ens_outer)) {
+    out_ens$global_optimized_ensemble_matrices <- list()
+    for (outer_fold_name in names(ens_outer)) {
+      inner_list <- ens_outer[[outer_fold_name]]
+      out_ens$global_optimized_ensemble_matrices[[outer_fold_name]] <- lapply(inner_list, resample_df)
+    }
+  }
+  list(probability_matrices = out_prob, ensemble_matrices = out_ens)
 }
 
 #' Add confidence_calibrated to all probability and ensemble matrices (in place) when has_inner_folds
@@ -1678,18 +1844,20 @@ apply_platt_to_all_rejection_matrices <- function(probability_matrices, ensemble
 #' @param ensemble_matrices List of ensemble probability matrices
 #' @param type Type of analysis ("cv" or "loso")
 #' @param has_inner_folds Whether data has inner fold nesting
+#' @param apply_platt Whether to apply Platt scaling (set FALSE when matrices are already calibrated, e.g. bootstrap)
 #' @return Data frame with rejection analysis results for all models and ensembles
-evaluate_all_matrices_with_rejection_unified <- function(probability_matrices, ensemble_matrices, type = "cv", has_inner_folds = TRUE) {
-  cat(sprintf("Performing rejection analysis (%s)...\n", ifelse(has_inner_folds, "with inner folds", "train/test")))
-
-  # Out-of-sample Platt calibration for confidence (inner folds only)
-  if (has_inner_folds) {
-    cat("  Applying Platt scaling for confidence (out-of-sample per inner fold)...\n")
-    apply_platt_to_all_rejection_matrices(probability_matrices, ensemble_matrices, type, has_inner_folds)
+evaluate_all_matrices_with_rejection_unified <- function(probability_matrices, ensemble_matrices, type = "cv", has_inner_folds = TRUE, apply_platt = TRUE) {
+  if (apply_platt) {
+    cat(sprintf("Performing rejection analysis (%s)...\n", ifelse(has_inner_folds, "with inner folds", "train/test")))
+    if (has_inner_folds) {
+      cat("  Applying Platt scaling for confidence (out-of-sample per inner fold)...\n")
+      apply_platt_to_all_rejection_matrices(probability_matrices, ensemble_matrices, type, has_inner_folds)
+    }
   }
 
   # Build list of all tasks to process
   tasks <- list()
+  task_keys <- character(0)  # Track (model, fold) to detect duplicates
 
   # Collect individual model tasks
   for (model_name in names(probability_matrices)) {
@@ -1702,25 +1870,48 @@ evaluate_all_matrices_with_rejection_unified <- function(probability_matrices, e
           for (inner_fold_name in names(inner_fold_matrices)) {
             prob_matrix <- inner_fold_matrices[[inner_fold_name]]
             if (!is.null(prob_matrix) && nrow(prob_matrix) > 0) {
-              tasks[[length(tasks) + 1]] <- list(
-                prob_matrix = prob_matrix,
-                fold_name = paste(outer_fold_name, inner_fold_name, sep = "_"),
-                model_name = model_name,
-                outer_fold = outer_fold_name,
-                inner_fold = inner_fold_name
-              )
+              fold_name <- paste(outer_fold_name, inner_fold_name, sep = "_")
+              key <- paste(model_name, fold_name, sep = "||")
+              if (key %in% task_keys) {
+                warning(sprintf(
+                  "Duplicate task skipped: model=%s, fold=%s (has_inner_folds=TRUE)",
+                  model_name, fold_name
+                ))
+              } else {
+                task_keys <- c(task_keys, key)
+                tasks[[length(tasks) + 1]] <- list(
+                  prob_matrix = prob_matrix,
+                  fold_name = fold_name,
+                  model_name = model_name,
+                  outer_fold = outer_fold_name,
+                  inner_fold = inner_fold_name
+                )
+              }
             }
           }
         } else {
           prob_matrix <- outer_fold_matrices[[outer_fold_name]]
-          if (!is.null(prob_matrix) && nrow(prob_matrix) > 0) {
-            tasks[[length(tasks) + 1]] <- list(
-              prob_matrix = prob_matrix,
-              fold_name = outer_fold_name,
-              model_name = model_name,
-              outer_fold = outer_fold_name,
-              inner_fold = NA
-            )
+          # Only add if prob_matrix is a single matrix/data frame (not a nested list)
+          is_valid <- !is.null(prob_matrix) &&
+            (is.data.frame(prob_matrix) || is.matrix(prob_matrix)) &&
+            nrow(prob_matrix) > 0
+          if (is_valid) {
+            key <- paste(model_name, outer_fold_name, sep = "||")
+            if (key %in% task_keys) {
+              warning(sprintf(
+                "Duplicate task skipped: model=%s, fold=%s (has_inner_folds=FALSE)",
+                model_name, outer_fold_name
+              ))
+            } else {
+              task_keys <- c(task_keys, key)
+              tasks[[length(tasks) + 1]] <- list(
+                prob_matrix = prob_matrix,
+                fold_name = outer_fold_name,
+                model_name = model_name,
+                outer_fold = outer_fold_name,
+                inner_fold = NA
+              )
+            }
           }
         }
       }
@@ -1738,25 +1929,44 @@ evaluate_all_matrices_with_rejection_unified <- function(probability_matrices, e
         for (inner_fold_name in names(inner_fold_matrices)) {
           prob_matrix <- inner_fold_matrices[[inner_fold_name]]
           if (!is.null(prob_matrix) && nrow(prob_matrix) > 0) {
-            tasks[[length(tasks) + 1]] <- list(
-              prob_matrix = prob_matrix,
-              fold_name = paste(outer_fold_name, inner_fold_name, sep = "_"),
-              model_name = ensemble_name,
-              outer_fold = outer_fold_name,
-              inner_fold = inner_fold_name
-            )
+            fold_name <- paste(outer_fold_name, inner_fold_name, sep = "_")
+            key <- paste(ensemble_name, fold_name, sep = "||")
+            if (key %in% task_keys) {
+              warning(sprintf(
+                "Duplicate ensemble task skipped: model=%s, fold=%s",
+                ensemble_name, fold_name
+              ))
+            } else {
+              task_keys <- c(task_keys, key)
+              tasks[[length(tasks) + 1]] <- list(
+                prob_matrix = prob_matrix,
+                fold_name = fold_name,
+                model_name = ensemble_name,
+                outer_fold = outer_fold_name,
+                inner_fold = inner_fold_name
+              )
+            }
           }
         }
       } else {
         prob_matrix <- ensemble_outer_fold_matrices[[outer_fold_name]]
         if (!is.null(prob_matrix) && nrow(prob_matrix) > 0) {
-          tasks[[length(tasks) + 1]] <- list(
-            prob_matrix = prob_matrix,
-            fold_name = outer_fold_name,
-            model_name = ensemble_name,
-            outer_fold = outer_fold_name,
-            inner_fold = NA
-          )
+          key <- paste(ensemble_name, outer_fold_name, sep = "||")
+          if (key %in% task_keys) {
+            warning(sprintf(
+              "Duplicate ensemble task skipped: model=%s, fold=%s",
+              ensemble_name, outer_fold_name
+            ))
+          } else {
+            task_keys <- c(task_keys, key)
+            tasks[[length(tasks) + 1]] <- list(
+              prob_matrix = prob_matrix,
+              fold_name = outer_fold_name,
+              model_name = ensemble_name,
+              outer_fold = outer_fold_name,
+              inner_fold = NA
+            )
+          }
         }
       }
     }
@@ -1794,7 +2004,7 @@ evaluate_all_matrices_with_rejection_unified <- function(probability_matrices, e
 ##' @param non_prob_cols Vector of column names that are not probability columns (e.g., "y", "outer_fold", etc.).
 ##' @param merge_prob_method "max" = max probability per row among merged classes; "sum" = sum probabilities (then renormalized).
 ##' @return Modified probability matrix with merged classes.
-merge_probability_matrix_classes <- function(prob_matrix, non_prob_cols = c("y", "inner_fold", "outer_fold", "indices", "study", "sample_indices"), merge_prob_method = c("max", "sum")) {
+merge_probability_matrix_classes <- function(prob_matrix, non_prob_cols = c("y", "inner_fold", "outer_fold", "indices", "study", "sample_indices", "confidence_calibrated", "confidence_multivariate", "is_leftout", "n_models_agree", "mean_js_convergence", "top1_prob_variance_across_models"), merge_prob_method = c("max", "sum")) {
   merge_prob_method <- match.arg(merge_prob_method)
   method_label <- if (merge_prob_method == "max") "max prob" else "summed"
   # Get all column names
@@ -1910,7 +2120,7 @@ merge_true_labels <- function(true_labels) {
 #' @param non_prob_cols Vector of column names that are not probability columns
 #' @param merge_prob_method "max" or "sum" for merging probabilities (see merge_probability_matrix_classes).
 #' @return Modified probability matrix with merged classes and updated true labels
-merge_classes_in_matrix <- function(prob_matrix, non_prob_cols = c("y", "inner_fold", "outer_fold", "indices", "study", "sample_indices"), merge_prob_method = c("max", "sum")) {
+merge_classes_in_matrix <- function(prob_matrix, non_prob_cols = c("y", "inner_fold", "outer_fold", "indices", "study", "sample_indices", "confidence_calibrated", "confidence_multivariate", "is_leftout", "n_models_agree", "mean_js_convergence", "top1_prob_variance_across_models"), merge_prob_method = c("max", "sum")) {
   merge_prob_method <- match.arg(merge_prob_method)
   # Merge probability matrix classes
   merged_matrix <- merge_probability_matrix_classes(prob_matrix, non_prob_cols, merge_prob_method)

@@ -900,168 +900,14 @@ main_inner_cv <- function(merge_classes = FALSE, merge_prob_method = c("max", "s
     performance_comparisons
   }
 
-  #' Evaluate nested CV kappa with rejection for a single probability matrix (parallelized cutoffs)
-  #' @param prob_matrix Probability matrix with class probabilities and true labels
-  #' @param fold_name Name of the fold being analyzed
-  #' @param model_name Name of the model being analyzed
-  #' @param type Type of analysis ("cv" or "loso")
-  #' @return Data frame with rejection analysis results
-  evaluate_single_matrix_with_rejection <- function(prob_matrix, fold_name, model_name, type) {
-    # Use the parallelized version from utility_functions.R
-    evaluate_single_matrix_with_rejection_parallel(prob_matrix, fold_name, model_name, type)
-  }
-
-  #' Evaluate rejection analysis for all probability matrices (parallelized)
-  #' Uses the unified function from utility_functions.R
-  evaluate_all_matrices_with_rejection <- function(probability_matrices, ensemble_matrices, type = "cv") {
-    evaluate_all_matrices_with_rejection_unified(probability_matrices, ensemble_matrices, type, has_inner_folds = TRUE)
-  }
-
-  #' Find optimal probability cutoff for each model/ensemble per outer fold
-  #' @param rejection_results Data frame with rejection analysis results
-  #' @param optimization_metric Metric to optimize ("kappa" or "accuracy")
-  #' @return List with optimal cutoffs per outer fold and summary statistics
-  find_optimal_cutoffs <- function(rejection_results, optimization_metric = "kappa") {
-    cat("Finding optimal probability cutoffs per outer fold...\n")
-
-    # optimal_cutoffs_per_inner_fold <- rejection_results %>%
-    #   filter( (is.na(rejected_accuracy) | rejected_accuracy < 0.5) & (perc_rejected < 0.05) ) %>% mutate(rejected_accuracy_mod = ifelse(is.na(rejected_accuracy), 0, rejected_accuracy)) %>%
-    #   group_by(model, outer_fold, inner_fold) %>% slice_max(kappa) %>% slice_min(rejected_accuracy_mod, with_ties = F) %>% ungroup()
-
-
-    optimal_cutoffs_per_outer_fold <- rejection_results %>%
-      mutate(rejected_accuracy_mod = ifelse(is.na(rejected_accuracy), 0, rejected_accuracy)) %>%
-      group_by(model, outer_fold, prob_cutoff) %>%
-      summarise(
-        mean_cutoff = mean(prob_cutoff, na.rm = TRUE),
-        sd_cutoff = sd(prob_cutoff, na.rm = TRUE),
-        mean_kappa = mean(kappa, na.rm = TRUE),
-        sd_kappa = sd(kappa, na.rm = TRUE),
-        mean_accuracy = mean(accuracy, na.rm = TRUE),
-        sd_accuracy = sd(accuracy, na.rm = TRUE),
-        mean_rejected_accuracy = mean(rejected_accuracy_mod, na.rm = TRUE),
-        sd_rejected_accuracy = sd(rejected_accuracy_mod, na.rm = TRUE),
-        mean_perc_rejected = mean(perc_rejected, na.rm = TRUE),
-        sd_perc_rejected = sd(perc_rejected, na.rm = TRUE),
-        n_outer_folds = n(),
-        .groups = "drop"
-      ) %>%
-      # apply filters on the averages
-      filter(mean_rejected_accuracy < 0.5, mean_perc_rejected < 0.05) %>%
-      group_by(model, outer_fold) %>%
-      slice_max(mean_kappa) %>%
-      slice_min(mean_perc_rejected, with_ties = FALSE) %>%
-      slice_min(mean_rejected_accuracy, with_ties = FALSE) %>%
-      ungroup()
-
-    # optimal_cutoffs_per_outer_fold <- optimal_cutoffs_per_inner_fold %>%
-    # group_by(model, outer_fold)  %>%
-    #   summarise(
-    #     mean_cutoff = mean(prob_cutoff, na.rm = TRUE),
-    #     sd_cutoff = sd(prob_cutoff, na.rm = TRUE),
-    #     mean_kappa = mean(kappa, na.rm = TRUE),
-    #     sd_kappa = sd(kappa, na.rm = TRUE),
-    #     mean_accuracy = mean(accuracy, na.rm = TRUE),
-    #     sd_accuracy = sd(accuracy, na.rm = TRUE),
-    #     mean_perc_rejected = mean(perc_rejected, na.rm = TRUE),
-    #     sd_perc_rejected = sd(perc_rejected, na.rm = TRUE),
-    #     n_outer_folds = n(),
-    #     .groups = "drop"
-    #   )
-
-    # Calculate summary statistics across outer folds for each model
-    summary_stats <- optimal_cutoffs_per_outer_fold %>%
-      group_by(model) %>%
-      summarise(
-        mean_cutoff = mean(mean_cutoff, na.rm = TRUE),
-        sd_cutoff = sd(sd_cutoff, na.rm = TRUE),
-        mean_kappa = mean(mean_kappa, na.rm = TRUE),
-        sd_kappa = sd(sd_kappa, na.rm = TRUE),
-        mean_accuracy = mean(mean_accuracy, na.rm = TRUE),
-        sd_accuracy = sd(sd_accuracy, na.rm = TRUE),
-        mean_rejected_accuracy = mean(mean_rejected_accuracy, na.rm = TRUE),
-        sd_rejected_accuracy = sd(sd_rejected_accuracy, na.rm = TRUE),
-        mean_perc_rejected = mean(mean_perc_rejected, na.rm = TRUE),
-        sd_perc_rejected = sd(sd_perc_rejected, na.rm = TRUE),
-        .groups = "drop"
-      ) %>%
-      arrange(desc(mean_kappa))
-
-    return(list(
-      optimal_cutoffs_per_outer_fold = optimal_cutoffs_per_outer_fold,
-      summary_stats = summary_stats
-    ))
-  }
-
-  #' Run complete rejection analysis for both CV and LOSO
-  #' @param probability_matrices Probability matrices for all models
-  #' @param ensemble_results Ensemble analysis results
-  #' @param output_base_dir Base directory for output files
-  #' @return List of rejection analysis results
-  run_complete_rejection_analysis <- function(probability_matrices, ensemble_results) {
-    cat("Running complete rejection analysis...\n")
-
-    rejection_results <- list()
-
-    for (analysis_type in c("cv", "loso")) {
-      cat(sprintf("\n=== Running rejection analysis for %s ===\n", toupper(analysis_type)))
-
-      # Check if we have data for this analysis type
-      if (!analysis_type %in% names(ensemble_results)) {
-        cat(sprintf("Skipping %s rejection analysis - missing ensemble results\n", toupper(analysis_type)))
-        next
-      }
-
-      # Extract ensemble matrices for this analysis type (Global only)
-      ensemble_matrices <- list(
-        global_optimized_ensemble_matrices = ensemble_results[[analysis_type]]$global_optimized_ensemble_matrices$matrices
-      )
-
-      # Perform rejection analysis
-      rejection_results[[analysis_type]][["all_results"]] <- evaluate_all_matrices_with_rejection(
-        probability_matrices, ensemble_matrices, analysis_type
-      )
-
-      # Find optimal cutoffs
-      rejection_results[[analysis_type]][["optimal_results"]] <- find_optimal_cutoffs(rejection_results[[analysis_type]][["all_results"]], "kappa")
-
-    }
-
-    return(rejection_results)
-  }
-
-  compare_all_results <- function(type, inner_cv_results){
-    # Extract performance without rejection
-    df_no_rejection <- inner_cv_results[["performance_comparisons"]][[type]] %>%
-      as_tibble() %>%
-      rename(model = Method,
-             mean_kappa = Mean_Kappa) %>%
-      select(model, mean_kappa) %>%
-      mutate(model = str_to_lower(model))
-
-    # Extract performance with rejection
-    df_rejection <- inner_cv_results[["rejection_results"]][[type]][["optimal_results"]][["summary_stats"]] %>%
-      select(model, mean_kappa_with_rejection = mean_kappa, mean_perc_rejected) %>%
-      mutate(model = str_to_lower(model))
-
-    # Combine
-    combined_df <- df_no_rejection %>%
-      left_join(df_rejection, by = "model")
-
-    return(combined_df)
-  }
-
-  combine_all_results <- function(inner_cv_results){
-    combined_results <- list()
-    for (type in c("cv", "loso")){
-      combined_results[[type]] <- compare_all_results(type, inner_cv_results)
-    }
-    return(combined_results)
-  }
+  # NOTE: Rejection/cutoff analysis has been moved to outer_cv_analysis.r
+  # using a leave-one-fold-out approach on outer CV test predictions.
+  # Inner CV now focuses on hyperparameter selection and ensemble weight optimization.
 
   load_library_quietly("plyr")
   load_library_quietly("dplyr")
   load_library_quietly("stringr")
+  load_library_quietly("ggplot2")
 
   # Filters
   DATA_FILTERS <- list(
@@ -1231,47 +1077,6 @@ main_inner_cv <- function(merge_classes = FALSE, merge_prob_method = c("max", "s
     list(probability_matrices = probability_matrices, cv = ensemble_results$cv, loso = ensemble_results$loso)
   )
 
-  # Run rejection analysis
-  rejection_results <- run_complete_rejection_analysis(
-    probability_matrices, ensemble_results
-  )
-
-  # Extract the optimal cutoffs dataframes
-  cv_cutoffs <- NULL
-  loso_cutoffs <- NULL
-
-  if ("cv" %in% names(rejection_results) && "optimal_results" %in% names(rejection_results[["cv"]])) {
-    cv_cutoffs <- rejection_results[["cv"]][["optimal_results"]][["optimal_cutoffs_per_outer_fold"]]
-    if (!is.null(cv_cutoffs)) {
-      cv_cutoffs$source <- "cv"
-    }
-  }
-
-  if ("loso" %in% names(rejection_results) && "optimal_results" %in% names(rejection_results[["loso"]])) {
-    loso_cutoffs <- rejection_results[["loso"]][["optimal_results"]][["optimal_cutoffs_per_outer_fold"]]
-    if (!is.null(loso_cutoffs)) {
-      loso_cutoffs$source <- "loso"
-    }
-  }
-
-  cutoff_dir <- paste0("../data/out/inner_cv/cutoffs", merge_suffix)
-  dir.create(cutoff_dir, recursive = TRUE)
-
-  # Bind the dataframes together if they exist
-  combined_cutoffs <- data.frame()
-  if (!is.null(cv_cutoffs)) {
-    combined_cutoffs <- rbind(combined_cutoffs, cv_cutoffs)
-  }
-  if (!is.null(loso_cutoffs)) {
-    combined_cutoffs <- rbind(combined_cutoffs, loso_cutoffs)
-  }
-
-  if (nrow(combined_cutoffs) > 0) {
-    write.csv(combined_cutoffs, file.path(cutoff_dir, "cutoffs.csv"), row.names = FALSE)
-  } else {
-    cat("Warning: No optimal cutoffs found to save\n")
-  }
-
   # Print summary of filtering statistics
   cat("\n=== Inner CV Sample Filtering Summary ===\n")
   if (length(filtering_statistics) > 0) {
@@ -1304,15 +1109,12 @@ main_inner_cv <- function(merge_classes = FALSE, merge_prob_method = c("max", "s
     probability_matrices = probability_matrices,
     filtering_statistics = filtering_statistics,
     ensemble_results = ensemble_results,
-    performance_comparisons = performance_comparisons,
-    optimal_cutoffs = combined_cutoffs,
-    rejection_results = rejection_results
+    performance_comparisons = performance_comparisons
   )
 
-  inner_cv_results$final_results = combine_all_results(inner_cv_results)
   inner_cv_results$merge_classes <- merge_classes
   inner_cv_results$merge_prob_method <- merge_prob_method
-  print(inner_cv_results$final_results)
+  print(inner_cv_results$performance_comparisons)
   saveRDS(inner_cv_results, paste0("../data/out/inner_cv/inner_cv_results_10feb2026_eta2", merge_suffix, ".rds"))
 
   # Save filtering statistics to CSV for easy inspection
@@ -1332,7 +1134,7 @@ main_inner_cv <- function(merge_classes = FALSE, merge_prob_method = c("max", "s
   return(inner_cv_results)
 }
 
-# Run unmerged, merged (max), and merged (summed) for comparison
+# Run unmerged, and merged (summed) for comparison
 #cat("=== Running Inner CV Analysis (Unmerged) ===\n")
 inner_cv_results_unmerged <- main_inner_cv(merge_classes = FALSE)
 

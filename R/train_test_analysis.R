@@ -570,8 +570,11 @@ main_train_test_analysis <- function(merge_classes = FALSE){
   #' Find optimal probability cutoff for each model/ensemble per outer fold (train/test version)
   #' @param rejection_results Data frame with rejection analysis results
   #' @param optimization_metric Metric to optimize ("kappa" or "accuracy")
+  #' @param target_risk Maximum acceptable error rate on accepted samples (e.g. 0.05 for 5%)
   #' @return List with optimal cutoffs per outer fold and summary statistics
-  find_optimal_cutoffs_train_test <- function(rejection_results, optimization_metric = "kappa") {
+  find_optimal_cutoffs_train_test <- function(rejection_results,
+                                              optimization_metric = "kappa",
+                                              target_risk = 0.02) {
     cat("Finding optimal probability cutoffs per outer fold (train/test)...\n")
 
     # optimal_cutoffs_per_outer_fold <- rejection_results %>%
@@ -582,7 +585,8 @@ main_train_test_analysis <- function(merge_classes = FALSE){
     #   slice_min(rejected_accuracy_mod, with_ties = F) %>%
     #   ungroup()
 
-    optimal_cutoffs_per_outer_fold <- rejection_results %>%
+    # Aggregate metrics per model / cutoff to get risk–coverage curve
+    summarised <- rejection_results %>%
       mutate(rejected_accuracy_mod = ifelse(is.na(rejected_accuracy), 0, rejected_accuracy)) %>%
       group_by(model, prob_cutoff) %>%
       summarise(
@@ -597,39 +601,62 @@ main_train_test_analysis <- function(merge_classes = FALSE){
         mean_perc_rejected = mean(perc_rejected, na.rm = TRUE),
         sd_perc_rejected = sd(perc_rejected, na.rm = TRUE),
         n_outer_folds = n(),
+        mean_risk = 1 - mean_accuracy,
+        mean_coverage = 1 - mean_perc_rejected,
         .groups = "drop"
-      ) %>%
-      # apply filters on the averages
-      filter(mean_rejected_accuracy < 0.5, mean_perc_rejected < 0.05) %>%
+      )
+
+    # Select operating cutoff per model: mean_risk <= target_risk, then maximise mean_coverage
+    optimal_cutoffs_per_outer_fold <- summarised %>%
       group_by(model) %>%
-      slice_max(mean_kappa) %>%
-      slice_min(mean_rejected_accuracy, with_ties = FALSE) %>%
+      arrange(mean_risk, desc(mean_coverage), desc(mean_kappa)) %>%
+      group_modify(~{
+        df <- .x
+        meets <- df$mean_risk <= target_risk
+        if (any(meets)) {
+          df_ok <- df[meets, , drop = FALSE]
+          best_cov <- max(df_ok$mean_coverage, na.rm = TRUE)
+          df_ok <- df_ok[df_ok$mean_coverage == best_cov, , drop = FALSE]
+          best_kappa <- max(df_ok$mean_kappa, na.rm = TRUE)
+          df_ok <- df_ok[df_ok$mean_kappa == best_kappa, , drop = FALSE]
+          df_ok[1, , drop = FALSE]
+        } else {
+          best_risk <- min(df$mean_risk, na.rm = TRUE)
+          df_r <- df[df$mean_risk == best_risk, , drop = FALSE]
+          best_cov <- max(df_r$mean_coverage, na.rm = TRUE)
+          df_r <- df_r[df_r$mean_coverage == best_cov, , drop = FALSE]
+          best_kappa <- max(df_r$mean_kappa, na.rm = TRUE)
+          df_r <- df_r[df_r$mean_kappa == best_kappa, , drop = FALSE]
+          df_r[1, , drop = FALSE]
+        }
+      }) %>%
       ungroup()
 
     summary_stats <- optimal_cutoffs_per_outer_fold %>%
       group_by(model) %>%
+      summarise(
+        mean_cutoff = mean(mean_cutoff, na.rm = TRUE),
+        sd_cutoff = sd(sd_cutoff, na.rm = TRUE),
+        mean_kappa = mean(mean_kappa, na.rm = TRUE),
+        sd_kappa = sd(sd_kappa, na.rm = TRUE),
+        mean_accuracy = mean(mean_accuracy, na.rm = TRUE),
+        sd_accuracy = sd(sd_accuracy, na.rm = TRUE),
+        mean_rejected_accuracy = mean(mean_rejected_accuracy, na.rm = TRUE),
+        sd_rejected_accuracy = sd(mean_rejected_accuracy, na.rm = TRUE),
+        mean_perc_rejected = mean(mean_perc_rejected, na.rm = TRUE),
+        sd_perc_rejected = sd(mean_perc_rejected, na.rm = TRUE),
+        mean_risk = mean(mean_risk, na.rm = TRUE),
+        sd_risk = sd(mean_risk, na.rm = TRUE),
+        mean_coverage = mean(mean_coverage, na.rm = TRUE),
+        sd_coverage = sd(mean_coverage, na.rm = TRUE),
+        .groups = "drop"
+      ) %>%
       arrange(desc(mean_kappa))
-
-    # Calculate summary statistics across outer folds for each model
-    # summary_stats <- optimal_cutoffs_per_outer_fold %>%
-    #   group_by(model) %>%
-    #   summarise(
-    #     mean_cutoff = mean(prob_cutoff, na.rm = TRUE),
-    #     sd_cutoff = sd(prob_cutoff, na.rm = TRUE),
-    #     mean_kappa = mean(kappa, na.rm = TRUE),
-    #     sd_kappa = sd(kappa, na.rm = TRUE),
-    #     mean_accuracy = mean(accuracy, na.rm = TRUE),
-    #     sd_accuracy = sd(accuracy, na.rm = TRUE),
-    #     mean_perc_rejected = mean(perc_rejected, na.rm = TRUE),
-    #     sd_perc_rejected = sd(perc_rejected, na.rm = TRUE),
-    #     n_outer_folds = n(),
-    #     .groups = "drop"
-    #   ) %>%
-    #   arrange(desc(mean_kappa))
 
     return(list(
       optimal_cutoffs_per_outer_fold = optimal_cutoffs_per_outer_fold,
-      summary_stats = summary_stats
+      summary_stats = summary_stats,
+      risk_coverage = summarised
     ))
   }
 
@@ -720,17 +747,17 @@ main_train_test_analysis <- function(merge_classes = FALSE){
   MODEL_CONFIGS <- list(
     svm = list(
       classification_type = "OvR",
-      file_paths = list(cv = "../data/out/final_train_test/SVM_final_selection/final_cv_svm_28jan26/"),
+      file_paths = list(cv = "../data/out/final_train_test/SVM_final_selection/final_cv_svm_28jan26_eta2/"),
       output_dir = "../data/out/final_train_test/best_params/SVM"
     ),
     xgboost = list(
       classification_type = "OvR",
-      file_paths = list(cv = "../data/out/final_train_test/XGBOOST_final_selection/final_cv_xgb_28jan26/"),
+      file_paths = list(cv = "../data/out/final_train_test/XGBOOST_final_selection/final_cv_xgb_28jan26_eta2/"),
       output_dir = "../data/out/final_train_test/best_params/XGBOOST"
     ),
     neural_net = list(
       classification_type = "standard",
-      file_paths = list(cv = "../data/out/final_train_test/NN_final_selection/final_cv_nn_28jan26/"),
+      file_paths = list(cv = "../data/out/final_train_test/NN_final_selection/final_cv_nn_28jan26_eta2/"),
       output_dir = "../data/out/final_train_test/best_params/NN"
     )
   )
@@ -873,13 +900,16 @@ main_train_test_analysis <- function(merge_classes = FALSE){
       global_optimized_ensemble_matrices = ensemble_results[[analysis_type]]$global_optimized_ensemble_matrices$matrices
     )
 
-    # Perform rejection analysis
+    # Perform rejection analysis (full grid of cutoffs)
     rejection_results[[analysis_type]][["all_results"]] <- evaluate_all_matrices_with_rejection_train_test(
       probability_matrices, ensemble_matrices, analysis_type
     )
 
-    # Find optimal cutoffs
-    rejection_results[[analysis_type]][["optimal_results"]] <- find_optimal_cutoffs_train_test(rejection_results[[analysis_type]][["all_results"]], "kappa")
+    # Find optimal cutoffs (risk-based selection; default target_risk = 0.05)
+    rejection_results[[analysis_type]][["optimal_results"]] <- find_optimal_cutoffs_train_test(
+      rejection_results[[analysis_type]][["all_results"]],
+      "kappa"
+    )
   }
 
   # Determine suffix for file paths (maxprob method - uses max probability instead of summing)
@@ -909,9 +939,27 @@ main_train_test_analysis <- function(merge_classes = FALSE){
   }
 
   if (nrow(combined_cutoffs) > 0) {
-    write.csv(combined_cutoffs, file.path(cutoff_dir, paste0("train_test_cutoffs", merge_suffix, ".csv")), row.names = FALSE)
+    write.csv(
+      combined_cutoffs,
+      file.path(cutoff_dir, paste0("train_test_cutoffs", merge_suffix, ".csv")),
+      row.names = FALSE
+    )
   } else {
     cat("Warning: No optimal cutoffs found to save\n")
+  }
+
+  # Save risk–coverage curves aggregated over CV folds (for plotting and deployment)
+  if ("cv" %in% names(rejection_results) &&
+      "optimal_results" %in% names(rejection_results[["cv"]]) &&
+      "risk_coverage" %in% names(rejection_results[["cv"]][["optimal_results"]])) {
+    risk_coverage_df <- rejection_results[["cv"]][["optimal_results"]][["risk_coverage"]]
+    if (!is.null(risk_coverage_df) && nrow(risk_coverage_df) > 0) {
+      write.csv(
+        risk_coverage_df,
+        file.path(cutoff_dir, paste0("risk_coverage_train_test", merge_suffix, ".csv")),
+        row.names = FALSE
+      )
+    }
   }
 
   # Fit and save Platt calibration parameters for deployment (pooled across CV folds)

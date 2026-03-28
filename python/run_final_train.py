@@ -45,6 +45,11 @@ def main():
             'type': str,
             'default': 'data/out/final_models',
             'help': 'Output directory for saving final models'
+        },
+        'fs_method': {
+            'type': str,
+            'default': 'mad',
+            'help': 'Feature selection method: \"mad\" (intersection MVGs, default) or \"eta2\" (eta2_subtype - eta2_study)'
         }
     }
 
@@ -60,6 +65,7 @@ def main():
     print(f"Training final {args.model_type} model with {args.multi_type} strategy using {args.fold_type} best parameters")
     print(f"Best parameters from: {args.best_params_path}")
     print(f"Output directory: {args.output_dir}")
+    print(f"Feature selection method: {args.fs_method}")
     
     # Get the current date and time in string format
     time = datetime.datetime.now().strftime("%Y%m%d_%H%M")
@@ -87,11 +93,22 @@ def main():
         model = classifiers.NeuralNet
     else:
         raise ValueError(f"Model type {args.model_type} not supported")
-
+    
+    # Select feature selection method
+    fs_method = args.fs_method.lower()
+    if fs_method == "eta2":
+        feature_selector = transformers.FeatureSelectionEta()
+        print("Using eta2-based feature selection (eta2_subtype - eta2_study).")
+    elif fs_method == "mad":
+        feature_selector = transformers.FeatureSelection2()
+        print("Using MAD-based intersecting MVG feature selection (default).")
+    else:
+        raise ValueError(f"Unknown fs_method '{args.fs_method}'. Use 'mad' or 'eta2'.")
+    
     # Define the pipeline
     pipe = Pipeline([
         ('DEseq2', transformers.DESeq2RatioNormalizer()),
-        ('feature_selection', transformers.FeatureSelection2()),
+        ('feature_selection', feature_selector),
         ('scaler', StandardScaler())
     ])
     print("Pipeline set up")

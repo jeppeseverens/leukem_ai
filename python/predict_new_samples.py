@@ -444,6 +444,84 @@ def load_cutoffs(cutoffs_path):
     return cutoffs
 
 
+def load_risk_coverage(risk_cov_path):
+    """
+    Load risk–coverage curves (mean risk / coverage per cutoff and model).
+
+    Parameters
+    ----------
+    risk_cov_path : str
+        Path to the risk_coverage_train_test*.csv file.
+
+    Returns
+    -------
+    pd.DataFrame or None
+        Risk–coverage table with columns including: model, prob_cutoff,
+        mean_risk, mean_coverage.
+    """
+    if not os.path.exists(risk_cov_path):
+        print(f"WARNING: Risk–coverage file not found at {risk_cov_path}")
+        return None
+
+    df = pd.read_csv(risk_cov_path)
+    if df.empty:
+        print(f"WARNING: Risk–coverage file {risk_cov_path} is empty")
+        return None
+
+    return df
+
+
+def choose_cutoffs_from_risk(
+    risk_cov_df: pd.DataFrame,
+    max_accepted_risk: float
+) -> dict:
+    """
+    Derive per-model cutoffs from a risk–coverage table for a desired risk.
+
+    Matches R logic: among cutoffs with mean_risk <= max_accepted_risk, choose
+    the one with highest mean_coverage (then highest mean_kappa if present).
+
+    Parameters
+    ----------
+    risk_cov_df : pd.DataFrame
+        Data frame with at least columns: model, prob_cutoff, mean_risk,
+        mean_coverage (e.g. risk_coverage_train_test_*.csv from R).
+    max_accepted_risk : float
+        Maximum accepted error rate on accepted predictions (0–1, e.g. 0.02 for 2%).
+
+    Returns
+    -------
+    dict
+        Mapping from R model name to chosen probability cutoff.
+    """
+    cutoffs = {}
+    if risk_cov_df is None or risk_cov_df.empty:
+        return cutoffs
+
+    for model_name, sub in risk_cov_df.groupby("model"):
+        sub_ok = sub[sub["mean_risk"] <= max_accepted_risk].copy()
+        if not sub_ok.empty:
+            max_cov = sub_ok["mean_coverage"].max()
+            sub_ok = sub_ok[sub_ok["mean_coverage"] == max_cov]
+            if "mean_kappa" in sub_ok.columns:
+                max_kappa = sub_ok["mean_kappa"].max()
+                sub_ok = sub_ok[sub_ok["mean_kappa"] == max_kappa]
+            chosen = sub_ok.iloc[0]
+        else:
+            min_risk = sub["mean_risk"].min()
+            sub_low = sub[sub["mean_risk"] == min_risk].copy()
+            max_cov = sub_low["mean_coverage"].max()
+            sub_low = sub_low[sub_low["mean_coverage"] == max_cov]
+            if "mean_kappa" in sub_low.columns:
+                max_kappa = sub_low["mean_kappa"].max()
+                sub_low = sub_low[sub_low["mean_kappa"] == max_kappa]
+            chosen = sub_low.iloc[0]
+
+        cutoffs[model_name] = float(chosen["prob_cutoff"])
+
+    return cutoffs
+
+
 def load_platt_params(platt_path):
     """
     Load Platt calibration parameters (intercept and slope) per model.
@@ -994,7 +1072,7 @@ def apply_cutoffs(predictions_dict, cutoffs):
         if cutoff_key in cutoffs:
             cutoff_value = cutoffs[cutoff_key]
             df['prediction_passed_cutoff'] = df[score_col] >= cutoff_value
-            print(f"Applied cutoff {cutoff_value:.2f} to {model_name} using {score_col}")
+            print(f"Applied cutoff {cutoff_value:.3f} to {model_name} using {score_col}")
         else:
             print(f"No cutoff found for {model_name}")
             df['prediction_passed_cutoff'] = True  # Default to True if no cutoff
@@ -1128,6 +1206,14 @@ def main():
     parser.add_argument("--weights_dir", default=None, help="Path to final_train_test directory (will look for ensemble_weights_merged_summed and ensemble_weights_unmerged_maxprob subdirs)")
     parser.add_argument("--cutoffs_file", default=None, help="Path to final_train_test directory (will look for cutoffs_merged_summed and cutoffs_unmerged_maxprob subdirs)")
     parser.add_argument("--pipelines_dir", default=None, help="Path to pipelines cache directory")
+    parser.add_argument(
+        "--max_accepted_risk_pct",
+        type=float,
+        default=None,
+        help="Maximum accepted error rate (percentage) on accepted predictions; "
+             "if set, cutoffs will be derived from risk–coverage curves instead "
+             "of using the fixed train/test cutoffs (e.g. 5 for 5%%)."
+    )
     parser.add_argument("--merged_only", action="store_true", help="Only run merged predictions")
     parser.add_argument("--unmerged_only", action="store_true", help="Only run unmerged predictions")
     
@@ -1167,6 +1253,8 @@ def main():
     print(f"Weights base directory: {args.weights_dir}")
     print(f"Cutoffs base directory: {args.cutoffs_file}")
     print(f"Pipelines directory: {pipelines_dir}")
+    if args.max_accepted_risk_pct is not None:
+        print(f"Maximum accepted risk (on accepted predictions): {args.max_accepted_risk_pct:.2f}%")
     
     # Determine which versions to run
     run_merged = not args.unmerged_only
@@ -1200,6 +1288,22 @@ def main():
         print(f"\nLoading unmerged cutoffs from: {cutoffs_file_unmerged}")
         cutoffs_unmerged = load_cutoffs(cutoffs_file_unmerged)
 
+        # Optionally override cutoffs using risk–coverage and desired risk
+        if args.max_accepted_risk_pct is not None:
+            risk_cov_file_unmerged = os.path.join(
+                str(args.cutoffs_file),
+                "cutoffs_unmerged_maxprob",
+                "risk_coverage_train_test_unmerged_maxprob.csv"
+            )
+            print(f"\nLoading unmerged risk–coverage from: {risk_cov_file_unmerged}")
+            risk_cov_unmerged = load_risk_coverage(risk_cov_file_unmerged)
+            if risk_cov_unmerged is not None:
+                max_risk = args.max_accepted_risk_pct / 100.0
+                rc_cutoffs = choose_cutoffs_from_risk(risk_cov_unmerged, max_risk)
+                if rc_cutoffs:
+                    print("Using risk-based cutoffs (unmerged) derived from train/test curves")
+                    cutoffs_unmerged = rc_cutoffs
+
         # Load unmerged Platt parameters (matches R: platt_params_unmerged_maxprob)
         platt_file_unmerged = os.path.join(str(args.cutoffs_file), "platt_params_unmerged_maxprob", "platt_params_unmerged_maxprob.csv")
         print(f"\nLoading unmerged Platt parameters from: {platt_file_unmerged}")
@@ -1230,6 +1334,22 @@ def main():
         cutoffs_file_merged = os.path.join(str(args.cutoffs_file), "cutoffs_merged_summed", "train_test_cutoffs_merged_summed.csv")
         print(f"\nLoading merged cutoffs (summed) from: {cutoffs_file_merged}")
         cutoffs_merged = load_cutoffs(cutoffs_file_merged)
+
+        # Optionally override cutoffs using risk–coverage and desired risk
+        if args.max_accepted_risk_pct is not None:
+            risk_cov_file_merged = os.path.join(
+                str(args.cutoffs_file),
+                "cutoffs_merged_summed",
+                "risk_coverage_train_test_merged_summed.csv"
+            )
+            print(f"\nLoading merged risk–coverage (summed) from: {risk_cov_file_merged}")
+            risk_cov_merged = load_risk_coverage(risk_cov_file_merged)
+            if risk_cov_merged is not None:
+                max_risk = args.max_accepted_risk_pct / 100.0
+                rc_cutoffs = choose_cutoffs_from_risk(risk_cov_merged, max_risk)
+                if rc_cutoffs:
+                    print("Using risk-based cutoffs (merged) derived from train/test curves")
+                    cutoffs_merged = rc_cutoffs
 
         # Load merged Platt parameters (summed method)
         platt_file_merged = os.path.join(str(args.cutoffs_file), "platt_params_merged_summed", "platt_params_merged_summed.csv")

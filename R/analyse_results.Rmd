@@ -14,38 +14,21 @@ output:
 ```{r}
 #setwd("~/leukem_ai/R")
 source("inner_cv_analysis.R")
-#inner_cv_results_merged <- readRDS("../data/out/inner_cv/inner_cv_results_10feb2026_merged_maxprob.rds")
-#inner_cv_results_merged_summed <- readRDS("../data/out/inner_cv/inner_cv_results_10feb2026_merged_summed.rds")
-
-#inner_cv_results_merged$final_results
-#inner_cv_results_merged_summed$final_results
 ```
 
 ```{r}
-readRDS("../data/out/inner_cv/inner_cv_results_10feb2026_merged_summed.rds")$final_results
-```
-
-
-```{r}
-#source("outer_cv_analysis.R")
-#outer_cv_results_unmerged[["performance_comparison"]][["cv"]][,c("Model","Original_Kappa",  "Rejection_Kappa", "Mean_Percent_Rejected")]
-#outer_cv_results_merged[["performance_comparison"]][["cv"]][,c("Model", "Original_Kappa", "Rejection_Kappa", "Mean_Percent_Rejected")]
-```
-```{r}
-#readRDS("../data/out/outer_cv/outer_cv_results_10feb26_unmerged_maxprob.rds")[["performance_comparison"]][["cv"]][,c("Model", "Original_Kappa", "Rejection_Kappa", "Mean_Percent_Rejected")]
-#readRDS("../data/out/outer_cv/outer_cv_results_10feb26_merged_summed.rds")[["performance_comparison"]][["cv"]][,c("Model", "Original_Kappa", "Rejection_Kappa", "Mean_Percent_Rejected")]
+source("outer_cv_analysis.R")
 ```
 
 ```{r}
-outer_unmerged <-  readRDS("../data/out/outer_cv/outer_cv_results_10feb26_2_unmerged_maxprob.rds")
-outer_merged <- readRDS("../data/out/outer_cv/outer_cv_results_10feb26_2_merged_summed.rds")
+#inner_merged <- readRDS("../data/out/inner_cv/inner_cv_results_10feb2026_eta2_merged_summed_eta2.rds")
+outer_unmerged <-  readRDS("../data/out/outer_cv/outer_cv_analysis_outputs_unmerged_maxprob/outer_cv_results.rds")
+outer_merged <- readRDS("../data/out/outer_cv/outer_cv_analysis_outputs_merged_summed/outer_cv_results.rds")
 ```
-
-
 
 ```{r}
 #source("train_test_analysis.R")
-
+#train_test_results_unmerged$performance_comparisons
 #train_test_results_merged$performance_comparisons
 ```
 
@@ -115,15 +98,15 @@ meta$classes <- filtered_leukemia_subtypes
 ```
 
 ```{r}
+dir.create("../writing")
 dir.create("../writing/tables_new")
 dir.create("../writing/figures_new")
 ```
 
 # Training Cohort Tables
 ```{r}
+length((filtered_leukemia_subtypes))
 length(unique(filtered_leukemia_subtypes))
-
-table(filtered_leukemia_subtypes, meta$Studies)
 ```
 
 ## -- Supplementary Table 1: All Subtypes (Included and Excluded)
@@ -516,6 +499,127 @@ save_kable(simple_table, "../writing/tables_new/table1.png", zoom = 2)
 ```
 
 ```{r}
+library(ggplot2)
+
+# Build a sequential sample-count flow for cohort curation.
+starting_n <- length(leukemia_subtypes)
+
+keep_low_n <- leukemia_subtypes %in% subtypes_with_sufficient_samples
+keep_not_missing <- leukemia_subtypes != "Missing data"
+removed_missing <- sum(!keep_not_missing)
+
+removed_low_n <- sum(keep_not_missing & !keep_low_n)
+
+keep_not_nos <- leukemia_subtypes != "AML NOS"
+removed_nos <- sum(keep_not_missing & keep_low_n & !keep_not_nos)
+
+keep_not_multi <- leukemia_subtypes != "Multi"
+removed_multi <- sum(keep_not_missing & keep_low_n & keep_not_nos & !keep_not_multi)
+
+# Final set matches the filtered data used downstream (including selected studies).
+final_train_test_n <- length(filter)
+
+flow_nodes <- data.frame(
+  x = 1,
+  y = c(6, 5, 4, 3, 2, 1),
+  label = c(
+    paste0("Starting data\nn = ", starting_n),
+    paste0("Removed samples with missing data\nn removed = ", removed_missing),
+    paste0("Removed samples with n<10 classes\nn removed = ", removed_low_n),
+    paste0("Removed samples with AML, NOS\nn removed = ", removed_nos),
+    paste0("Removed samples with multi RGAs\nn removed = ", removed_multi),
+    paste0("Final training/test data\nn = ", final_train_test_n)
+  ),
+  stringsAsFactors = FALSE
+)
+
+flow_arrows <- data.frame(
+  x = 1,
+  xend = 1,
+  y = c(5.62, 4.62, 3.62, 2.62, 1.62),
+  yend = c(5.38, 4.38, 3.38, 2.38, 1.38)
+)
+
+side_nodes <- data.frame(
+  x = c(1.9, 1.9),
+  y = c(2.6, 3.9),
+  label = c(
+    "Used in follow-up analyses",
+    "Used in reject option training and testing"
+  ),
+  stringsAsFactors = FALSE
+)
+
+followup_arrows <- data.frame(
+  x = c(1.35, 1.35, 1.35),
+  y = c(4, 3, 2),
+  xend = c(1.84, 1.84, 1.84),
+  yend = c(2.6, 2.6, 2.6),
+  source = c("n<10 class", "AML NOS", "Multi"),
+  stringsAsFactors = FALSE
+)
+
+reject_lines <- data.frame(
+  x = c(1.35, 1.35),
+  y = c(4, 3),
+  xend = c(1.84, 1.84),
+  yend = c(3.9, 3.9),
+  source = c("n<10 class", "AML NOS"),
+  stringsAsFactors = FALSE
+)
+
+ggplot() +
+  geom_label(
+    data = flow_nodes,
+    aes(x = x, y = y, label = label),
+    size = 4,
+    label.size = 0.3,
+    fill = "#f7fbff",
+    color = "#1f2d3d",
+    label.r = unit(0.18, "lines")
+  ) +
+  geom_segment(
+    data = flow_arrows,
+    aes(x = x, y = y, xend = xend, yend = yend),
+    arrow = arrow(type = "closed", length = unit(0.12, "inches")),
+    linewidth = 0.5,
+    color = "#4a6278"
+  ) +
+  geom_label(
+    data = side_nodes,
+    aes(x = x, y = y, label = label),
+    size = 3.6,
+    label.size = 0.3,
+    fill = "#f7fbff",
+    color = "#1f2d3d",
+    label.r = unit(0.18, "lines")
+  ) +
+  geom_segment(
+    data = followup_arrows,
+    aes(x = x, y = y, xend = xend, yend = yend, color = source),
+    arrow = arrow(type = "closed", length = unit(0.11, "inches")),
+    linewidth = 0.6
+  ) +
+  geom_segment(
+    data = reject_lines,
+    arrow = arrow(type = "closed", length = unit(0.11, "inches")),
+    aes(x = x, y = y, xend = xend, yend = yend, color = source),
+    linewidth = 0.6
+  ) +
+  scale_color_manual(
+    name = "Connector source",
+    values = c(
+      "n<10 class" = "#d95f02",
+      "AML NOS" = "#1b9e77",
+      "Multi" = "#7570b3"
+    )
+  ) +
+  coord_cartesian(xlim = c(0.5, 2.2), ylim = c(0.5, 6.5), clip = "off") +
+  theme_void() +
+  theme(legend.position = "none")
+```
+
+```{r}
 included_simple_perc <- data.frame(class = included_simple$Subtype, perc = included_simple$Total/max(included_simple$Total) * 100, n = included_simple$Total)
 included_simple_perc$class <- gsub("<span style='padding-left:20px;'>└─ ", "", included_simple_perc$class)
 included_simple_perc$class <- gsub("</span>", "", included_simple_perc$class)
@@ -523,118 +627,55 @@ included_simple_perc$class <- gsub("</span>", "", included_simple_perc$class)
 included_simple_perc
 ```
 
-## -- patients and classes per age catagory
+## -- patients and classes per age category
 ```{r}
-# Convert age to years and create 1-year bins
+library(ggplot2)
+# Age in years (integer: one bar per year)
 meta$age_years <- meta$age_days / 365.25
-max_age <- ceiling(max(meta$age_years, na.rm = TRUE))
-age_bins <- seq(0, max_age, by = 1)
+meta$age_int <- floor(meta$age_years)
 
-# Assign each patient to an age bin
-meta$age_bin <- cut(meta$age_years, breaks = age_bins, right = FALSE,
-                    labels = paste0(head(age_bins, -1), "-", tail(age_bins, -1)))
-
-# Calculate patients and unique classes per age bin
 age_summary <- meta %>%
-  filter(!is.na(age_bin)) %>%
-  group_by(age_bin) %>%
+  filter(!is.na(age_int)) %>%
+  group_by(age_int) %>%
   summarise(
     n_patients = n(),
     n_classes = n_distinct(classes),
     .groups = "drop"
-  ) %>%
-  mutate(age_midpoint = as.numeric(gsub("-.*", "", as.character(age_bin))) + 0.5)
-
-# Simple histogram: patients per 1-year age bin
-p_patients <- ggplot(meta %>% filter(!is.na(age_years)), aes(x = age_years)) +
-  geom_histogram(breaks = age_bins, fill = "#7eb0d5", color = "white", alpha = 0.8) +
-  geom_vline(xintercept = 18, linetype = "dashed", color = "gray40") +
-  annotate("text", x = 18, y = Inf, label = "18y", vjust = 2, hjust = -0.2, 
-           size = 3, color = "gray40") +
-  theme_bw() +
-  labs(
-    title = "Patient Distribution by Age",
-    subtitle = "1-year bins",
-    x = "Age (years)",
-    y = "Number of Patients"
-  ) +
-  scale_x_continuous(breaks = seq(0, max(age_bins), by = 10)) +
-  theme(text = element_text(size = 11))
-
-print(p_patients)
-```
-
-```{r}
-# Combined plot: patients and unique classes per age bin
-# Reshape data for faceted plot
-age_summary_long <- age_summary %>%
-  tidyr::pivot_longer(
-    cols = c(n_patients, n_classes),
-    names_to = "metric",
-    values_to = "count"
-  ) %>%
-  mutate(metric = factor(metric, 
-                         levels = c("n_patients", "n_classes"),
-                         labels = c("Patients", "Unique Classes")))
-
-p_combined <- ggplot(age_summary_long, aes(x = age_midpoint, y = count, fill = metric)) +
-  geom_col(color = "white", width = 0.9) +
-  geom_vline(xintercept = 18, linetype = "dashed", color = "gray40") +
-  facet_wrap(~ metric, scales = "free_y", ncol = 2) +
-  scale_fill_manual(values = c("Patients" = "#7eb0d5", "Unique Classes" = "#fd7f6f")) +
-  theme_bw() +
-  labs(
-    title = "Patient and Class Distribution by Age",
-    subtitle = sprintf("Total: %d patients, %d unique classes (1-year bins)", 
-                       nrow(meta), n_distinct(meta$classes)),
-    x = "Age (years)",
-    y = "Count"
-  ) +
-  scale_x_continuous(breaks = seq(0, max(age_bins), by = 10)) +
-  theme(
-    text = element_text(size = 11),
-    legend.position = "none",
-    strip.background = element_rect(fill = "gray95"),
-    strip.text = element_text(face = "bold")
   )
 
-print(p_combined)
-
-age_summary_long %>% filter(metric == "Unique Classes") %>% summarize(mean(as.numeric(count), na.rm = TRUE))
-```
-
-```{r fig.width=8, fig.height=5}
-# Alternative: overlaid bar chart with dual y-axis
-# Scale factor to align the two metrics visually
 scale_factor <- max(age_summary$n_patients) / max(age_summary$n_classes)
 
-p_dual <- ggplot(age_summary, aes(x = age_midpoint)) +
+p_dual <- ggplot(age_summary, aes(x = age_int)) +
   geom_col(aes(y = n_patients), fill = "#7eb0d5", alpha = 0.7, width = 0.9) +
-  geom_line(aes(y = n_classes * scale_factor), color = "#fd7f6f", linewidth = 1.2) +
-  geom_point(aes(y = n_classes * scale_factor), color = "#fd7f6f", size = 2.5) +
-  geom_vline(xintercept = 18, linetype = "dashed", color = "gray40") +
+  geom_line(aes(y = n_classes * scale_factor), color = "black", linewidth = 1.2) +
+  geom_point(aes(y = n_classes * scale_factor), color = "black", size = 1.5) +
   scale_y_continuous(
     name = "Number of Patients",
     sec.axis = sec_axis(~ . / scale_factor, name = "Unique Classes")
   ) +
-  scale_x_continuous(breaks = seq(0, max(age_bins), by = 10)) +
+  scale_x_continuous(breaks = seq(0, max(age_summary$age_int), by = 10)) +
   theme_bw() +
   labs(
     title = "Patient Count and Class Diversity by Age",
-    subtitle = "Bars: patients | Line: unique classes (1-year bins)",
+    subtitle = "Bars: patients, Line: unique classes",
     x = "Age (years)"
   ) +
   theme(
     text = element_text(size = 11),
     axis.title.y.left = element_text(color = "#7eb0d5"),
-    axis.title.y.right = element_text(color = "#fd7f6f"),
-    axis.text.y.right = element_text(color = "#fd7f6f")
+    axis.title.y.right = element_text(color = "black"),
+    axis.text.y.right = element_text(color = "black")
   )
 
 print(p_dual)
+max(age_summary$age_int)
+mean(age_summary$n_classes)
+
+ggsave(
+  "../writing/figures_new/fig_patients_age_classes.svg",
+  p_dual
+)
 ```
-
-
 
 ##  --Performance Boxplots
 
@@ -686,7 +727,7 @@ results_per_fold$model <- gsub("_", " ", results_per_fold$model)
 results_per_fold$model <- gsub("xgboost", "XGBoost", results_per_fold$model)
 results_per_fold$model <- gsub("svm", "SVM", results_per_fold$model)
 results_per_fold$model <- gsub("neural net", "DNN", results_per_fold$model)
-results_per_fold$model <- gsub("Optimized", "Ensemble", results_per_fold$model)
+results_per_fold$model <- gsub("Global Optimized", "Ensemble", results_per_fold$model)
 
 results_per_fold$label_set <- factor(
   results_per_fold$label_set,
@@ -694,11 +735,11 @@ results_per_fold$label_set <- factor(
 )
 
 # Colour palette per model (used for outlines / points)
-colours <- c("#fd7f6f", "#7eb0d5", "#b2e061", "#bd7ebe", "#ffb55a")
-names(colours) <- c("XGBoost", "DNN", "SVM", "OvR Ensemble", "Global Ensemble")
+colours <- c("#666666", "#beaed4", "#7fc97f", "#fdc086")
+names(colours) <- c("XGBoost", "DNN", "SVM", "Ensemble")
 
-# Subtle fill colours to distinguish full vs collapsed labels
-label_fills <- c("Full subtypes" = "#f0f0f0", "Collapsed classes" = "#bdbdbd")
+# High-contrast, colorblind-safe fill colours for immediate label-set distinction
+label_fills <- c("Full subtypes" = "#1f78b4", "Collapsed classes" = "#e31a1c")
 
 # Compute per-model, per-label-set means for annotations
 results_per_fold <- results_per_fold %>%
@@ -746,52 +787,54 @@ p1 <- ggplot(
     x     = model_cv,
     y     = kappa,
     fill  = label_set,
-    color = model,
+    #color = model,
     group = interaction(model, label_set),
     show_legend = FALSE
   )
 ) +
   geom_boxplot(
     width         = box_width,
-    alpha         = 0.9,
-    outlier.shape = NA,
+    alpha         = 1,
     position      = position_dodge(width = 0.7),
-    show_legend = FALSE
+    show_legend = FALSE,
+     linewidth = 0.75
   ) +
-  geom_jitter(
-    aes(color = model),
-    size     = 1.8,
-    alpha    = 0.6,
-    position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.7),
-    show_legend = FALSE
-  ) +
-  geom_text(
-    data = means_cv,
-    aes(
-      x     = model,
-      y     = 0.76,
-      angle = 45,
-      label = sprintf("%.2f", mean_kappa),
-      group = interaction(model, label_set),
-      color = model
-    ),
-    position    = position_dodge(width = 0.7),
-    inherit.aes = FALSE,
-    size        = 3.2
-  ) +
+  # geom_jitter(
+  #   aes(color = model),
+  #   size     = 1.8,
+  #   alpha    = 0.6,
+  #   position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.7),
+  #   show_legend = FALSE
+  # ) +
+  # geom_text(
+  #   data = means_cv,
+  #   aes(
+  #     x     = model,
+  #     y     = 0.99,
+  #     angle = 45,
+  #     label = sprintf("%.2f", mean_kappa),
+  #     group = interaction(model, label_set),
+  #     color = model
+  #   ),
+  #   position    = position_dodge(width = 0.7),
+  #   inherit.aes = FALSE,
+  #   size        = 3.2
+  # ) +
   theme_bw() +
   labs(
-    title = "Regular nested CV",
+    title = "Standard nested CV",
     x     = "",
-    y     = "Cohen's Kappa",
-    fill  = "Label set",
-    color = "Model"
+    y     = "Kappa",
+    fill  = ""
   ) +
   theme(
     axis.text.x  = element_text(angle = 45, hjust = 1),
-    legend.location = "none"
+    axis.title   = element_text(size = 10),
+    axis.text    = element_text(size = 9),
+    plot.title   = element_text(size = 10),
+    plot.subtitle = element_text(size = 10)
   ) +
-  ylim(0.75, 1) +
+  ylim(0.8, 1) +
   scale_fill_manual(values = label_fills) +
   scale_color_manual(values = colours) + guides(color=FALSE, fill = FALSE)
 
@@ -802,64 +845,83 @@ p2 <- ggplot(
     x     = model_loso,
     y     = kappa,
     fill  = label_set,
-    color = model,
+    #color = model,
     group = interaction(model, label_set)
   )
 ) +
   geom_boxplot(
     width         = box_width,
-    alpha         = 0.9,
-    outlier.shape = NA,
-    position      = position_dodge(width = 0.7)
+    alpha         = 1,
+    position      = position_dodge(width = 0.7),
+    linewidth = 0.75
   ) +
-  geom_jitter(
-    aes(color = model),
-    size     = 1.8,
-    alpha    = 0.6,
-    position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.7)
-  ) +
-  geom_text(
-    data = means_loso,
-    aes(
-      x     = model,
-      y     = 0.76,
-      angle = 45,
-      label = sprintf("%.2f", mean_kappa),
-      group = interaction(model, label_set),
-      color = model
-    ),
-    position    = position_dodge(width = 0.7),
-    inherit.aes = FALSE,
-    size        = 3.2
-  ) +
+  # geom_jitter(
+  #   aes(color = model),
+  #   size     = 1.8,
+  #   alpha    = 0.9,
+  #   position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.7)
+  # ) +
+  # geom_text(
+  #   data = means_loso,
+  #   aes(
+  #     x     = model,
+  #     y     = 1,
+  #     angle = 45,
+  #     label = sprintf("%.2f", mean_kappa),
+  #     group = interaction(model, label_set),
+  #     color = model
+  #   ),
+  #   position    = position_dodge(width = 0.7),
+  #   inherit.aes = FALSE,
+  #   size        = 3.2
+  # ) +
   theme_bw() +
   labs(
     title = "LOSO nested CV",
     x     = "",
-    y     = "Cohen's Kappa",
-    fill  = "Label set",
-    color = "Model"
+    y     = "Kappa",
+    fill  = ""
   ) +
   theme(
     axis.text.x  = element_text(angle = 45, hjust = 1),
+    axis.title   = element_text(size = 10),
+    axis.text    = element_text(size = 9),
+    plot.title   = element_text(size = 10),
+    plot.subtitle = element_text(size = 10),
     legend.box   = "vertical",
+    legend.position = "bottom",
+    legend.justification = "center",
+    legend.box.just = "center",
     legend.title = element_text(size = 9),
-    legend.text  = element_text(size = 8)
+    legend.text  = element_text(size = 9)
   ) +
-  ylim(0.75, 1) +
-  scale_fill_manual(values = label_fills,guide = guide_legend(reverse = TRUE)) +
-  scale_color_manual(values = colours, guide = guide_legend(reverse = TRUE))
+  ylim(0.8, 1) +
+  scale_fill_manual(values = label_fills,guide = guide_legend(reverse = F)) #+
+  #scale_color_manual(values = colours, guide = guide_legend(reverse = TRUE))
 
 library(patchwork)
 # Arrange CV and LOSO boxplots vertically and collect a single shared legend
-boxplot_figure <- (p1 + p2) + patchwork::plot_annotation(title = "Performance by model and label granularity")
+boxplot_figure <- (p1 / p2) + patchwork::plot_annotation(
+  title = "Performance by model and class granularity",
+  theme = theme(
+    plot.title = element_text(size = 10),
+    plot.subtitle = element_text(size = 9)
+  )
+)
 boxplot_figure
+
+# ggsave(
+#   "../writing/figures_new/fig_boxplot_perf.svg",
+#   boxplot_figure,
+#   width = 7,
+#   height = 14,
+#   units = "cm"
+# )
 ```
 
 ##  --Performance Table (Mean ± SD)
 
 ```{r}
-
 # Summary heatmaps of mean and SD per model for CV and LOSO (including accuracy),
 # now with separate columns for full vs collapsed label sets.
 summary_stats <- results_per_fold %>%
@@ -933,6 +995,7 @@ performance_table <- performance_table %>%
   mutate(Model = as.character(Model))
 
 # Display table using kable
+library(kableExtra)
 performance_table_kable <- kable(
   performance_table,
   caption = "Model Performance Metrics (Mean ± SD)",
@@ -948,9 +1011,11 @@ performance_table_kable <- kable(
   add_header_above(c(" " = 1, "Full" = 1, "Collapsed" = 1, "Full" = 1, "Collapsed" = 1, "Full" = 1, "Collapsed" = 1, "Full" = 1, "Collapsed" = 1)) %>%
   add_header_above(c(" " = 1, "Kappa (Mean ± SD)" = 2, "Accuracy (Mean ± SD)" = 2, "Kappa (Mean ± SD)" = 2, "Accuracy (Mean ± SD)" = 2)) %>%
   add_header_above(c(" " = 1, "Standard CV" = 4, "LOSO" = 4)) 
-  
 
 performance_table_kable
+
+save_kable(performance_table_kable, "../writing/tables_new/table2_perf.png", zoom = 2)
+
 ```
 
 # Per-Class Performance Analysis
@@ -965,6 +1030,7 @@ mapping <- c(
     "AML.with.mutated.NPM1" = "Mutated NPM1",
     "AML.with.t.8.21..RUNX1..RUNX1T1" = "RUNX1::RUNX1T1",
     "AML.with.in.frame.bZIP.CEBPA" = "CEBPA bZIP in-frame",
+    "AML.with.in-frame.bZIP.CEBPA" = "CEBPA bZIP in-frame",
     "ETV6..MNX1" = "ETV6::MNX1",
     "KAT6A..CREBBP" = "KAT6A::CREBBP",
     "RBM15..MRTF1" = "RBM15::MRTF1",
@@ -1009,6 +1075,7 @@ order_AML <- c(
     "PML::RARA",                                    # APL, t(15;17)/PML::RARA
     "RUNX1::RUNX1T1",                              # AML with t(8;21)/RUNX1::RUNX1T1
     "CBFB::MYH11",                                 # AML with inv(16)/t(16;16)/CBFB::MYH11
+    "DEK::NUP214",                                 # AML with t(6;9)/DEK::NUP214
     "MLLT3::KMT2A",                                # AML with t(9;11)/MLLT3::KMT2A
     "Other KMT2A rearrangements",                  # Other KMT2A rearrangements
     # Other KMT2A subtypes
@@ -1017,7 +1084,6 @@ order_AML <- c(
     "KMT2A::MLLT10",
     "KMT2A::MLLT4",
     "KMT2A::SEPT6",
-    "DEK::NUP214",                                 # AML with t(6;9)/DEK::NUP214
     "MECOM rearrangement",                         # MECOM rearrangement (merged)
     "GATA2;MECOM",                                 # MECOM unmerged
     "MECOM, other",                                # MECOM unmerged
@@ -1065,7 +1131,7 @@ fix_names <- function(x){
 make_cm_fig <- function(res_obj, type, label_set) {
   # All per-class summaries for a given result object (full vs collapsed)
   per_class <- res_obj$per_class_summaries[[type]]
-  per_class <- per_class[per_class$Model == "OvR_Ensemble", ]
+  per_class <- per_class[per_class$Model == "Global_Optimized", ]
   rownames(per_class) <- gsub("Class: ", "", per_class$Class)
 
   # Apply pretty names to per-class row labels
@@ -1086,17 +1152,54 @@ make_cm_fig <- function(res_obj, type, label_set) {
   colnames(per_class) <- gsub("Mean_", "", colnames(per_class))
   print(sum(per_class$F1 > 0.8, na.rm = T))
   print(sum(per_class$F1 > 0.9, na.rm = T))
-  #to_remove <- apply(per_class, 1, function(x) any(is.na(x)))
-  #per_class <- per_class[!to_remove, ]
+  
+per_class[,1][is.na(per_class[,1])] <- 0
+
 per_class <- apply(per_class, 2, function(x) round(x, 2))
   normalise <- function(x) {
     (x - min(x)) / (max(x) - min(x))
   }
   per_class_norm <- apply(per_class, 2, normalise)
 
-  # Define palette for per-class metrics (white to green for performance)
-  palette_fun <- circlize::colorRamp2(c(0, 1), c("white", "green4"))
+  # Confusion matrices across folds for the same result object
+  conf_table <- list()
+  for (fold in names(res_obj$detailed_performance[[type]]$Global_Optimized)) {
+      conf_table[[fold]] <- res_obj$detailed_performance[[type]]$Global_Optimized[[fold]]$confusion_matrix$table
+  }
 
+  # Get all unique classes across all folds
+  all_classes <- unique(unlist(lapply(conf_table, function(x) c(rownames(x), colnames(x)))))
+
+  # Pad each confusion matrix to have the same dimensions
+  conf_table_padded <- lapply(conf_table, function(mat) {
+    padded_mat <- matrix(
+      0,
+      nrow    = length(all_classes),
+      ncol    = length(all_classes),
+      dimnames = list(all_classes, all_classes)
+    )
+    padded_mat[rownames(mat), colnames(mat)] <- mat
+    padded_mat
+  })
+
+  total_conf <- Reduce("+", conf_table_padded)
+  total_conf <- t(total_conf)
+
+  # Apply pretty names to confusion matrix axes and reorder to match per_class
+  rownames(total_conf) <- fix_names(rownames(total_conf))
+  colnames(total_conf) <- fix_names(colnames(total_conf))
+  total_conf <- total_conf[rownames(per_class), rownames(per_class)]
+
+  # LOSO: drop classes with no samples in any fold (0 row sum)
+  if (type == "loso") {
+    keep <- rowSums(total_conf) > 0
+    total_conf    <- total_conf[keep, keep, drop = FALSE]
+    per_class     <- per_class[keep, , drop = FALSE]
+    per_class_norm <- per_class_norm[keep, , drop = FALSE]
+  }
+
+  # Per-class heatmap (built after LOSO filter so row count matches confusion matrix)
+  palette_fun <- circlize::colorRamp2(c(0, 1), c("white", "green4"))
   ht_per_class <- Heatmap(
     per_class,
     name              = NULL,
@@ -1132,36 +1235,11 @@ per_class <- apply(per_class, 2, function(x) round(x, 2))
     row_title_gp         = gpar(fontface = "bold")
   )
 
-  # Confusion matrices across folds for the same result object
-  conf_table <- list()
-  for (fold in names(res_obj$detailed_performance[[type]]$Global_Optimized)) {
-      conf_table[[fold]] <- res_obj$detailed_performance[[type]]$OvR_Ensemble[[fold]]$confusion_matrix$table
-  }
-
-  # Get all unique classes across all folds
-  all_classes <- unique(unlist(lapply(conf_table, function(x) c(rownames(x), colnames(x)))))
-
-  # Pad each confusion matrix to have the same dimensions
-  conf_table_padded <- lapply(conf_table, function(mat) {
-    padded_mat <- matrix(
-      0,
-      nrow    = length(all_classes),
-      ncol    = length(all_classes),
-      dimnames = list(all_classes, all_classes)
-    )
-    padded_mat[rownames(mat), colnames(mat)] <- mat
-    padded_mat
-  })
-
-  total_conf <- Reduce("+", conf_table_padded)
-  total_conf <- t(total_conf)
-
-  # Apply pretty names to confusion matrix axes and reorder to match per_class
-  rownames(total_conf) <- fix_names(rownames(total_conf))
-  colnames(total_conf) <- fix_names(colnames(total_conf))
-  total_conf <- total_conf[rownames(per_class), rownames(per_class)]
-  
-  total_conf_norm <- apply(total_conf, 2, normalise)
+  # Row-normalise so colour = proportion of that reference class in each predicted class.
+  # Diagonal then = recall per class, comparable across small and large classes.
+  row_sums <- rowSums(total_conf)
+  row_sums[row_sums == 0] <- 1
+  total_conf_norm <- total_conf / row_sums
 
   total_conf_palette_fun <- circlize::colorRamp2(c(0, 1), c("white", "purple3"))
   ht_table <- Heatmap(
@@ -1244,8 +1322,7 @@ cm_fig_loso_collapsed_plot <- ggplotify::as.ggplot(function() {
     column_title_gp = gpar(fontsize = 12, fontface = "bold")
   )
 })
-```
-```{r}
+
 library(egg)
 
 # Arrange the four class-performance panels (CV/LOSO × full/collapsed)
@@ -1277,27 +1354,48 @@ library(circlize)
 library(grid)
 library(gridExtra)
 
-# Panel A: F1 Scores Comparison (Full vs Merged)
-# Extract F1 scores for full and merged classes
+# Panel A: F1 Scores Comparison (Full vs Merged), CV and LOSO
+# Extract F1 scores for full and merged classes (CV)
 f1_full <- outer_unmerged$per_class_summaries$cv %>%
-  filter(Model == "OvR_Ensemble") %>%
+  filter(Model == "Global_Optimized") %>%
   mutate(Class = gsub("Class: ", "", Class),
          Class = fix_names(Class),
          Type = "Full",
-         F1 = Mean_F1) %>%
-  select(Class, F1, Type)
+         F1 = Mean_F1,
+         Validation = "CV") %>%
+  select(Class, F1, Type, Validation)
 
 f1_merged <- outer_merged$per_class_summaries$cv %>%
-  filter(Model == "OvR_Ensemble") %>%
+  filter(Model == "Global_Optimized") %>%
   mutate(Class = gsub("Class: ", "", Class),
          Class = fix_names(Class),
-         Type = "Merged",
-         F1 = Mean_F1) %>%
-  select(Class, F1, Type)
+         Type = "Collapsed",
+         F1 = Mean_F1,
+         Validation = "CV") %>%
+  select(Class, F1, Type, Validation)
 
-# Combine and create comparison data
-f1_comparison <- bind_rows(f1_full, f1_merged)
+# LOSO F1 summaries (same structure as CV)
+f1_full_loso <- outer_unmerged$per_class_summaries$loso %>%
+  filter(Model == "Global_Optimized") %>%
+  mutate(Class = gsub("Class: ", "", Class),
+         Class = fix_names(Class),
+         Type = "Full",
+         F1 = Mean_F1,
+         Validation = "LOSO") %>%
+  select(Class, F1, Type, Validation)
 
+f1_merged_loso <- outer_merged$per_class_summaries$loso %>%
+  filter(Model == "Global_Optimized") %>%
+  mutate(Class = gsub("Class: ", "", Class),
+         Class = fix_names(Class),
+         Type = "Collapsed",
+         F1 = Mean_F1,
+         Validation = "LOSO") %>%
+  select(Class, F1, Type, Validation)
+
+# Combine CV and LOSO for comparison
+f1_comparison <- bind_rows(f1_full, f1_merged, f1_full_loso, f1_merged_loso)
+f1_comparison$F1[f1_comparison$Class == "MDS-related, cytogenetic abnormalities"] <- 0
 # Define merge mapping for connecting lines (full -> merged class)
 merge_mapping <- list(
   "Other KMT2A rearrangements" = c("KMT2A::ELL", "KMT2A::MLLT10", "KMT2A::MLLT4", "KMT2A::SEPT6"),
@@ -1309,12 +1407,12 @@ merge_mapping <- list(
 f1_comparison <- f1_comparison %>%
   mutate(
     Category = case_when(
-      Class %in% c("PML::RARA", "RUNX1::RUNX1T1", "CBFB::MYH11", "DEK::NUP214", "MLLT3::KMT2A") ~ "Major rearrangements",
-      Class %in% c("Other KMT2A rearrangements", "KMT2A::ELL", "KMT2A::MLLT10", "KMT2A::MLLT1","KMT2A::MLLT4", "KMT2A::SEPT6") ~ "Other KMT2A rearrangements",
-      Class %in% c("MECOM rearrangement", "GATA2;MECOM", "MECOM, other") ~ "MECOM rearrangement",
+      Class %in% c("PML::RARA", "RUNX1::RUNX1T1", "CBFB::MYH11", "DEK::NUP214", "MLLT3::KMT2A") ~ "Major rearr.",
+      Class %in% c("Other KMT2A rearrangements", "KMT2A::ELL", "KMT2A::MLLT10", "KMT2A::MLLT1","KMT2A::MLLT4", "KMT2A::SEPT6") ~ "Other KMT2A rearr.",
+      Class %in% c("MECOM rearrangement", "GATA2;MECOM", "MECOM, other") ~ "MECOM rearr.",
       Class %in% c("MDS-related", "MDS-related, gene mutations", "MDS-related, cytogenetic abnormalities", "MDS-related, TP53 mutated", "MDS.r") ~ "MDS-related",
       Class %in% c("Mutated NPM1", "CEBPA bZIP in-frame") ~ "Major mutations",
-      Class %in% c("PRDM16::RPN1", "NPM1::MLF1", "KAT6A::CREBBP", "RBM15::MRTF1", "ETV6::MNX1", "PICALM::MLLT10", "FUS::ERG", "RUNX1::CBFA2T3", "CBFA2T3::GLIS2", "NUP98::NSD1", "NUP98::KDM5A", "NUP98, other partners") ~ "Rare translocations",
+      Class %in% c("PRDM16::RPN1", "NPM1::MLF1", "KAT6A::CREBBP", "RBM15::MRTF1", "ETV6::MNX1", "PICALM::MLLT10", "FUS::ERG", "RUNX1::CBFA2T3", "CBFA2T3::GLIS2", "NUP98::NSD1", "NUP98::KDM5A", "NUP98, other partners") ~ "Rare trans.",
       TRUE ~ "Other"
     )
   )
@@ -1322,8 +1420,13 @@ f1_comparison <- f1_comparison %>%
 # For Panel A: show only Full dot for classes unchanged between Full and Merged; merged groups keep Merged point
 classes_in_full <- unique(f1_comparison$Class[f1_comparison$Type == "Full"])
 f1_comparison_plot <- f1_comparison %>%
-  filter(Type == "Full" | (Type == "Merged" & !(Class %in% classes_in_full)))
-
+  filter(Type == "Full" | (Type == "Collapsed" & !(Class %in% classes_in_full)))
+# Exclude classes with NA F1 (e.g. LOSO excluded because train or test not represented); do not show or coerce to 0.
+# Exception: always show MDS-related, cytogenetic abnormalities for CV and LOSO even when F1 is NA.
+mds_cyto_class <- "MDS-related, cytogenetic abnormalities"
+f1_comparison_plot <- f1_comparison_plot %>% filter(!is.na(F1) | Class == mds_cyto_class)
+# Shape: CV = closed (dot 16, triangle 17), LOSO = open (dot 1, triangle 2)
+f1_comparison_plot$ShapeType <- paste(f1_comparison_plot$Type, f1_comparison_plot$Validation)
 # Order classes consistently; include any class in the data so none become NA (unnamed level)
 all_classes_ordered <- order_AML
 extra_classes <- setdiff(unique(as.character(f1_comparison_plot$Class)), all_classes_ordered)
@@ -1331,75 +1434,183 @@ if (length(extra_classes) > 0) all_classes_ordered <- c(all_classes_ordered, ext
 
 f1_comparison_plot$Class <- factor(f1_comparison_plot$Class, levels = rev(all_classes_ordered))
 
-# Create color palette for categories
+# Create color palette for categories (include Other so legend and axis colours are complete)
 category_colors <- c(
-  "Major rearrangements" = "#1f77b4",
-  "Other KMT2A rearrangements" = "#ff7f0e",
-  "MECOM rearrangement" = "#17becf",
+  "Major rearr." = "#1f77b4",
+  "Other KMT2A rearr." = "#ff7f0e",
+  "MECOM rearr." = "#17becf",
   "Major mutations" = "#2ca02c",
-  "Rare translocations" = "#9467bd",
-  "MDS-related" = "#d62728"
+  "Rare trans." = "#9467bd",
+  "MDS-related" = "#d62728",
+  "Other" = "gray40"
 )
+
+# Legend order: match y-axis order top to bottom (first legend item = top y-axis class's category)
+plot_class_order_top_to_bottom <- rev(levels(f1_comparison_plot$Class))
+idx <- match(plot_class_order_top_to_bottom, f1_comparison_plot$Class)
+category_order <- unique(f1_comparison_plot$Category[idx])
+f1_comparison_plot$Category <- factor(f1_comparison_plot$Category, levels = category_order)
 
 # Panel A: F1 Comparison Plot
 library(ggtext)
 
 # Get the actual y-axis levels as they appear on the plot (bottom to top)
 axis_class_levels <- levels(f1_comparison_plot$Class)
-# Filter to only classes present in the plot data
 axis_class_levels <- axis_class_levels[axis_class_levels %in% unique(f1_comparison_plot$Class)]
 
-# Create axis text colors based on category (MDS-related, KMT2A, MECOM get their group colors)
-axis_text_colors <- sapply(axis_class_levels, function(cls) {
-  if (cls %in% c("MDS-related", "MDS-related, gene mutations", 
-                 "MDS-related, cytogenetic abnormalities", "MDS-related, TP53 mutated", "MDS.r")) {
-    "#d62728"  # MDS-related color
-  } else if (cls %in% c("Other KMT2A rearrangements", 
-                        "KMT2A::ELL", "KMT2A::MLLT1", "KMT2A::MLLT10", "KMT2A::MLLT4", 
-                        "KMT2A::SEPT6", "KMT2A::SEPT9")) {
-    "#ff7f0e"  # KMT2A color
-  } else if (cls %in% c("MECOM rearrangement", "GATA2;MECOM", "MECOM, other")) {
-    "#17becf"  # MECOM color
-  } else {
-    "black"
-  }
-})
+# Y-axis label colours: one colour per category (all classes coloured by their group)
+cls_to_cat <- setNames(as.character(f1_comparison_plot$Category[match(axis_class_levels, f1_comparison_plot$Class)]), axis_class_levels)
+cls_to_cat[is.na(cls_to_cat)] <- "Other"
+axis_text_colors <- setNames(category_colors[cls_to_cat], axis_class_levels)
 
 # Create labels with bold formatting for merged classes
 # Replace ";" with "::" in labels so element_markdown does not parse semicolon as CSS (e.g. GATA2;MECOM -> GATA2::MECOM)
 axis_labels <- sapply(axis_class_levels, function(cls) {
   safe_cls <- gsub(";", ", ", cls, fixed = TRUE)
+  
   if (cls %in% c("Other KMT2A rearrangements", "MDS-related", "MECOM rearrangement")) {
-    paste0("**", safe_cls, "**")
+    paste0("<i>", safe_cls, "</i>")
   } else {
+    #paste0("<b>", safe_cls, "</b>")
     safe_cls
   }
 })
 names(axis_labels) <- axis_class_levels
 
-panel_a <- ggplot(f1_comparison_plot, aes(x = F1, y = Class, color = Category, shape = Type)) +
-  geom_point(size = 2.5, alpha = 0.8, position = position_dodge(width = 0.5)) +
+panel_a <- ggplot(f1_comparison_plot, aes(x = F1, y = Class, color = Category, shape = ShapeType)) +
+  geom_point(size = 2.5, alpha = 0.8) +
   geom_vline(xintercept = 0.8, linetype = "dashed", color = "gray50", alpha = 0.5) +
-  scale_color_manual(values = category_colors, name = "Category") +
-  scale_shape_manual(values = c("Merged" = 17, "Full" = 16), name = "Type") +
+ scale_color_manual(values = category_colors, name = "Category") +
+scale_shape_manual(
+  values = c("Full CV" = 16, "Full LOSO" = 1, "Collapsed CV" = 17, "Collapsed LOSO" = 2),
+  name = "Classes",
+  labels = c(
+    "Full CV" = "Full (CV)",
+    "Full LOSO" = "Full (LOSO)",
+    "Collapsed CV" = "<i>Collapsed (CV)</i>",
+    "Collapsed LOSO" = "<i>Collapsed (LOSO)<i>"
+  )
+) +
   scale_y_discrete(labels = axis_labels) +
   labs(
     x = "F1 Score",
     y = "",
-    title = "A. F1 Scores: Full vs Merged Classes"
+    title = "F1 Scores: Full and Collapsed Classes"
   ) +
   theme_bw() +
   theme(
-    plot.title = element_text(face = "bold", size = 11),
+    plot.title = element_text(size = 10),
     axis.text.y = element_markdown(size = 8, color = axis_text_colors),
     axis.text.x = element_text(size = 9),
     legend.position = "right",
-    legend.text = element_text(size = 8),
+    legend.text = element_markdown(size = 8),
     legend.title = element_text(size = 9)
   ) +
   xlim(0, 1.0)
 panel_a
+
+# ggsave(
+#   "../writing/figures_new/figures_per_class_perf.svg",
+#   panel_a,
+#   width  = 6.5,
+#   height = 4.5,
+#   # units  = "mm"
+# )
 ```
+
+```{r}
+# Extra panel A variant: split Full and Collapsed classes into two plots
+# while keeping a single shared legend (same mapping used in panel_a).
+shape_values <- c("Full CV" = 16, "Full LOSO" = 1, "Collapsed CV" = 17, "Collapsed LOSO" = 2)
+shape_labels <- c(
+  "Full CV" = "Full (CV)",
+  "Full LOSO" = "Full (LOSO)",
+  "Collapsed CV" = "<i>Collapsed (CV)</i>",
+  "Collapsed LOSO" = "<i>Collapsed (LOSO)</i>"
+)
+
+# Build from all classes in each label set (not only the mixed panel_a subset).
+f1_split_plot <- f1_comparison %>%
+  filter(!is.na(F1) | Class == mds_cyto_class) %>%
+  mutate(ShapeType = paste(Type, Validation))
+
+# Keep class ordering stable across both panels.
+all_classes_ordered_split <- order_AML
+extra_classes_split <- setdiff(unique(as.character(f1_split_plot$Class)), all_classes_ordered_split)
+if (length(extra_classes_split) > 0) all_classes_ordered_split <- c(all_classes_ordered_split, extra_classes_split)
+f1_split_plot$Class <- factor(f1_split_plot$Class, levels = rev(all_classes_ordered_split))
+
+make_axis_labels <- function(class_levels) {
+  lbl <- sapply(class_levels, function(cls) {
+    safe_cls <- gsub(";", ", ", cls, fixed = TRUE)
+    if (cls %in% c("Other KMT2A rearrangements", "MDS-related", "MECOM rearrangement")) {
+      paste0("<i>", safe_cls, "</i>")
+    } else {
+      safe_cls
+    }
+  })
+  names(lbl) <- class_levels
+  lbl
+}
+
+make_split_panel <- function(df, panel_title) {
+  axis_class_levels_local <- levels(df$Class)
+  axis_class_levels_local <- axis_class_levels_local[axis_class_levels_local %in% unique(df$Class)]
+
+  cls_to_cat_local <- setNames(
+    as.character(df$Category[match(axis_class_levels_local, df$Class)]),
+    axis_class_levels_local
+  )
+  cls_to_cat_local[is.na(cls_to_cat_local)] <- "Other"
+  axis_text_colors_local <- setNames(category_colors[cls_to_cat_local], axis_class_levels_local)
+
+  ggplot(df, aes(x = F1, y = Class, color = Category, shape = ShapeType)) +
+    geom_point(size = 2.5, alpha = 0.8) +
+    geom_vline(xintercept = 0.8, linetype = "dashed", color = "gray50", alpha = 0.5) +
+    scale_color_manual(values = category_colors, name = "Category", drop = FALSE) +
+    scale_shape_manual(values = shape_values, labels = shape_labels, name = "Classes", drop = FALSE) +
+    scale_y_discrete(labels = make_axis_labels(axis_class_levels_local)) +
+    labs(x = "F1 Score", y = "", title = panel_title) +
+    theme_bw() +
+    theme(
+      plot.title = element_text(size = 10),
+      axis.text.y = element_markdown(size = 8, color = axis_text_colors_local),
+      axis.text.x = element_text(size = 9),
+      legend.text = element_markdown(size = 8),
+      legend.title = element_text(size = 9)
+    ) +
+    xlim(0, 1.0)
+}
+
+panel_a_full_split <- make_split_panel(
+  f1_split_plot %>% filter(Type == "Full"),
+  "F1 Scores: Full Classes"
+)
+panel_a_collapsed_split <- make_split_panel(
+  f1_split_plot %>% filter(Type == "Collapsed"),
+  "F1 Scores: Collapsed Classes"
+)
+
+panel_a_split_combined <- panel_a_full_split + panel_a_collapsed_split +
+  patchwork::plot_layout(ncol = 2, guides = "collect") &
+  theme(legend.position = "right")
+
+panel_a_split_combined
+```
+
+```{r}
+sum(f1_full$F1>0.8, na.rm = T)
+sum(f1_full$F1>0.9, na.rm = T)
+```
+
+
+```{r}
+f1_comparison_plot %>% filter(grepl("NPM1|RUNX1|KAT|FUS", Class)) %>% select(Class, Validation, F1)
+```
+```{r}
+f1_comparison_plot %>% filter(grepl("MDS|Other KMT2A|MECOM rearrangement", Class) & Validation == "CV") %>% select(Class, Validation, F1)
+```
+
 ```{r}
 # Panel B & C: Error Heatmaps for KMT2A and MDS groups
 # Function to extract and prepare confusion matrix for specific groups
@@ -1408,7 +1619,7 @@ get_error_heatmap <- function(res_obj, type, label_set, focus_groups) {
   conf_table <- list()
   
   # Determine model name - check what's available
-  model_name <- "OvR_Ensemble"
+  model_name <- "Global_Optimized"
   
   if (is.null(model_name) || !model_name %in% names(res_obj$detailed_performance[[type]])) {
     return(NULL)
@@ -1492,107 +1703,133 @@ mds_merged <- "MDS-related"
 mecom_merged <- "MECOM rearrangement"
 
 # Combine groups for each panel
-focus_groups_panel_b <- c(kmt2a_mllt3, kmt2a_other_full, mds_groups_full, mecom_groups_full)
-focus_groups_panel_c <- c(kmt2a_mllt3, kmt2a_other_merged, mds_merged, mecom_merged)
+focus_groups_panel_b <- c(kmt2a_mllt3, kmt2a_other_full, mecom_groups_full, mds_groups_full)
+focus_groups_panel_c <- c(kmt2a_mllt3, kmt2a_other_merged, mecom_merged, mds_merged)
 
 # Get error heatmaps from appropriate result objects
 # Panel B uses full classes (outer_unmerged), Panel C uses collapsed classes (outer_merged)
 error_panel_b <- get_error_heatmap(outer_unmerged, "cv", "Full", focus_groups_panel_b)
 error_panel_c <- get_error_heatmap(outer_merged, "cv", "Collapsed", focus_groups_panel_c)
 
-# Create heatmap function with group annotations
-create_error_heatmap <- function(error_data, title, other_kmt2a_classes, mds_classes, mecom_classes = NULL) {
+# Shared styling for both error heatmaps (same cell size and font sizes)
+error_heatmap_cell_w_mm <- 12*0.6
+error_heatmap_cell_h_mm <- 6*0.6
+error_heatmap_font_rowcol <- 7
+error_heatmap_font_cell_diag <- 6
+error_heatmap_font_cell_off <- 5
+error_heatmap_font_title <- 9
+error_heatmap_font_legend <- 7
+
+# Shared colour scale so legends merge when combined
+error_heatmap_col_fun <- circlize::colorRamp2(c(0, 100), c("white", "purple3"))
+error_heatmap_group_cols <- c("KMT2A::MLLT3" = "#1f77b4", "Other KMT2A" = "#ff7f0e", "MECOM rearrangement" = "#17becf", "MDS-related" = "#d62728")
+
+# Create heatmap function with group annotations; accepts optional font/cell size overrides for combined figures
+create_error_heatmap <- function(error_data, title, other_kmt2a_classes, mds_classes, mecom_classes = NULL,
+    name = "heatmap",
+    cell_w_mm = error_heatmap_cell_w_mm, cell_h_mm = error_heatmap_cell_h_mm,
+    font_rowcol = error_heatmap_font_rowcol, font_cell_diag = error_heatmap_font_cell_diag,
+    font_cell_off = error_heatmap_font_cell_off, font_title = error_heatmap_font_title,
+    font_legend = error_heatmap_font_legend, col_fun = error_heatmap_col_fun) {
   if (is.null(error_data)) {
     return(NULL)
   }
-  
+
   conf_percent <- error_data$percentages
-  
-  # Create annotation for groups: MLLT3::KMT2A, Other KMT2A, MDS-related, MECOM
-  group_anno <- sapply(rownames(conf_percent), function(name) {
-    if (name == "MLLT3::KMT2A") {
-      return("KMT2A::MLLT3")
-    } else if (name %in% other_kmt2a_classes) {
-      return("Other KMT2A")
-    } else if (name %in% mds_classes) {
-      return("MDS-related")
-    } else if (!is.null(mecom_classes) && name %in% mecom_classes) {
-      return("MECOM rearrangement")
-    } else {
-      return("Other")
-    }
+
+  # Group per row (for y-axis text colour and for legend)
+  group_anno <- sapply(rownames(conf_percent), function(rname) {
+    if (rname == "MLLT3::KMT2A") return("KMT2A::MLLT3")
+    if (rname %in% other_kmt2a_classes) return("Other KMT2A")
+    if (!is.null(mecom_classes) && rname %in% mecom_classes) return("MECOM rearrangement")
+    if (rname %in% mds_classes) return("MDS-related")
+    return("Other")
   })
-  
-  group_levels <- c("KMT2A::MLLT3", "Other KMT2A", "MDS-related")
-  group_cols <- c("KMT2A::MLLT3" = "#1f77b4", "Other KMT2A" = "#ff7f0e", "MDS-related" = "#d62728")
-  if (!is.null(mecom_classes)) {
-    group_levels <- c(group_levels, "MECOM rearrangement")
-    group_cols <- c(group_cols, "MECOM rearrangement" = "#17becf")
-  }
-  group_anno <- factor(group_anno, levels = group_levels)
-  
-  ha <- rowAnnotation(
-    Group = group_anno,
-    col = list(Group = group_cols),
-    annotation_legend_param = list(title = "Group", title_gp = gpar(fontsize = 9))
-  )
-  
-  # Color function for percentages (white to purple for errors)
-  col_fun <- colorRamp2(c(0, 100), c("white", "purple3"))
-  
+  row_name_colors <- error_heatmap_group_cols[group_anno]
+  row_name_colors[is.na(row_name_colors)] <- "gray40"
+
+  nrc <- nrow(conf_percent)
+  ncc <- ncol(conf_percent)
+
   ht <- Heatmap(
     conf_percent,
-    name = "n samples",
+    name = name,
     col = col_fun,
+    width = unit(ncc * cell_w_mm, "mm"),
+    height = unit(nrc * cell_h_mm, "mm"),
     cluster_rows = FALSE,
     cluster_columns = FALSE,
     row_names_side = "left",
     column_names_side = "top",
-    row_names_gp = gpar(fontsize = 9),
-    column_names_gp = gpar(fontsize = 9),
+    row_names_gp = gpar(fontsize = font_rowcol, col = row_name_colors),
+    column_names_gp = gpar(fontsize = font_rowcol),
+    column_names_rot = 45,
     cell_fun = function(j, i, x, y, width, height, fill) {
-      val <- conf_percent[i, j]
       count <- error_data$counts[i, j]
       grid.rect(x, y, width, height, gp = gpar(fill = fill, col = "#d9d9d9", lwd = 0.5))
       if (i == j) {
-        # Diagonal: correct predictions
-        grid.text(sprintf("%.0f", count), x, y, gp = gpar(fontsize = 8, fontface = "bold"))
+        grid.text(sprintf("%.0f", count), x, y, gp = gpar(fontsize = font_cell_diag, fontface = "bold"))
       } else if (count > 0) {
-        # Off-diagonal: errors
-        grid.text(sprintf("%.0f", count), x, y, gp = gpar(fontsize = 7))
+        grid.text(sprintf("%.0f", count), x, y, gp = gpar(fontsize = font_cell_off))
       }
     },
     column_title = title,
-    column_title_gp = gpar(fontsize = 11, fontface = "bold"),
-    left_annotation = ha,
+    column_title_side = "bottom",
+    column_title_gp = gpar(fontsize = font_title, fontface = "bold"),
     heatmap_legend_param = list(
-      title = "n samples",
-      title_gp = gpar(fontsize = 9),
-      labels_gp = gpar(fontsize = 8)
+      title = "% of row",
+      title_gp = gpar(fontsize = font_legend),
+      labels_gp = gpar(fontsize = font_legend - 1),
+      direction = "horizontal"
     )
   )
-  
+
   return(ht)
 }
 
-# Create Panel B: Full classes (MLLT3::KMT2A separate, other KMT2A separate, MDS separate, MECOM separate)
-create_error_heatmap(
-  error_panel_b, 
-  "B. Error Analysis: Full Classes",
+# Build both heatmaps with identical cell size and fonts (no padding)
+ht_error_full <- create_error_heatmap(
+  error_panel_b,
+  "Full classes",
   other_kmt2a_classes = kmt2a_other_full,
   mds_classes = mds_groups_full,
-  mecom_classes = mecom_groups_full
+  mecom_classes = mecom_groups_full,
+  name = "Full"
 )
-
-# Create Panel C: Collapsed classes (MLLT3::KMT2A separate, Other KMT2A combined, MDS combined, MECOM combined)
-create_error_heatmap(
-  error_panel_c, 
-  "C. Error Analysis: Collapsed Classes",
+ht_error_merged <- create_error_heatmap(
+  error_panel_c,
+  "Collapsed classes",
   other_kmt2a_classes = kmt2a_other_merged,
   mds_classes = mds_merged,
-  mecom_classes = mecom_merged
+  mecom_classes = mecom_merged,
+  name = "Collapsed"
 )
+
+# Padding: bottom, left, top, right (extra right so diagonal and column labels are not clipped)
+heatmap_padding <- unit(c(8, 8, 8, 18), "mm")
+
+# Left: full classes (no legend)
+A <- ComplexHeatmap::draw(ht_error_full,
+  show_heatmap_legend = FALSE,
+  show_annotation_legend = FALSE,
+  padding = heatmap_padding
+) |> grid.grabExpr()
+
+# Right: merged classes (with % of row legend)
+B <- ComplexHeatmap::draw(ht_error_merged,
+  heatmap_legend_side = "bottom",
+  padding = heatmap_padding
+) |> grid.grabExpr()
+
 ```
+
+```{r}
+bottom <- cowplot::plot_grid(A, B, nrow = 1, align = "h", axis = "tl", labels = c("D", "E"))
+middle <- cowplot::plot_grid(boxplot_figure, panel_a, nrow = 1, align = "h", axis = "tl", labels = c("B", "C"), rel_widths = c(1, 2))
+
+cowplot::plot_grid(middle, bottom, nrow = 2)
+```
+
 
 
 
@@ -1603,7 +1840,7 @@ create_error_heatmap(
 # Function to create faceted confusion matrices per fold
 make_faceted_cm <- function(type) {
   # Get all folds for this type
-  folds <- names(outer_merged$detailed_performance[[type]]$OvR_Ensemble)
+  folds <- names(outer_merged$detailed_performance[[type]]$Global_Optimized)
   # Per class
   per_class_list <- list()
   # Collect confusion matrices for all folds
@@ -1629,21 +1866,24 @@ make_faceted_cm <- function(type) {
     #  any(is.na(x)))
     #per_class <- per_class[!to_remove, ]
     cm <- cm[rownames(per_class), rownames(per_class), drop = FALSE]
-    
+
+    # LOSO: drop reference classes with no samples in this fold
+    if (type == "loso") {
+      keep <- rowSums(cm) > 0
+      cm <- cm[keep, keep, drop = FALSE]
+      per_class <- per_class[keep, , drop = FALSE]
+    }
+
     normalise <- function(x) {
       return((x - min(x)) / (max(x) - min(x)))
     }
     per_class_norm <- apply(per_class, 2, normalise)
-    
-    # Normalize for color scale
-    cm_norm <- apply(cm, 2, function(x) {
-      if (max(x, na.rm = TRUE) > 0) {
-        (x - min(x, na.rm = TRUE)) / (max(x, na.rm = TRUE) - min(x, na.rm = TRUE))
-      } else {
-        x
-      }
-    })
-    
+
+    # Row-normalise for colour: proportion of each reference class in each predicted class (diagonal = recall).
+    rs <- rowSums(cm)
+    rs[rs == 0] <- 1
+    cm_norm <- cm / rs
+
     conf_matrices[[fold]] <- list(matrix = cm,
                                   normalized = cm_norm,
                                   per_class = per_class,
@@ -1821,7 +2061,7 @@ pediatric_cohorts <- c("AAML0531", "AAML1031", "AAML03P1")
 
 # Helper function to order folds by mean kappa and create color vector for x-axis labels
 prepare_fold_data <- function(data_subset) {
-  fold_means <- data_subset %>% filter(model == "OvR Ensemble") %>%
+  fold_means <- data_subset %>% filter(model %in% c("Global Ensemble", "Ensemble")) %>%
     group_by(fold) %>%
     summarise(mean_kappa = mean(kappa), .groups = "drop") %>%
     arrange(mean_kappa)
@@ -1841,7 +2081,7 @@ pa <- ggplot(cv_full_data, aes(x = fold, y = kappa, color = model, group = model
   geom_point(size = 3) +
   theme_bw() + 
   theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none") +
-  labs(title = "CV: Full subtypes", x = "Fold", y = "Cohen's Kappa", color = "Model") + 
+  labs(title = "CV: Full subtypes", x = "Fold", y = "Kappa", color = "Model") + 
   scale_color_manual(values = colours, breaks = rev(names(colours)), limits = rev(names(colours))) + 
   ylim(0.75, 1)
 
@@ -1853,14 +2093,14 @@ pb <- ggplot(cv_collapsed_data, aes(x = fold, y = kappa, color = model, group = 
   geom_point(size = 3) +
   theme_bw() + 
   theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none") +
-  labs(title = "CV: Collapsed classes", x = "Fold", y = "Cohen's Kappa", color = "Model") + 
+  labs(title = "CV: Collapsed classes", x = "Fold", y = "Kappa", color = "Model") + 
   scale_color_manual(values = colours, breaks = rev(names(colours)), limits = rev(names(colours))) + 
   ylim(0.75, 1)
 
 # LOSO: Full subtypes - order by mean kappa
 loso_full_data <- results_per_fold[results_per_fold$type == "loso" & results_per_fold$label_set == "Full subtypes", ]
 
-loso_full_data %>% filter(model == "SVM") %>% mutate(type = ifelse(fold %in% pediatric_cohorts, "Paediatric", "Adult")) %>% group_by(type) %>% summarise(mean_kappa = mean(kappa))
+loso_full_data %>% filter(model == "Global Ensemble") %>% mutate(type = ifelse(fold %in% pediatric_cohorts, "Paediatric", "Adult")) %>% group_by(type) %>% summarise(mean_kappa = mean(kappa))
 
 loso_full_prep <- prepare_fold_data(loso_full_data) 
 pc <- ggplot(loso_full_prep$data, aes(x = fold, y = kappa, color = model, group = model)) +
@@ -1869,14 +2109,14 @@ pc <- ggplot(loso_full_prep$data, aes(x = fold, y = kappa, color = model, group 
   theme_bw() + 
   theme(axis.text.x = element_text(angle = 45, hjust = 1, colour = loso_full_prep$label_colors),
         legend.position = "none") +
-  labs(title = "LOSO: Full subtypes", x = "Cohort (Fold)", y = "Cohen's Kappa", color = "Model") + 
+  labs(title = "LOSO: Full subtypes", x = "Cohort (Fold)", y = "Kappa", color = "Model") + 
   scale_color_manual(values = colours, breaks = rev(names(colours)), limits = rev(names(colours))) + 
   ylim(0.75, 1)
 
 # LOSO: Collapsed classes - order by mean kappa
 loso_collapsed_data <- results_per_fold[results_per_fold$type == "loso" & results_per_fold$label_set == "Collapsed classes", ]
 
-loso_collapsed_data %>% filter(model == "SVM") %>% mutate(type = ifelse(fold %in% pediatric_cohorts, "Paediatric", "Adult")) %>% group_by(type) %>% summarise(mean_kappa = mean(kappa))
+loso_collapsed_data %>% filter(model == "Global Ensemble") %>% mutate(type = ifelse(fold %in% pediatric_cohorts, "Paediatric", "Adult")) %>% group_by(type) %>% summarise(mean_kappa = mean(kappa))
 
 loso_collapsed_prep <- prepare_fold_data(loso_collapsed_data)
 pd <- ggplot(loso_collapsed_prep$data, aes(x = fold, y = kappa, color = model, group = model)) +
@@ -1885,7 +2125,7 @@ pd <- ggplot(loso_collapsed_prep$data, aes(x = fold, y = kappa, color = model, g
   theme_bw() + 
   theme(axis.text.x = element_text(angle = 45, hjust = 1, colour = loso_collapsed_prep$label_colors),
         legend.position = "right") +
-  labs(title = "LOSO: Collapsed classes", x = "Cohort (Fold)", y = "Cohen's Kappa", color = "Model") + 
+  labs(title = "LOSO: Collapsed classes", x = "Cohort (Fold)", y = "Kappa", color = "Model") + 
   scale_color_manual(values = colours, breaks = rev(names(colours)), limits = rev(names(colours))) + 
   ylim(0.75, 1)
 
@@ -1914,6 +2154,7 @@ combined_legends <- plot_grid(model_legend, ped_adult_legend, ncol = 1, align = 
 final_plot <- plot_grid(plots_grid, combined_legends, ncol = 2, rel_widths = c(4, 0.6))
 
 print(final_plot)
+ggsave("../writing/figures_new/per_fold_perf.svg", final_plot) 
 ```
 
 ## -- Cohort-Level Performance
@@ -1922,18 +2163,31 @@ print(final_plot)
 library(ggplot2)
 library(dplyr)
 
-# Extract LOSO performance per cohort
-loso_performance <- outer_merged$detailed_performance$loso$OvR_Ensemble
+# Helper: extract LOSO cohort-level performance from a result object
+cohort_perf_from_loso <- function(loso_performance) {
+  data.frame(
+    cohort = names(loso_performance),
+    kappa = sapply(loso_performance, function(x) x$kappa),
+    accuracy = sapply(loso_performance, function(x) x$accuracy),
+    n = sapply(loso_performance, function(x) length(x$predictions)),
+    stringsAsFactors = FALSE
+  )
+}
 
-cohort_performance <- data.frame(
-  cohort = names(loso_performance),
-  kappa = sapply(loso_performance, function(x) x$kappa),
-  accuracy = sapply(loso_performance, function(x) x$accuracy),
-  n = sapply(loso_performance, function(x) length(x$predictions)),
-  stringsAsFactors = FALSE
+# Extract LOSO performance per cohort for both unmerged (full) and merged
+cohort_perf_merged <- cohort_perf_from_loso(outer_merged$detailed_performance$loso$Global_Optimized)
+cohort_perf_merged$label_set <- "Collapsed classes"
+
+cohort_perf_unmerged <- cohort_perf_from_loso(outer_unmerged$detailed_performance$loso$Global_Optimized)
+cohort_perf_unmerged$label_set <- "Full subtypes"
+
+# Combine and add pediatric/adult classification
+cohort_analysis <- bind_rows(cohort_perf_unmerged, cohort_perf_merged)
+cohort_analysis$cohort_type <- ifelse(
+  cohort_analysis$cohort %in% c("AAML0531", "AAML1031", "AAML03P1"), "Pediatric", "Adult"
 )
 
-# Cohort subtype distribution
+# Cohort subtype distribution (used elsewhere)
 cohort_subtype_dist <- data.frame(
   cohort = filtered_study_names,
   subtype = filtered_leukemia_subtypes,
@@ -1942,34 +2196,40 @@ cohort_subtype_dist <- data.frame(
 cohort_subtype_dist$subtype_merged <- modify_classes(cohort_subtype_dist$subtype)
 cohort_subtype_dist$subtype_display <- fix_names(cohort_subtype_dist$subtype_merged)
 
-# Merge and add pediatric/adult classification
-cohort_analysis <- cohort_performance
-cohort_analysis$cohort_type <- ifelse(
-  cohort_analysis$cohort %in% c("AAML0531", "AAML1031", "AAML03P1"), "Pediatric", "Adult"
-)
-
+# Outputs: full table and summary by cohort_type and label_set
 print(cohort_analysis)
-cohort_analysis %>% group_by(cohort_type) %>% summarise(mean = mean(kappa), sd = sd(kappa))
+cohort_analysis %>% group_by(label_set, cohort_type) %>% summarise(mean_kappa = mean(kappa), sd_kappa = sd(kappa), .groups = "drop")
 ```
 
 ```{r}
-# Boxplot: pediatric vs adult performance
-cohort_analysis_long <- cohort_analysis %>%
-  tidyr::pivot_longer(cols = c(kappa, accuracy), names_to = "metric", values_to = "value")
+# One grouped boxplot: Kappa by label set (Full first, Merged second), grouped by Pediatric vs Adult
+cohort_analysis$label_set <- factor(cohort_analysis$label_set, levels = c("Full subtypes", "Collapsed classes"))
+# Exclude non-finite kappa so no rows are dropped by scale (avoids warnings)
+cohort_plot <- cohort_analysis %>% filter(is.finite(kappa))
+ylow <- min(0.85, min(cohort_plot$kappa) - 0.01)
 
-p_ped_adult <- ggplot(cohort_analysis_long, aes(x = cohort_type, y = value, fill = cohort_type)) +
-  geom_boxplot(alpha = 0.7, outlier.shape = NA) +
-  geom_jitter(width = 0.2, size = 3, alpha = 0.6) +
-  facet_wrap(~metric, scales = "free_y", 
-             labeller = labeller(metric = c(kappa = "Cohen's Kappa", accuracy = "Accuracy"))) +
+# Means per (label_set, cohort_type) for annotation under boxplots
+cohort_means <- cohort_plot %>%
+  group_by(label_set, cohort_type) %>%
+  summarise(mean_kappa = mean(kappa), .groups = "drop")
+
+p_ped_adult <- ggplot(cohort_plot, aes(x = label_set, y = kappa, fill = cohort_type)) +
+  geom_boxplot(alpha = 0.9, outlier.shape = NA, position = position_dodge(width = 0.8)) +
+  geom_jitter(aes(group = cohort_type), size = 2, alpha = 0.8, position = position_jitterdodge(dodge.width = 0.75, jitter.width = 0.2)) +
+  geom_text(
+    data = cohort_means,
+    aes(x = label_set, y = 0.82, label = sprintf("%.2f", mean_kappa), group = cohort_type),
+    position = position_dodge(width = 0.75),
+    inherit.aes = FALSE,
+    size = 3.2
+  ) +
   scale_fill_manual(values = c("Adult" = "#7eb0d5", "Pediatric" = "#fd7f6f")) +
+  scale_y_continuous(limits = c(0.82, 1)) +
   theme_bw() +
-  labs(title = "LOSO Performance: Pediatric vs Adult Cohorts", x = "Cohort Type", 
-       y = "Performance", fill = "Cohort Type") +
-  theme(legend.position = "none")
+  labs(title = "Adult vs Pediatric Cohorts", subtitle = "LOSO setting", x = "", y = "Kappa", fill = "Cohort Type")
 
 print(p_ped_adult)
-ggsave("../writing/figures_new/pediatric_vs_adult_performance.png", p_ped_adult, width = 8, height = 5, dpi = 300)
+ggsave("../writing/figures_new/pediatric_vs_adult_performance.png", p_ped_adult, width = 6, height = 5, dpi = 300)
 ```
 
 ## -- Data Preparation: Sample-Level Analysis
@@ -1981,8 +2241,8 @@ loso_truth_list <- list()
 loso_fold_list <- list()
 loso_indices_list <- list()
 
-for (fold in names(outer_merged$detailed_performance$loso$svm)) {
-  fold_prob_matrix <- outer_merged$ensemble_matrices$loso$ovr_ensemble[[fold]]
+for (fold in names(outer_merged$detailed_performance$loso$Global_Optimized)) {
+  fold_prob_matrix <- outer_merged$ensemble_matrices$loso$global_ensemble[[fold]]
   predictions <- apply(fold_prob_matrix[,!colnames(fold_prob_matrix) %in% c("y", "outer_fold", "sample_indices")], 1, which.max)
   predictions <- colnames(fold_prob_matrix)[!colnames(fold_prob_matrix) %in% c("y", "outer_fold", "sample_indices")][predictions]
   truth <- as.character(fold_prob_matrix$y)
@@ -2004,9 +2264,12 @@ sample_level_df <- data.frame(
 )
 sample_level_df$correct <- sample_level_df$prediction == sample_level_df$truth
 
-# Add age and apply class transformations
+# Add age, sex, survival, and apply class transformations
 sample_level_df$age_days <- meta$age_days[sample_level_df$sample_index + 1]
 sample_level_df$age_years <- sample_level_df$age_days / 365.25
+sample_level_df$sex <- meta$sex[sample_level_df$sample_index + 1]
+sample_level_df$survival_days <- meta$survival_days[sample_level_df$sample_index + 1]
+sample_level_df$event <- meta$outcome[sample_level_df$sample_index + 1]
 sample_level_df$truth_merged <- modify_classes(sample_level_df$truth)
 sample_level_df$truth_display <- fix_names(sample_level_df$truth_merged)
 sample_level_df$prediction_merged <- modify_classes(sample_level_df$prediction)
@@ -2025,57 +2288,208 @@ sample_level_age <- sample_level_df
 ## -- Visualization: Age Effect on Performance
 
 ```{r}
-# Binned kappa by age
-age_bins <- seq(0, 90, by = 5)
-age_performance <- data.frame()
+# Build age-kappa plots for LOSO and standard CV in one place:
+# collapsed classes + full classes, while keeping legacy object names.
 
-for (i in 1:(length(age_bins)-1)) {
-  age_min <- age_bins[i]
-  age_max <- age_bins[i+1]
-  subset_data <- sample_level_age[sample_level_age$age_years >= age_min & 
-                                   sample_level_age$age_years < age_max, ]
-  
-  if (nrow(subset_data) >= 10) {
-    cm <- caret::confusionMatrix(
-      factor(subset_data$prediction_display, levels = unique(c(subset_data$truth_display, subset_data$prediction_display))),
-      factor(subset_data$truth_display, levels = unique(c(subset_data$truth_display, subset_data$prediction_display)))
-    )
-    
-    age_performance <- rbind(age_performance, data.frame(
-      age_mid = (age_min + age_max) / 2,
-      age_label = sprintf("%d-%d", age_min, age_max),
-      n = nrow(subset_data),
-      accuracy = mean(subset_data$correct),
-      kappa = as.numeric(cm$overall["Kappa"]),
-      se_accuracy = sd(subset_data$correct) / sqrt(nrow(subset_data))
-    ))
+build_sample_level_df <- function(res_obj, setting = c("loso", "cv"), collapsed = TRUE) {
+  setting <- match.arg(setting)
+  predictions_list <- list()
+  truth_list <- list()
+  indices_list <- list()
+  fold_list <- list()
+
+  for (fold in names(res_obj$detailed_performance[[setting]]$Global_Optimized)) {
+    fold_prob_matrix <- res_obj$ensemble_matrices[[setting]]$global_ensemble[[fold]]
+
+    # Keep only class-probability columns when deriving predicted label.
+    non_class_cols <- c("y", "outer_fold", "fold", "sample_indices", "sample_index")
+    class_cols <- colnames(fold_prob_matrix)[!colnames(fold_prob_matrix) %in% non_class_cols]
+    pred_idx <- apply(fold_prob_matrix[, class_cols, drop = FALSE], 1, which.max)
+    predictions <- class_cols[pred_idx]
+    truth <- as.character(fold_prob_matrix$y)
+
+    # Prefer sample_indices; fall back to sample_index if needed.
+    sample_indices <- if ("sample_indices" %in% colnames(fold_prob_matrix)) {
+      fold_prob_matrix$sample_indices
+    } else {
+      fold_prob_matrix$sample_index
+    }
+
+    predictions_list[[fold]] <- predictions
+    truth_list[[fold]] <- truth
+    indices_list[[fold]] <- sample_indices
+    fold_list[[fold]] <- rep(fold, length(predictions))
   }
+
+  out <- data.frame(
+    prediction = unlist(predictions_list),
+    truth = unlist(truth_list),
+    fold = unlist(fold_list),
+    sample_index = unlist(indices_list),
+    stringsAsFactors = FALSE
+  )
+  out$correct <- out$prediction == out$truth
+  out$age_days <- meta$age_days[out$sample_index + 1]
+  out$age_years <- out$age_days / 365.25
+
+  if (collapsed) {
+    out$truth_display <- fix_names(modify_classes(out$truth))
+    out$prediction_display <- fix_names(modify_classes(out$prediction))
+  } else {
+    out$truth_display <- fix_names(out$truth)
+    out$prediction_display <- fix_names(out$prediction)
+  }
+
+  out
 }
 
-p_age_kappa <- ggplot(age_performance, aes(x = age_mid, y = kappa)) +
-  geom_point(aes(size = n), alpha = 0.7, color = "#7eb0d5") +
-  geom_smooth(method = "loess", se = TRUE, color = "#7eb0d5", fill = "#7eb0d5", 
-              alpha = 0.2, formula = y ~ x) +
-  geom_vline(xintercept = 18, linetype = "dashed", color = "gray40", alpha = 0.5) +
-  annotate("text", x = 18, y = min(age_performance$kappa) - 0.02, 
-           label = "Pediatric/Adult\nBoundary", vjust = 1, size = 3, color = "gray40") +
-  scale_size_continuous(range = c(3, 12), name = "Sample Size") +
-  theme_bw() +
-  labs(title = "Prediction Performance by Patient Age",
-       subtitle = sprintf("Based on LOSO validation (n=%d patients)", nrow(sample_level_age)),
-       x = "Age (years)", y = "Cohen's Kappa") +
-  ylim(min(age_performance$kappa) - 0.15, 1) +
-  theme(text = element_text(size = 12))
+build_age_kappa <- function(df, min_n = 5) {
+  age_bins <- seq(0, 90, by = 4)
+  age_perf <- data.frame()
+
+  for (i in 1:(length(age_bins) - 1)) {
+    age_min <- age_bins[i]
+    age_max <- age_bins[i + 1]
+    subset_data <- df[df$age_years >= age_min & df$age_years < age_max, ]
+
+    if (nrow(subset_data) >= min_n) {
+      cm_levels <- unique(c(subset_data$truth_display, subset_data$prediction_display))
+      cm <- caret::confusionMatrix(
+        factor(subset_data$prediction_display, levels = cm_levels),
+        factor(subset_data$truth_display, levels = cm_levels)
+      )
+
+      age_perf <- rbind(age_perf, data.frame(
+        age_mid = (age_min + age_max) / 2,
+        age_label = sprintf("%d-%d", age_min, age_max),
+        n = nrow(subset_data),
+        accuracy = mean(subset_data$correct),
+        kappa = as.numeric(cm$overall["Kappa"]),
+        se_accuracy = sd(subset_data$correct) / sqrt(nrow(subset_data))
+      ))
+    }
+  }
+
+  age_perf
+}
+
+plot_age_kappa <- function(age_perf, point_color, subtitle_text) {
+  ggplot(age_perf, aes(x = age_mid, y = kappa)) +
+    geom_point(aes(size = n), alpha = 0.7, color = point_color) +
+    geom_smooth(method = "loess", se = TRUE, color = point_color, fill = point_color,
+                alpha = 0.2, formula = y ~ x) +
+    geom_vline(xintercept = 18, linetype = "dashed", color = "gray40", alpha = 0.5) +
+    annotate("text", x = 18, y = min(age_perf$kappa) - 0.02,
+             label = "Pediatric/Adult\nBoundary", vjust = 1, size = 3, color = "gray40") +
+    scale_size_continuous(range = c(1, 6), name = "Sample Size") +
+    theme_bw() +
+    labs(title = "Performance by Patient Age", subtitle = subtitle_text, x = "Age (years)", y = "Kappa") +
+    ylim(0.6, 1) +
+    theme(text = element_text(size = 10))
+}
+
+# Build sample-level data for each setting/label definition.
+sample_level_df <- build_sample_level_df(outer_merged, setting = "loso", collapsed = TRUE)
+sample_level_age <- sample_level_df
+sample_level_df_cv <- build_sample_level_df(outer_merged, setting = "cv", collapsed = TRUE)
+sample_level_df_full <- build_sample_level_df(outer_unmerged, setting = "loso", collapsed = FALSE)
+sample_level_df_cv_full <- build_sample_level_df(outer_unmerged, setting = "cv", collapsed = FALSE)
+
+# Compute binned age performance (keep historical object names for compatibility).
+age_performance <- build_age_kappa(sample_level_df)
+age_performance_cv <- build_age_kappa(sample_level_df_cv)
+age_performance_full_loso <- build_age_kappa(sample_level_df_full)
+age_performance_full_cv <- build_age_kappa(sample_level_df_cv_full)
+
+# Generate and save all four figures.
+p_age_kappa <- plot_age_kappa(age_performance, "#7eb0d5", "LOSO setting, collapsed classes")
+p_age_kappa_cv <- plot_age_kappa(age_performance_cv, "#5f9e6e", "Standard CV setting, collapsed classes")
+p_age_kappa_full <- plot_age_kappa(age_performance_full_loso, "#4c78a8", "LOSO setting, full classes")
+p_age_kappa_cv_full <- plot_age_kappa(age_performance_full_cv, "#2f7f5f", "Standard CV setting, full classes")
 
 print(p_age_kappa)
-ggsave("../writing/figures_new/age_effect_on_performance.png", p_age_kappa, width = 10, height = 6, dpi = 300)
+print(p_age_kappa_cv)
+print(p_age_kappa_full)
+print(p_age_kappa_cv_full)
+# ggsave("../writing/figures_new/age_effect_on_performance.png", p_age_kappa, width = 10, height = 6, dpi = 300)
+# ggsave("../writing/figures_new/age_effect_on_performance_cv.png", p_age_kappa_cv, width = 10, height = 6, dpi = 300)
+# ggsave("../writing/figures_new/age_effect_on_performance_full.png", p_age_kappa_full, width = 10, height = 6, dpi = 300)
+# ggsave("../writing/figures_new/age_effect_on_performance_cv_full.png", p_age_kappa_cv_full, width = 10, height = 6, dpi = 300)
+
+library(patchwork)
+p_age_kappa_cv + p_age_kappa + p_age_kappa_cv_full + p_age_kappa_full + patchwork::plot_layout(guides = "collect")
+```
+
+```{r}
+# Combined trend-line plot across all four age-kappa variants (no points, no SE ribbon).
+age_kappa_lines <- dplyr::bind_rows(
+  age_performance %>% dplyr::mutate(setting = "LOSO - Collapsed"),
+  age_performance_cv %>% dplyr::mutate(setting = "CV - Collapsed"),
+  age_performance_full_loso %>% dplyr::mutate(setting = "LOSO - Full"),
+  age_performance_full_cv %>% dplyr::mutate(setting = "CV - Full")
+)
+
+p_age_kappa_all_lines <- ggplot(age_kappa_lines, aes(x = age_mid, y = kappa, color = setting, linetype = setting)) +
+  geom_smooth(method = "loess", se = FALSE, formula = y ~ x, linewidth = 1.1) +
+  geom_vline(xintercept = 18, linetype = "dashed", color = "gray40", alpha = 0.6) +
+  annotate("text", x = 18, y = min(age_kappa_lines$kappa) - 0.02,
+             label = "Pediatric/Adult\nBoundary", vjust = 1, size = 3, color = "gray40") +
+  scale_color_manual(
+    values = c(
+      "LOSO - Collapsed" = "#ff7f00",
+      "CV - Collapsed" = "#4daf4a",
+      "LOSO - Full" = "#ff7f00",
+      "CV - Full" = "#4daf4a"
+    ),
+    name = "Setting"
+  ) +
+  scale_linetype_manual(
+    values = c(
+      "LOSO - Collapsed" = "solid",
+      "CV - Collapsed" = "solid",
+      "LOSO - Full" = "dotdash",
+      "CV - Full" = "dotdash"
+    ),
+    name = "Setting"
+  ) +
+  theme_bw() +
+  labs(
+    title = "Performance by Patient Age",
+    subtitle = "Standard CV/LOSO and full/collapsed classes",
+    x = "Age (years)",
+    y = "Kappa"
+  ) +
+  ylim(0.25, 1) +
+  theme(text = element_text(size = 10))
+
+print(p_age_kappa_all_lines)
+# ggsave("../writing/figures_new/age_effect_on_performance_all_lines.png", p_age_kappa_all_lines, width = 10, height = 6, dpi = 300)
+```
+
+## - Figure 2
+```{r}
+layout <- "
+AA
+AA
+AA
+BC
+"
+
+p <- final_plot + p_ped_adult + p_age_kappa_all_lines +
+  patchwork::plot_layout(design = layout) +
+  plot_annotation(tag_levels = "A") &
+  theme(
+    plot.tag = element_text(face = "bold")
+  )
+p
+ggsave("../writing/figures_new/f2.png", width = 250, height = 180, units = "mm")
 ```
 
 ## -- Per-Subtype F1 by Age Analysis
 
 ```{r}
 # Calculate F1 per subtype per 15-year age bin
-age_bins_5yr <- seq(0, 90, by = 20)
+age_bins_5yr <- seq(0, 90, by = 10)
 subtypes_unique <- unique(sample_level_age$truth_display)
 f1_by_age_subtype <- data.frame()
 
@@ -2114,7 +2528,7 @@ for (i in 1:(length(age_bins_5yr)-1)) {
 subtypes_multi_age <- f1_by_age_subtype %>%
   group_by(truth_display) %>%
   summarise(n_age_bins = n(), .groups = "drop") %>%
-  filter(n_age_bins >= 2)
+  filter(n_age_bins >= 1)
 
 f1_by_age_plot <- f1_by_age_subtype %>%
   filter(truth_display %in% subtypes_multi_age$truth_display)
@@ -2146,19 +2560,29 @@ ggsave("../writing/figures_new/f1_by_age_and_subtype_faceted.png", p_f1_age_subt
 ```{r}
 # Get F1 scores per subtype from per-class summaries
 per_class_f1 <- outer_merged$per_class_summaries$cv %>%
-  filter(Model == "OvR_Ensemble") %>%
+  filter(Model == "Global_Optimized") %>%
   select(Class, Mean_F1)
 per_class_f1$Class <- gsub("Class: ", "", per_class_f1$Class)
 per_class_f1$Class <- fix_names(per_class_f1$Class)
 
 # Analyze subtype distribution in pediatric vs adult samples
 subtype_enrichment <- sample_level_age %>%
-  group_by(truth_display, is_pediatric) %>%
-  summarise(n = n(), accuracy = mean(correct), .groups = "drop") %>%
-  tidyr::pivot_wider(names_from = is_pediatric, values_from = c(n, accuracy),
-                     values_fill = list(n = 0, accuracy = NA)) %>%
-  rename(n_adult = `n_FALSE`, n_pediatric = `n_TRUE`,
-         accuracy_adult = `accuracy_FALSE`, accuracy_pediatric = `accuracy_TRUE`)
+  group_by(truth_display) %>%
+  summarise(
+    n_pediatric = sum(is_pediatric, na.rm = TRUE),
+    n_adult = sum(!is_pediatric, na.rm = TRUE),
+    accuracy_pediatric = ifelse(
+      sum(is_pediatric, na.rm = TRUE) > 0,
+      mean(correct[is_pediatric], na.rm = TRUE),
+      NA_real_
+    ),
+    accuracy_adult = ifelse(
+      sum(!is_pediatric, na.rm = TRUE) > 0,
+      mean(correct[!is_pediatric], na.rm = TRUE),
+      NA_real_
+    ),
+    .groups = "drop"
+  )
 
 # Merge with F1 scores and calculate enrichment
 subtype_enrichment <- merge(subtype_enrichment, per_class_f1, 
@@ -2183,15 +2607,13 @@ for (i in 1:nrow(subtype_enrichment)) {
                          subtype_enrichment$n_adult[i], 
                          total_adult - subtype_enrichment$n_adult[i]),
                        nrow = 2, byrow = TRUE)
-  test_result <- if (min(cont_table) < 5) fisher.test(cont_table) else chisq.test(cont_table)
+  test_result <- fisher.test(cont_table)
   subtype_enrichment$chi_sq_p[i] <- test_result$p.value
 }
 subtype_enrichment$chi_sq_p_adj <- p.adjust(subtype_enrichment$chi_sq_p, method = "BH")
 subtype_enrichment$enrichment_class <- ifelse(
-  subtype_enrichment$chi_sq_p_adj < 0.05,
-  ifelse(subtype_enrichment$enrichment_ratio > 1, "Pediatric-enriched",
-         ifelse(subtype_enrichment$enrichment_ratio < 1, "Adult-enriched", "Similar")),
-  "Similar"
+  subtype_enrichment$enrichment_ratio > 1, "Pediatric-enriched",
+"Adult-enriched"
 )
 
 # Label samples by enrichment class
@@ -2199,6 +2621,7 @@ sample_level_age$subtype_enrichment <- subtype_enrichment$enrichment_class[
   match(sample_level_age$truth_display, subtype_enrichment$truth_display)
 ]
 ```
+
 
 ## -- Data Preparation: Per-Class F1 by Cohort Type
 
@@ -2230,7 +2653,7 @@ f1_per_class_cohort_list <- list()
 
 for (subtype in unique(sample_level_age$truth_display)) {
   subset_all <- sample_level_age[sample_level_age$truth_display == subtype, ]
-  if (nrow(subset_all) < 10) next
+  if (nrow(subset_all) < 5) next
   
   subset_ped <- subset_all[subset_all$is_pediatric == TRUE, ]
   subset_adult <- subset_all[subset_all$is_pediatric == FALSE, ]
@@ -2285,8 +2708,14 @@ f1_per_class_enriched$subtype <- factor(f1_per_class_enriched$subtype,
 library(patchwork)
 
 # Split by enrichment class
-dat_top <- f1_per_class_enriched %>% filter(enrichment_class == "Adult-enriched")
-dat_bottom <- f1_per_class_enriched %>% filter(enrichment_class != "Adult-enriched")
+dat_top <- f1_per_class_enriched %>% filter(enrichment_class == "Adult-enriched") %>%
+  group_by(subtype) %>%
+  filter(n() > 1) %>%
+  ungroup()
+dat_bottom <- f1_per_class_enriched %>% filter(enrichment_class != "Adult-enriched") %>%
+  group_by(subtype) %>%
+  filter(n() > 1) %>%
+  ungroup()
 
 p_top <- ggplot(dat_top, aes(x = subtype, y = f1, fill = cohort_type)) +
   geom_col(position = position_dodge(width = 0.85), width = 0.75, alpha = 0.85) +
@@ -2317,6 +2746,9 @@ p_f1_per_class <- p_top / p_bottom + plot_layout(heights = c(3, 8))
 print(p_f1_per_class)
 ggsave("../writing/figures_new/figures_class_perf.png", p_f1_per_class, width = 10, height = 10, dpi = 300)
 ```
+```{r}
+f1_per_class_enriched %>% group_by(is_pediatric, enrichment_class) %>% summarise(mean_f1 = mean(avg_f1))
+```
 
 ## -- Visualization: Subtype Enrichment and Performance
 
@@ -2334,7 +2766,7 @@ p_enrichment <- ggplot(subtype_enrichment,
   theme_bw() +
   labs(title = "Subtype Performance (F1) vs Pediatric/Adult Enrichment",
        subtitle = "Negative log2 ratio = Adult-enriched, Positive = Pediatric-enriched",
-       x = "Log2(Pediatric/Adult Enrichment Ratio)", y = "F1 Score") +
+       x = "Log2(Adult/Pediatric OR)", y = "F1 Score") +
   theme(legend.position = "bottom") #+
   #xlim(min(log2(subtype_enrichment$enrichment_ratio)) / 1.3,
   #max(log2(subtype_enrichment$enrichment_ratio)) * 1.3) +
@@ -2359,7 +2791,7 @@ get_f1_per_fold_loso <- function(res_obj, label_set_name) {
   
   for (fold in folds) {
     # Get predictions and truth for this fold
-    fold_perf <- res_obj$detailed_performance$loso$OvR_Ensemble[[fold]]
+    fold_perf <- res_obj$detailed_performance$loso$Global_Optimized[[fold]]
     predictions <- fold_perf$predictions
     truth <- fold_perf$truth
     
@@ -2405,6 +2837,39 @@ f1_loso_combined$label_set <- factor(f1_loso_combined$label_set,
 
 # Keep only (fold, class) rows where subtype has at least min_n samples in that fold
 f1_loso_combined <- f1_loso_combined %>% filter(n_in_fold >= min_n_per_subtype_in_fold)
+
+# CV analogue: per-class F1 per outer fold (for F1 vs n and other analyses)
+get_f1_per_fold_cv <- function(res_obj, label_set_name) {
+  folds <- names(res_obj$detailed_performance$cv$Global_Optimized)
+  f1_list <- list()
+  for (fold in folds) {
+    fold_perf <- res_obj$detailed_performance$cv$Global_Optimized[[fold]]
+    predictions <- fold_perf$predictions
+    truth <- fold_perf$truth
+    classes <- unique(c(as.character(predictions), as.character(truth)))
+    for (cls in classes) {
+      tp <- sum(truth == cls & predictions == cls)
+      fp <- sum(truth != cls & predictions == cls)
+      fn <- sum(truth == cls & predictions != cls)
+      n_in_fold <- sum(truth == cls)
+      precision <- ifelse(tp + fp > 0, tp / (tp + fp), 0)
+      recall <- ifelse(tp + fn > 0, tp / (tp + fn), 0)
+      f1 <- ifelse(precision + recall > 0, 2 * precision * recall / (precision + recall), 0)
+      f1_list[[length(f1_list) + 1]] <- data.frame(
+        fold = fold, class = cls, f1 = f1, n_in_fold = n_in_fold,
+        label_set = label_set_name, stringsAsFactors = FALSE
+      )
+    }
+  }
+  do.call(rbind, f1_list)
+}
+f1_full_cv <- get_f1_per_fold_cv(outer_unmerged, "Full subtypes")
+f1_merged_cv <- get_f1_per_fold_cv(outer_merged, "Collapsed classes")
+f1_full_cv$class <- fix_names(f1_full_cv$class)
+f1_merged_cv$class <- fix_names(f1_merged_cv$class)
+f1_cv_combined <- rbind(f1_full_cv, f1_merged_cv)
+f1_cv_combined$label_set <- factor(f1_cv_combined$label_set, levels = c("Full subtypes", "Collapsed classes"))
+f1_cv_combined <- f1_cv_combined %>% filter(n_in_fold >= min_n_per_subtype_in_fold)
 
 # Order classes by mean F1 (using merged as reference)
 # class_order <- f1_merged_loso %>%
@@ -2454,126 +2919,6 @@ ggsave("../writing/figures_new/f1_per_loso_fold_full_vs_merged.png", p_f1_loso_f
        width = 14, height = 12, dpi = 300)
 ```
 
-## -- Visualization: Delta F1 from Class Collapsing
-
-```{r}
-# Only include folds where the collapsed class has at least this many samples (avoids unstable delta from tiny n)
-min_n_delta_f1 <- 5L
-
-# Calculate delta F1 (F1_collapsed - F1_full) for collapsed class groups
-# Focus on MDS-related, other KMT2A, and MECOM rearrangement classes that were merged
-
-# Define the merge mapping: which full classes map to which collapsed class
-merge_mapping <- list(
-  "MDS-related" = c("MDS-related, gene mutations", "MDS-related, cytogenetic abnormalities", 
-                    "MDS-related, TP53 mutated", "MDS.r"),
-  "Other KMT2A rearrangements" = c("KMT2A::ELL", "KMT2A::MLLT10","KMT2A::MLLT1", "KMT2A::MLLT4", "KMT2A::SEPT6"),
-  "MECOM rearrangement" = c("GATA2;MECOM", "MECOM, other")
-)
-
-# Calculate mean F1 per fold for full subclasses and collapsed classes (only folds with n >= min_n_delta_f1)
-delta_f1_list <- list()
-
-for (collapsed_class in names(merge_mapping)) {
-  full_classes <- merge_mapping[[collapsed_class]]
-  
-  # Get F1 for the collapsed class per fold (from merged results); keep only folds with n >= min_n
-  collapsed_f1 <- f1_merged_loso %>%
-    filter(class == collapsed_class, n_in_fold >= min_n_delta_f1) %>%
-    select(fold, f1_collapsed = f1)
-  
-  # Get mean F1 across the constituent full classes per fold
-  # (weighted average would be better but mean is simpler for visualization)
-  full_f1 <- f1_full_loso %>%
-    filter(class %in% full_classes) %>%
-    group_by(fold) %>%
-    summarise(f1_full = mean(f1, na.rm = TRUE), .groups = "drop")
-  
-  # Calculate delta
-  delta_df <- merge(collapsed_f1, full_f1, by = "fold")
-  delta_df$delta_f1 <- delta_df$f1_collapsed - delta_df$f1_full
-  delta_df$group <- collapsed_class
-  
-  delta_f1_list[[collapsed_class]] <- delta_df
-}
-
-delta_f1_data <- do.call(rbind, delta_f1_list)
-
-# Add cohort type for coloring
-delta_f1_data$cohort_type <- ifelse(
-  delta_f1_data$fold %in% c("AAML0531", "AAML1031", "AAML03P1"), 
-  "Pediatric", "Adult"
-)
-
-# Calculate summary statistics for reporting
-delta_summary <- delta_f1_data %>%
-  group_by(group) %>%
-  summarise(
-    mean_delta = mean(delta_f1, na.rm = TRUE),
-    sd_delta = sd(delta_f1, na.rm = TRUE),
-    min_f1_full = min(f1_full, na.rm = TRUE),
-    max_f1_full = max(f1_full, na.rm = TRUE),
-    min_f1_collapsed = min(f1_collapsed, na.rm = TRUE),
-    max_f1_collapsed = max(f1_collapsed, na.rm = TRUE),
-    .groups = "drop"
-  )
-
-cat("Delta F1 Summary (Collapsed - Full):\n")
-cat("=====================================\n")
-print(delta_summary)
-
-# Bar plot with individual fold points showing delta F1
-p_delta_f1 <- ggplot(delta_f1_data, aes(x = group, y = delta_f1)) +
-  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
-  geom_boxplot(aes(fill = group), alpha = 0.3, outlier.shape = NA, width = 0.5) +
-  geom_point(aes(color = cohort_type, shape = cohort_type), 
-             size = 3, alpha = 0.8, position = position_jitter(width = 0.1, seed = 42)) +
-  scale_fill_manual(values = c("MDS-related" = "#d62728", 
-                               "Other KMT2A rearrangements" = "#ff7f0e",
-                               "MECOM rearrangement" = "#17becf"),
-                    guide = "none") +
-  scale_color_manual(values = c("Adult" = "#7eb0d5", "Pediatric" = "#fd7f6f"),
-                     name = "Cohort Type") +
-  scale_shape_manual(values = c("Adult" = 16, "Pediatric" = 17),
-                     name = "Cohort Type") +
-  theme_bw() +
-  labs(
-    title = "F1 Score Improvement from Class Collapsing (LOSO)",
-    subtitle = paste(
-      sprintf("Folds with n >= %d per collapsed class. ", min_n_delta_f1),
-      sprintf("MDS-related: mean dF1 = +%.2f", delta_summary$mean_delta[delta_summary$group == "MDS-related"]),
-      sprintf("| Other KMT2A: +%.2f", delta_summary$mean_delta[delta_summary$group == "Other KMT2A rearrangements"]),
-      if ("MECOM rearrangement" %in% delta_summary$group)
-        sprintf("| MECOM: +%.2f", delta_summary$mean_delta[delta_summary$group == "MECOM rearrangement"]) else "",
-      sep = " "
-    ),
-    x = "Collapsed Class Group",
-    y = expression(Delta*"F1 (Collapsed - Full)")
-  ) +
-  theme(
-    legend.position = "bottom",
-    plot.title = element_text(size = 12, face = "bold"),
-    axis.text.x = element_text(size = 10)
-  ) +
-  ylim(-0.1, max(delta_f1_data$delta_f1) + 0.05)
-
-print(p_delta_f1)
-ggsave("../writing/figures_new/delta_f1_collapsed_classes.png", p_delta_f1, 
-       width = 8, height = 6, dpi = 300)
-
-# Print detailed results for manuscript text
-cat("\n\nFor manuscript text:\n")
-cat("====================\n")
-for (grp in unique(delta_f1_data$group)) {
-  grp_data <- delta_f1_data[delta_f1_data$group == grp, ]
-  grp_summary <- delta_summary[delta_summary$group == grp, ]
-  cat(sprintf("\n%s:\n", grp))
-  cat(sprintf("  Full F1 range: %.2f - %.2f\n", grp_summary$min_f1_full, grp_summary$max_f1_full))
-  cat(sprintf("  Collapsed F1 range: %.2f - %.2f\n", grp_summary$min_f1_collapsed, grp_summary$max_f1_collapsed))
-  cat(sprintf("  Mean dF1: +%.2f (SD: %.2f)\n", grp_summary$mean_delta, grp_summary$sd_delta))
-}
-```
-
 # Gene selection analysis
 
 ```{r}
@@ -2594,15 +2939,11 @@ if local_python not in sys.path:
 
 # Load full fitted pipeline (joblib). Steps: DESeq2 norm -> MVG selection -> scaling.
 py_run_string("import joblib")
-py_run_string("pipeline = joblib.load('../data/out/final_models/pipelines/pipeline_ngenes_5000.pkl')")
+py_run_string("pipeline = joblib.load('../data/out/final_models/pipelines/pipeline_ngenes_500.pkl')")
 pipeline_2000 <- py$pipeline
 
 # Get full gene name vector (for all genes)
 counts_gene_names <- data.table::fread("../data/counts_20aug25.csv", select = 1, header = TRUE)[[1]]
-
-# Indices of selected MVGs from the pipeline (0-based in Python, 1-based in R)
-mvgs_1based <- py_to_r(py_eval("list(pipeline.named_steps['feature_selection'].mvgs_)"))
-mvgs_1based <- as.integer(mvgs_1based) + 1L
 
 # Build matrix of filtered counts (samples x all genes)
 X_counts <- as.matrix(counts_filtered)
@@ -2646,75 +2987,47 @@ df_eta2 <- data.frame(
   gene = counts_gene_names,
   eta2_study = as.numeric(eta2_study),
   eta2_subtype = as.numeric(eta2_subtype),
-  selected = seq_along(counts_gene_names) %in% mvgs_1based,
   stringsAsFactors = FALSE
 )
 ```
 
 ```{r}
 library(ggplot2)
-p_eta2 <- ggplot(df_eta2, aes(x = eta2_study, y = eta2_subtype)) +
-  geom_point(data = subset(df_eta2, !selected), color = "black", alpha = 0.35, size = 0.6) +
-  geom_point(data = subset(df_eta2, selected), color = "red", alpha = 0.6, size = 0.8) +
+
+
+df_eta2$score_subtype_vs_study <- df_eta2$eta2_subtype - df_eta2$eta2_study
+idx_ord <- order(df_eta2$score_subtype_vs_study, decreasing = TRUE, na.last = TRUE)
+df_eta2$rank_subtype <- match(seq_len(nrow(df_eta2)), idx_ord)  # rank by score_subtype_vs_study (1 = highest)
+df_eta2$tier <- factor(
+  ifelse(df_eta2$rank_subtype <= 250, "Top 250",
+    ifelse(df_eta2$rank_subtype <= 500, "Top 500",
+      ifelse(df_eta2$rank_subtype <= 1000, "Top 1000", "Other"))),
+  levels = c("Top 250", "Top 500", "Top 1000", "Other")
+)
+genes_500_subtype <- df_eta2$gene[idx_ord[1:500]]
+col_idx_500 <- match(genes_500_subtype, counts_gene_names)
+
+tier_colors <- c("Top 1000" = "#d62728", "Top 500" = "#ff7f0e", "Top 250" = "#1f77b4", "Other" = "gray70")
+p_eta2_2 <- ggplot(df_eta2, aes(x = eta2_study, y = eta2_subtype, color = tier)) +
+  geom_point(data = subset(df_eta2, tier != "Other"), alpha = 0.7, size = 0.9) +
+  geom_point(data = subset(df_eta2, tier == "Other"), alpha = 0.35, size = 0.6) +
+  scale_color_manual(values = tier_colors, name = "Rank") +
   theme_bw() +
   labs(
     x = expression(eta^2 ~ "(study | gene expression)"),
     y = expression(eta^2 ~ "(subtype | gene expression)"),
-    title = "Study vs subtype association per gene"
+    title = "Variance explained by study vs subtype, per gene"
   )
-p_eta2
-#ggsave("../writing/figures_new/eta2_study_vs_subtype.png", p_eta2, width = 6, height = 5, dpi = 300)
-```
+p_eta2_2
 
-## t-SNE on MVGs (PCA 50)
-
-```{r}
-library(Rtsne)
-
-# MVG expression (DESeq2-normalised), then scale for PCA
-X_mvg <- scale(counts_deseq2_all[, mvgs_1based])
-# PCA on MVGs, then use first 50 PCs for fast t-SNE
-pca_mvg <- prcomp(X_mvg, scale. = FALSE)
-pcs_50 <- pca_mvg$x[, 1:50]
-# t-SNE on 50 PC scores
-set.seed(42)
-tsne_mvg <- Rtsne(
-  pcs_50,
-  dims = 2,
-  perplexity = min(30, (nrow(pca_mvg$x) - 1) %/% 3),
-  max_iter = 1000,
-  pca = FALSE
-)
-df_tsne <- data.frame(
-  tsne1 = tsne_mvg$Y[, 1],
-  tsne2 = tsne_mvg$Y[, 2],
-  subtype = modify_classes(filtered_leukemia_subtypes),
-  study = filtered_study_names
-)
-# Group rare treatment subtypes into a single 'Rare' category
-df_tsne$subtype_grouped <- ifelse(
-  df_tsne$subtype %in% rare_tx_subtypes,
-  "Rare",
-  as.character(df_tsne$subtype)
-)
-df_tsne$subtype_grouped <- factor(df_tsne$subtype_grouped)
-
-p_tsne <- ggplot(df_tsne, aes(x = tsne1, y = tsne2, fill = subtype_grouped)) +
-  geom_point(alpha = 1, size = 1.5, shape = 21) +
-  scale_fill_brewer(palette = "Paired", name = "Subtype") +
-  theme_bw() +
-  labs(
-    x = "t-SNE 1",
-    y = "t-SNE 2",
-    title = "t-SNE on MVGs (50 PCs)"
-  )
-p_tsne
-#ggsave("../writing/figures_new/tsne_mvg_50pcs.png", p_tsne, width = 8, height = 6, dpi = 300)
+# ggsave("../writing/figures_new/eta2_study_vs_subtype.png", p_eta2_2, width = 6, height = 5, dpi = 300)
 ```
 
 ## t-SNE on 500 subtype-informative, study-invariant genes
 
 ```{r}
+library(Rtsne)
+
 # Rank genes by high eta2_subtype and low eta2_study (subtype signal, minimal batch)
 df_eta2$score_subtype_vs_study <- df_eta2$eta2_subtype - df_eta2$eta2_study
 idx_500 <- order(df_eta2$score_subtype_vs_study, decreasing = TRUE, na.last = TRUE)[1:500]
@@ -2723,13 +3036,10 @@ col_idx_500 <- match(genes_500_subtype, counts_gene_names)
 
 # Expression for these 500 genes only
 X_500 <- scale(counts_deseq2_all[, col_idx_500])
-pca_500 <- prcomp(X_500, scale. = FALSE)
-pcs_50_500 <- pca_500$x[, 1:min(50, ncol(pca_500$x))]
 set.seed(42)
 tsne_500 <- Rtsne(
-  pcs_50_500,
+  X_500,
   dims = 2,
-  perplexity = min(30, (nrow(pcs_50_500) - 1) %/% 3),
   max_iter = 1000,
   pca = FALSE
 )
@@ -2742,10 +3052,17 @@ df_tsne_500 <- data.frame(
 # Group rare treatment subtypes into a single 'Rare' category
 df_tsne_500$subtype_grouped <- ifelse(
   df_tsne_500$subtype %in% rare_tx_subtypes,
-  "Rare",
+  "Rare translocation",
   as.character(df_tsne_500$subtype)
 )
-df_tsne_500$subtype_grouped <- factor(df_tsne_500$subtype_grouped)
+df_tsne_500$subtype_grouped[df_tsne_500$subtype_grouped == "MDS.r"] <- "MDS-related"
+df_tsne_500$subtype_grouped[df_tsne_500$subtype_grouped == "MECOM"] <- "MECOM rearrangement"
+df_tsne_500$subtype_grouped[df_tsne_500$subtype_grouped == "other.KMT2A"] <- "Other KMT2A rearrangements"
+
+order <- desired_included_order
+order[10] <-  "Rare translocation"
+order <- intersect(order, unique(df_tsne_500$subtype_grouped))
+df_tsne_500$subtype_grouped <- factor(df_tsne_500$subtype_grouped, levels = order)
 
 p_tsne_500 <- ggplot(df_tsne_500, aes(x = tsne1, y = tsne2, fill = subtype_grouped)) +
   geom_point(alpha = 1, size = 1.5, shape = 21) +
@@ -2754,10 +3071,237 @@ p_tsne_500 <- ggplot(df_tsne_500, aes(x = tsne1, y = tsne2, fill = subtype_group
   labs(
     x = "t-SNE 1",
     y = "t-SNE 2",
-    title = "t-SNE on 500 genes (high eta2 subtype, low eta2 study; 50 PCs)"
+    title = "t-SNE; major subtypes"
   )
 p_tsne_500
-#ggsave("../writing/figures_new/tsne_500_subtype_vs_study.png", p_tsne_500, width = 8, height = 6, dpi = 300)
+# ggsave("../writing/figures_new/tsne_500_subtype_vs_study.png", p_tsne_500, width = 8, height = 6, dpi = 300)
+```
+```{r}
+library(RColorBrewer)
+df_tsne_500 <- data.frame(
+  tsne1 = tsne_500$Y[, 1],
+  tsne2 = tsne_500$Y[, 2],
+  subtype = filtered_leukemia_subtypes,
+  study = filtered_study_names
+)
+# Non-rare vs rare subtypes; non-rares gray and drawn below rares
+df_tsne_500$subtype_grouped <- ifelse(
+  !df_tsne_500$subtype %in% rare_tx_subtypes,
+  "Non-rare",
+  as.character(df_tsne_500$subtype)
+)
+df_tsne_500$subtype_grouped <- factor(df_tsne_500$subtype_grouped)
+
+df_tsne_nonrare <- subset(df_tsne_500, subtype_grouped == "Non-rare")
+df_tsne_rare <- subset(df_tsne_500, subtype_grouped != "Non-rare")
+
+rare_levels <- levels(droplevels(df_tsne_rare$subtype_grouped))
+rare_colors <- setNames(brewer.pal(max(3, length(rare_levels)), "Paired")[seq_along(rare_levels)], rare_levels)
+fill_values <- c("Non-rare" = "gray70", rare_colors)
+
+p_tsne_500_rare <- ggplot(df_tsne_500, aes(x = tsne1, y = tsne2, fill = subtype_grouped)) +
+  geom_point(data = df_tsne_nonrare, alpha = 0.6, size = 1.2, shape = 21) +
+  geom_point(data = df_tsne_rare, alpha = 1, size = 1.5, shape = 21) +
+  scale_fill_manual(values = fill_values, name = "Subtype", drop = FALSE) +
+  theme_bw() +
+  labs(
+    x = "t-SNE 1",
+    y = "t-SNE 2",
+    title = "t-SNE; rare translocations"
+  )
+p_tsne_500_rare
+```
+
+```{r}
+df_tsne_500 <- data.frame(
+  tsne1 = tsne_500$Y[, 1],
+  tsne2 = tsne_500$Y[, 2],
+  subtype = filtered_leukemia_subtypes,
+  study = filtered_study_names
+)
+
+# MDS (3 groups) + MECOM (2 groups): shown separately, others gray below
+mds_mecom_subtypes <- c(
+  "AML with MDS-related gene mutations", "AML with mutated TP53", "AML with MDS-related cytogenetic abnormalities",
+  "GATA2;MECOM", "MECOM, other"
+)
+is_focus <- df_tsne_500$subtype %in% mds_mecom_subtypes
+df_tsne_500$subtype_grouped <- ifelse(is_focus, as.character(df_tsne_500$subtype), "Other")
+df_tsne_500$subtype_grouped <- factor(df_tsne_500$subtype_grouped,
+  levels = c(mds_mecom_subtypes, "Other"))
+
+df_tsne_other <- subset(df_tsne_500, subtype_grouped == "Other")
+df_tsne_focus <- subset(df_tsne_500, subtype_grouped != "Other")
+
+# Five distinct colours (one per subtype)
+focus_colors <- c(
+  "AML with MDS-related gene mutations" = "#d62728",
+  "AML with mutated TP53" = "#ff7f0e",
+  "AML with MDS-related cytogenetic abnormalities" = "#9467bd",
+  "GATA2;MECOM" = "#2ca02c",
+  "MECOM, other" = "#17becf"
+)
+fill_mds_mecom <- c(focus_colors, "Other" = "gray70")
+
+p_tsne_500_MDS <- ggplot(df_tsne_500, aes(x = tsne1, y = tsne2, fill = subtype_grouped)) +
+  geom_point(data = df_tsne_other, alpha = 0.6, size = 1.2, shape = 21) +
+  geom_point(data = df_tsne_focus, alpha = 1, size = 1.5, shape = 21) +
+  scale_fill_manual(
+    values = fill_mds_mecom,
+    name = "Subtype",
+    drop = FALSE,
+    labels = function(x) gsub("^AML with MDS-related|^AML with", "MDS-r,", x)
+  ) +
+  theme_bw() +
+  labs(
+    x = "t-SNE 1",
+    y = "t-SNE 2",
+    title = "t-SNE; MDS-related and MECOM"
+  )
+p_tsne_500_MDS
+```
+
+```{r}
+# KMT2A fusions: all KMT2A subtypes shown, others gray below
+kmt2a_subtypes_tsne <- c("MLLT3::KMT2A", "KMT2A::ELL", "KMT2A::MLLT1", "KMT2A::MLLT10",
+  "KMT2A::MLLT4", "KMT2A::SEPT6", "KMT2A::SEPT9", "Other KMT2A rearrangements")
+is_kmt2a <- df_tsne_500$subtype %in% kmt2a_subtypes_tsne | grepl("KMT2A|MLLT3", df_tsne_500$subtype)
+df_tsne_500$subtype_grouped <- ifelse(is_kmt2a, as.character(df_tsne_500$subtype), "Other")
+df_tsne_500$subtype_grouped <- factor(df_tsne_500$subtype_grouped)
+
+df_tsne_other <- subset(df_tsne_500, subtype_grouped == "Other")
+df_tsne_kmt2a <- subset(df_tsne_500, subtype_grouped != "Other")
+
+kmt2a_levels <- levels(droplevels(df_tsne_kmt2a$subtype_grouped))
+kmt2a_colors <- setNames(brewer.pal(max(3, length(kmt2a_levels)), "Paired")[seq_along(kmt2a_levels)], kmt2a_levels)
+fill_kmt2a <- c("Other" = "gray70", kmt2a_colors)
+
+p_tsne_500_KMT2A <- ggplot(df_tsne_500, aes(x = tsne1, y = tsne2, fill = subtype_grouped)) +
+  geom_point(data = df_tsne_other, alpha = 0.6, size = 1.2, shape = 21) +
+  geom_point(data = df_tsne_kmt2a, alpha = 1, size = 1.5, shape = 21) +
+  scale_fill_manual(values = fill_kmt2a, name = "Subtype", drop = FALSE) +
+  theme_bw() +
+  labs(
+    x = "t-SNE 1",
+    y = "t-SNE 2",
+    title = "t-SNE; KMT2A fusions"
+  )
+p_tsne_500_KMT2A
+```
+
+```{r}
+library(patchwork)
+
+layout <- "
+111222
+111222
+334455
+"
+
+p_out <- (p_eta2_2 + p_tsne_500 + 
+ p_tsne_500_MDS + p_tsne_500_KMT2A + p_tsne_500_rare) +
+  plot_layout(design = layout) +
+  plot_annotation(tag_levels = "A") &
+  theme(
+    plot.tag = element_text(face = "bold")
+  )
+
+
+ggsave("../writing/figures_new/fig_features.svg", p_out, width = 400, height = 200, units = "mm")
+```
+
+```{r}
+library(ggplot2)
+library(cowplot)
+library(stringr)
+
+# helper: wrap legend labels in all discrete scales
+wrap_legend_labels <- function(p, width = 16) {
+  p + scale_color_discrete(labels = function(x) str_wrap(x, width = width))
+  # if you use fill/shape/etc, do similarly:
+  # + scale_fill_discrete(labels = function(x) str_wrap(x, width = width))
+}
+
+# helper: keep panel size fixed, legend in a separate fixed-height strip
+make_cell <- function(p, label = NULL, legend_height = 0.28) {
+  p_leg <- p + theme(legend.position = "bottom")
+  leg <- get_legend(p_leg)
+
+  p_noleg <- p +
+    theme(legend.position = "none")
+
+  p_labeled <- if (is.null(label)) p_noleg else
+    ggdraw(p_noleg) + draw_plot_label(label, x = 0.02, y = 0.98, hjust = 0, vjust = 1)
+
+  plot_grid(
+    p_labeled,
+    leg,
+    ncol = 1,
+    rel_heights = c(1, legend_height)  # same for all cells -> equal panel sizes
+  )
+}
+
+# apply label wrapping where needed
+p3w <- wrap_legend_labels(p_tsne_500_MDS, width = 14)
+p4w <- wrap_legend_labels(p_tsne_500_KMT2A, width = 14)
+p5w <- wrap_legend_labels(p_tsne_500_rare, width = 14)
+
+# top row (as before)
+top <- plot_grid(
+  p_eta2_2 + theme(legend.position = "right"),
+  p_tsne_500 + theme(legend.position = "right"),
+  labels = c("A", "B"),
+  ncol = 2,
+  align = "h"
+)
+
+# bottom row: each cell has same panel area + controlled legend area
+c_cell <- make_cell(p3w, "C", legend_height = 0.32)
+d_cell <- make_cell(p4w, "D", legend_height = 0.32)
+e_cell <- make_cell(p5w, "E", legend_height = 0.32)
+
+bottom <- plot_grid(c_cell, d_cell, e_cell, ncol = 3, align = "h")
+
+final <- plot_grid(top, bottom, ncol = 1, rel_heights = c(1, 1.15))
+final
+```
+```{r}
+library(egg)
+
+# top_row <- egg::ggarrange(p_tsne_500, p_tsne_500_rare, p_tsne_500_MDS, p_tsne_500_KMT2A, ncol = 2, nrow = 2, labels = c("B", "C", "D", "E"))
+# #bottom_row <- egg::ggarrange(, ncol = 2)
+# 
+# p_out <- ggpubr::ggarrange(
+#   p_eta2_2,
+#   top_row,
+#   nrow = 2,
+#   heights = c(1, 2)  # adjust if needed
+# )
+fig3_1 <- egg::ggarrange(
+  p_eta2_2, 
+  empty <- ggplot() + theme_void(),
+  ncol = 2, nrow = 1,
+  labels = c("A", ""),
+  widths = c(1,1),
+  label.args = list(gp = grid::gpar(family = "Arial", fontface = "bold"))
+)
+
+fig3_2 <- egg::ggarrange(
+  p_tsne_500, 
+  p_tsne_500_rare,
+  ncol = 2, nrow = 1,
+  labels = c("B", "C"),
+  label.args = list(gp = grid::gpar(family = "Arial", fontface = "bold"))
+)
+fig3 <- ggarrange(fig3_1, 
+                    fig3_2,
+                    nrow = 2, 
+                  heights = c(0.6,1))
+
+#fig3_1 + fig3_2 + plot_layout(design = layout)
+ggsave("../writing/figures_new/fig_features.svg", fig3, width = 300, height = 180, units = "mm")
+ggsave("../writing/figures_new/fig_features.png", fig3, width = 300, height = 180, units = "mm")
+
 ```
 
 # Ensemble Weights Analysis
@@ -2765,93 +3309,659 @@ p_tsne_500
 ##  --CV Weights Visualization
 
 ```{r}
-# Read global and OvR ensemble weights
-df_global <- read.csv("../data/out/inner_cv/ensemble_weights_merged_summed/cv/ovr_ensemble_weights_used.csv")
+# Helper: load global weights and build long df for plotting
+prep_weights_long <- function(csv_path) {
+  df <- read.csv(csv_path)
+  df %>%
+    dplyr::select(fold, svm_weight, xgb_weight, nn_weight) %>%
+    tidyr::pivot_longer(
+      cols = c(svm_weight, xgb_weight, nn_weight),
+      names_to = "model",
+      values_to = "weight"
+    )
+}
 
-# Select weight columns and fold info from global weights
-df_global_weights <- df_global %>%
-  dplyr::select(fold, svm_weight, xgb_weight, nn_weight) %>%
-  tidyr::pivot_longer(
-    cols = c(svm_weight, xgb_weight, nn_weight),
-    names_to = "model",
-    values_to = "weight"
-  )
+tidy_model_names <- function(df_long) {
+  df_long$model <- gsub("_weight", "", df_long$model)
+  df_long$model <- gsub("xgb", "XGBoost", df_long$model, ignore.case = TRUE)
+  df_long$model <- gsub("svm", "SVM", df_long$model, ignore.case = TRUE)
+  df_long$model <- gsub("nn", "DNN", df_long$model, ignore.case = TRUE)
+  df_long$fold <- factor(paste0("Fold ", df_long$fold))
+  df_long$weight <- as.numeric(df_long$weight)
+  df_long
+}
 
-# Combine both datasets
-df_long <- df_global_weights
+# Merged (global ensemble: merged/summed class probabilities)
+df_merged <- prep_weights_long("../data/out/inner_cv/ensemble_weights_merged_summed_eta2/cv/global_ensemble_weights_used.csv")
+df_merged <- tidy_model_names(df_merged)
 
-# Tidy model names
-df_long$model <- gsub("_weight", "", df_long$model)
-df_long$model <- gsub("xgb", "XGBoost", df_long$model, ignore.case = TRUE)
-df_long$model <- gsub("svm", "SVM", df_long$model, ignore.case = TRUE)
-df_long$model <- gsub("nn", "DNN", df_long$model, ignore.case = TRUE)
-
-# Convert fold to factor
-df_long$fold <- factor(paste0("Fold ", df_long$fold))
-df_long$weight <- as.numeric(df_long$weight)
-
-# Create boxplot with individual points
-p_weights_cv <- ggplot(df_long, aes(x = model, y = weight)) +
+p_weights_cv_merged <- ggplot(df_merged, aes(x = model, y = weight)) +
   geom_boxplot(alpha = 0.7, outlier.shape = NA) +
   geom_jitter(aes(color = fold), width = 0.2, size = 2, alpha = 0.6) +
   theme_bw() +
   theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
   labs(
-    title = "CV: Ensemble weights distribution (OvR)",
+    title = "CV: Global ensemble weights (merged)",
     x = "Model",
     y = "Weight",
     color = "Fold"
   ) +
-  ylim(0, 1)
+  ylim(-.01, 1)
 
-p_weights_cv
-ggsave('../writing/figures_new/weights_per_fold_cv.png', p_weights_cv, width = 10, height = 6, dpi = 300)
+p_weights_cv_merged
+ggsave('../writing/figures_new/weights_per_fold_cv_merged.png', p_weights_cv_merged, width = 10, height = 6, dpi = 300)
 ```
 
-##  --LOSO Weights visualisation
-
 ```{r}
-# Read global and OvR ensemble weights
-df_global <- read.csv("../data/out/inner_cv/ensemble_weights_merged_summed/loso/ovr_ensemble_weights_used.csv")
+# Unmerged (global ensemble: unmerged / full subtypes)
+df_unmerged <- prep_weights_long("../data/out/inner_cv/ensemble_weights_unmerged_eta2/cv/global_ensemble_weights_used.csv")
+df_unmerged <- tidy_model_names(df_unmerged)
 
-# Select weight columns and fold info from global weights
-df_global_weights <- df_global %>%
-  dplyr::select(fold, svm_weight, xgb_weight, nn_weight) %>%
-  tidyr::pivot_longer(
-    cols = c(svm_weight, xgb_weight, nn_weight),
-    names_to = "model",
-    values_to = "weight"
-  )
-
-# Combine both datasets
-df_long <- df_global_weights
-
-# Tidy model names
-df_long$model <- gsub("_weight", "", df_long$model)
-df_long$model <- gsub("xgb", "XGBoost", df_long$model, ignore.case = TRUE)
-df_long$model <- gsub("svm", "SVM", df_long$model, ignore.case = TRUE)
-df_long$model <- gsub("nn", "DNN", df_long$model, ignore.case = TRUE)
-
-# Convert fold to factor
-df_long$fold <- factor(paste0("Fold ", df_long$fold))
-df_long$weight <- as.numeric(df_long$weight)
-
-# Create boxplot with individual points
-p_weights_loso <- ggplot(df_long, aes(x = model, y = weight)) +
+p_weights_cv_unmerged <- ggplot(df_unmerged, aes(x = model, y = weight)) +
   geom_boxplot(alpha = 0.7, outlier.shape = NA) +
   geom_jitter(aes(color = fold), width = 0.2, size = 2, alpha = 0.6) +
   theme_bw() +
   theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
   labs(
-    title = "LOSO: Global ensemble weights distribution",
+    title = "CV: Global ensemble weights (unmerged)",
     x = "Model",
     y = "Weight",
     color = "Fold"
   ) +
+  ylim(-.01, 1)
+
+p_weights_cv_unmerged
+ggsave('../writing/figures_new/weights_per_fold_cv_unmerged.png', p_weights_cv_unmerged, width = 10, height = 6, dpi = 300)
+```
+
+##  --LOSO Weights Visualization
+
+```{r}
+# LOSO merged (global ensemble: merged/summed)
+df_loso_merged <- prep_weights_long("../data/out/inner_cv/ensemble_weights_merged_summed_eta2/loso/global_ensemble_weights_used.csv")
+df_loso_merged <- tidy_model_names(df_loso_merged)
+
+p_weights_loso_merged <- ggplot(df_loso_merged, aes(x = model, y = weight)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+  geom_jitter(aes(color = fold), width = 0.2, size = 2, alpha = 0.6) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(
+    title = "LOSO: Global ensemble weights (merged)",
+    x = "Model",
+    y = "Weight",
+    color = "Cohort"
+  ) +
+  ylim(-.001, 1)
+
+p_weights_loso_merged
+ggsave('../writing/figures_new/weights_per_fold_loso_merged.png', p_weights_loso_merged, width = 10, height = 6, dpi = 300)
+```
+
+```{r}
+# LOSO unmerged (global ensemble: unmerged / full subtypes)
+df_loso_unmerged <- prep_weights_long("../data/out/inner_cv/ensemble_weights_unmerged_eta2/loso/global_ensemble_weights_used.csv")
+df_loso_unmerged <- tidy_model_names(df_loso_unmerged)
+
+p_weights_loso_unmerged <- ggplot(df_loso_unmerged, aes(x = model, y = weight)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+  geom_jitter(aes(color = fold), width = 0.2, size = 2, alpha = 0.6) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(
+    title = "LOSO: Global ensemble weights (unmerged)",
+    x = "Model",
+    y = "Weight",
+    color = "Cohort"
+  ) +
+  ylim(-.001, 1)
+
+p_weights_loso_unmerged
+ggsave('../writing/figures_new/weights_per_fold_loso_unmerged.png', p_weights_loso_unmerged, width = 10, height = 6, dpi = 300)
+```
+
+##  --Combined: model selection trend across all four
+
+```{r}
+# Stack all four with a scenario label to compare weight trends
+df_merged$scenario <- "CV (collapsed)"
+df_unmerged$scenario <- "CV (full)"
+df_loso_merged$scenario <- "LOSO (collapsed)"
+df_loso_unmerged$scenario <- "LOSO (full)"
+
+df_weights_all <- rbind(df_merged, df_unmerged, df_loso_merged, df_loso_unmerged)
+df_weights_all$scenario <- factor(df_weights_all$scenario,
+  levels = c("CV (collapsed)", "CV (full)", "LOSO (collapsed)", "LOSO (full)"))
+
+# One plot: for each model (SVM, XGBoost, DNN), show distribution across the four scenarios
+p_weights_all <- ggplot(df_weights_all, aes(x = model, y = weight, fill = scenario)) +
+  geom_boxplot(position = position_dodge(0.8), width = 0.7, alpha = 0.8, outlier.shape = NA) +
+  geom_point(position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.8),
+    size = 1.2, alpha = 0.5, shape = 21, color = "gray20") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5), legend.position = "right") +
+  scale_fill_brewer(palette = "Set2", name = "Scenario") +
+  labs(
+    title = "Global ensemble weight by scenario: trend in model selection",
+    x = "Base model",
+    y = "Weight"
+  ) +
+  ylim(-.001, 1)
+
+p_weights_all
+ggsave('../writing/figures_new/weights_all_four_scenarios.png', p_weights_all, width = 9, height = 5, dpi = 300)
+```
+
+```{r}
+# Line plot: x = model, one line per scenario (coloured by run)
+df_weights_means <- df_weights_all %>%
+  group_by(model, scenario) %>%
+  summarise(mean_weight = mean(weight, na.rm = TRUE), .groups = "drop")
+
+# Order models on x for a clear left-to-right reading
+df_weights_means$model <- factor(df_weights_means$model, levels = rev(c("XGBoost", "SVM", "DNN")))
+
+p_weights_all_lines <- ggplot(df_weights_means, aes(x = model, y = mean_weight, color = scenario, group = scenario)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 3) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5), legend.position = "right") +
+  scale_color_brewer(palette = "Set2", name = "Scenario") +
+  labs(
+    title = "Mean global ensemble weight selected across outer folds by scenario",
+    x = "Base model",
+    y = "Mean weight"
+  ) +
   ylim(0, 1)
 
-p_weights_loso
-ggsave('../writing/figures_new/weights_per_fold_loso.png', p_weights_loso, width = 10, height = 6, dpi = 300)
+p_weights_all + p_weights_all_lines
+ggsave('../writing/figures_new/weights_all_four_scenarios_lines.png', p_weights_all_lines, width = 8, height = 5, dpi = 300)
+```
+
+# Additional insights
+```{r}
+# 1. Top confusion pairs: which (reference -> predicted) misclassifications are most common (merged, CV)
+conf_table_cv <- list()
+for (fold in names(outer_unmerged$detailed_performance$cv$Global_Optimized)) {
+  conf_table_cv[[fold]] <- outer_unmerged$detailed_performance$cv$Global_Optimized[[fold]]$confusion_matrix$table
+}
+all_classes_cv <- unique(unlist(lapply(conf_table_cv, function(x) c(rownames(x), colnames(x)))))
+conf_padded_cv <- lapply(conf_table_cv, function(mat) {
+  m <- matrix(0, nrow = length(all_classes_cv), ncol = length(all_classes_cv), dimnames = list(all_classes_cv, all_classes_cv))
+  m[rownames(mat), colnames(mat)] <- mat
+  m
+})
+total_conf_cv <- t(Reduce("+", conf_padded_cv))
+rownames(total_conf_cv) <- fix_names(rownames(total_conf_cv))
+colnames(total_conf_cv) <- fix_names(colnames(total_conf_cv))
+
+off_diag <- total_conf_cv
+diag(off_diag) <- NA
+pairs_df <- expand.grid(reference = rownames(off_diag), predicted = colnames(off_diag), stringsAsFactors = FALSE)
+pairs_df$n <- as.vector(off_diag)
+pairs_df <- pairs_df[!is.na(pairs_df$n) & pairs_df$n > 0, ]
+pairs_df <- pairs_df[order(-pairs_df$n), ]
+pairs_df$pair <- with(pairs_df, paste0(reference, " -> ", predicted))
+pairs_df_top <- head(pairs_df, 20)
+pairs_df_top$pair <- factor(pairs_df_top$pair, levels = rev(pairs_df_top$pair))
+
+p_top_confusions_unmerged <- ggplot(pairs_df_top, aes(x = n, y = pair)) +
+  geom_col(fill = "steelblue", alpha = 0.8) +
+  theme_bw() +
+  labs(title = "Top 20 misclassification pairs (CV, full classes)", x = "Count", y = "Reference -> Predicted") + xlim(0,15)
+#p_top_confusions_unmerged
+#ggsave('../writing/figures_new/top_confusion_pairs_unmerged.png', p_top_confusions_unmerged, width = 8, height = 5, dpi = 300)
+```
+```{r}
+# 1. Top confusion pairs: which (reference -> predicted) misclassifications are most common (merged, CV)
+conf_table_cv <- list()
+for (fold in names(outer_merged$detailed_performance$cv$Global_Optimized)) {
+  conf_table_cv[[fold]] <- outer_merged$detailed_performance$cv$Global_Optimized[[fold]]$confusion_matrix$table
+}
+all_classes_cv <- unique(unlist(lapply(conf_table_cv, function(x) c(rownames(x), colnames(x)))))
+conf_padded_cv <- lapply(conf_table_cv, function(mat) {
+  m <- matrix(0, nrow = length(all_classes_cv), ncol = length(all_classes_cv), dimnames = list(all_classes_cv, all_classes_cv))
+  m[rownames(mat), colnames(mat)] <- mat
+  m
+})
+total_conf_cv <- t(Reduce("+", conf_padded_cv))
+rownames(total_conf_cv) <- fix_names(rownames(total_conf_cv))
+colnames(total_conf_cv) <- fix_names(colnames(total_conf_cv))
+
+off_diag <- total_conf_cv
+diag(off_diag) <- NA
+pairs_df <- expand.grid(reference = rownames(off_diag), predicted = colnames(off_diag), stringsAsFactors = FALSE)
+pairs_df$n <- as.vector(off_diag)
+pairs_df <- pairs_df[!is.na(pairs_df$n) & pairs_df$n > 0, ]
+pairs_df <- pairs_df[order(-pairs_df$n), ]
+pairs_df$pair <- with(pairs_df, paste0(reference, " -> ", predicted))
+pairs_df_top <- head(pairs_df, 20)
+pairs_df_top$pair <- factor(pairs_df_top$pair, levels = rev(pairs_df_top$pair))
+
+p_top_confusions <- ggplot(pairs_df_top, aes(x = n, y = pair)) +
+  geom_col(fill = "steelblue", alpha = 0.8) +
+  theme_bw() +
+  labs(title = "Top 20 misclassification pairs (CV, collapsed classes)", x = "Count", y = "Reference -> Predicted")+ xlim(0,15)
+#p_top_confusions
+#ggsave('../writing/figures_new/top_confusion_pairs.png', p_top_confusions, width = 8, height = 5, dpi = 300)
+
+p_top_confusions_unmerged + p_top_confusions
+```
+
+```{r}
+# 2a. F1 vs sample size: do rarer subtypes get lower F1? (LOSO, points = fold-class)
+p_f1_vs_n_loso <- ggplot(f1_loso_combined, aes(x = n_in_fold, y = f1)) +
+  geom_point(alpha = 0.4, size = 1.5) +
+  geom_smooth(se = TRUE, method = "loess", formula = y ~ x, colour = "darkred", linewidth = 1) +
+  theme_bw() +
+  labs(
+    title = "F1 vs sample size in fold (LOSO)",
+    x = "Samples of subtype in fold (n)",
+    y = "F1"
+  ) +
+  xlim(0, NA) + ylim(0,1.25)
+p_f1_vs_n_loso
+ggsave('../writing/figures_new/f1_vs_n_in_fold_loso.png', p_f1_vs_n_loso, width = 6, height = 4, dpi = 300)
+
+# 2b. Same for CV (points = fold-class)
+p_f1_vs_n_cv <- ggplot(f1_cv_combined, aes(x = n_in_fold, y = f1)) +
+  geom_point(alpha = 0.4, size = 1.5) +
+  geom_smooth(se = TRUE, method = "loess", formula = y ~ x, colour = "darkblue", linewidth = 1) +
+  theme_bw() +
+  labs(
+    title = "F1 vs sample size in fold (CV)",
+    x = "Samples of subtype in fold (n)",
+    y = "F1"
+  ) +
+  xlim(0, NA) + ylim(0,1.25)
+p_f1_vs_n_cv
+ggsave('../writing/figures_new/f1_vs_n_in_fold_cv.png', p_f1_vs_n_cv, width = 6, height = 4, dpi = 300)
+
+p_f1_vs_n_cv + p_f1_vs_n_loso
+```
+
+```{r}
+# 2c/2d. F1 vs n overall (one point per class, not per fold): x = total n in dataset, y = mean F1
+# Overall n per class: pool truth across all folds, then count per class (fix_names for display)
+get_overall_n_per_class <- function(res_obj) {
+  truth_all <- unlist(lapply(res_obj$detailed_performance$cv$Global_Optimized, function(f) as.character(f$truth)))
+  n_vec <- table(fix_names(truth_all))
+  data.frame(class = names(n_vec), n = as.integer(n_vec), stringsAsFactors = FALSE)
+}
+# Overall F1 per class from per_class_summaries
+get_overall_f1_per_class <- function(res_obj, type) {
+  res_obj$per_class_summaries[[type]] %>%
+    filter(Model == "Global_Optimized") %>%
+    mutate(class = fix_names(gsub("Class: ", "", Class)), f1 = Mean_F1) %>%
+    select(class, f1)
+}
+
+n_full <- get_overall_n_per_class(outer_unmerged)
+n_merged <- get_overall_n_per_class(outer_merged)
+overall_f1_full_cv <- get_overall_f1_per_class(outer_unmerged, "cv")
+overall_f1_full_loso <- get_overall_f1_per_class(outer_unmerged, "loso")
+overall_f1_merged_cv <- get_overall_f1_per_class(outer_merged, "cv")
+overall_f1_merged_loso <- get_overall_f1_per_class(outer_merged, "loso")
+
+# One row per (class, label_set) for CV and for LOSO
+overall_f1_n_cv <- bind_rows(
+  left_join(overall_f1_full_cv, n_full, by = "class") %>% mutate(label_set = "Full subtypes"),
+  left_join(overall_f1_merged_cv, n_merged, by = "class") %>% mutate(label_set = "Collapsed classes")
+)
+overall_f1_n_loso <- bind_rows(
+  left_join(overall_f1_full_loso, n_full, by = "class") %>% mutate(label_set = "Full subtypes"),
+  left_join(overall_f1_merged_loso, n_merged, by = "class") %>% mutate(label_set = "Collapsed classes")
+)
+
+# Mean F1 for classes in n bins: 10-20 (small) and 200 to max (large), for reporting
+overall_f1_n_cv_ok <- overall_f1_n_cv %>% filter(is.finite(f1))
+overall_f1_n_loso_ok <- overall_f1_n_loso %>% filter(is.finite(f1))
+n_max_cv <- max(overall_f1_n_cv_ok$n)
+n_max_loso <- max(overall_f1_n_loso_ok$n)
+mean_f1_n10_20_cv <- overall_f1_n_cv_ok %>% filter(n >= 10, n <= 20) %>% summarise(mean_f1 = mean(f1), n_classes = n(), .groups = "drop")
+mean_f1_n10_20_loso <- overall_f1_n_loso_ok %>% filter(n >= 10, n <= 20) %>% summarise(mean_f1 = mean(f1), n_classes = n(), .groups = "drop")
+mean_f1_n200_max_cv <- overall_f1_n_cv_ok %>% filter(n >= 200) %>% summarise(mean_f1 = mean(f1), n_classes = n(), .groups = "drop")
+mean_f1_n200_max_loso <- overall_f1_n_loso_ok %>% filter(n >= 200) %>% summarise(mean_f1 = mean(f1), n_classes = n(), .groups = "drop")
+cat("Mean F1, classes with n 10-20:  CV =", round(mean_f1_n10_20_cv$mean_f1, 3), "(n =", mean_f1_n10_20_cv$n_classes, "classes); LOSO =", round(mean_f1_n10_20_loso$mean_f1, 3), "(n =", mean_f1_n10_20_loso$n_classes, "classes)\n")
+cat("Mean F1, classes with n 200-", max(n_max_cv, n_max_loso), ": CV =", round(mean_f1_n200_max_cv$mean_f1, 3), "(n =", mean_f1_n200_max_cv$n_classes, "classes); LOSO =", round(mean_f1_n200_max_loso$mean_f1, 3), "(n =", mean_f1_n200_max_loso$n_classes, "classes)\n")
+
+p_f1_vs_n_loso_overall <- ggplot(overall_f1_n_loso %>% filter(is.finite(f1)), aes(x = n, y = f1, color = label_set)) +
+  geom_point(alpha = 0.8, size = 3) +
+  geom_smooth(se = F, method = "loess", formula = y ~ x, linewidth = 1, alpha = 0.2) +
+  scale_color_manual(values = c("Full subtypes" = "gray40", "Collapsed classes" = "darkred")) +
+  theme_bw() +
+  labs(title = "F1 vs sample size (LOSO)", x = "Samples of subtype in dataset (n)", y = "F1", color = "Label set") +
+  xlim(0, NA) + ylim(0, 1.05)
+
+p_f1_vs_n_cv_overall <- ggplot(overall_f1_n_cv %>% filter(is.finite(f1)), aes(x = n, y = f1, color = label_set)) +
+  geom_point(alpha = 0.8, size = 3) +
+  geom_smooth(se = F, method = "loess", formula = y ~ x, linewidth = 1, alpha = 0.2) +
+  scale_color_manual(values = c("Full subtypes" = "gray40", "Collapsed classes" = "darkblue")) +
+  theme_bw() +
+  labs(title = "F1 vs sample size (CV)", x = "Samples of subtype in dataset (n)", y = "F1", color = "Label set") +
+  xlim(0, NA) + ylim(0, 1.05)
+
+print(p_f1_vs_n_loso_overall)
+print(p_f1_vs_n_cv_overall)
+ggsave('../writing/figures_new/f1_vs_n_overall_loso.png', p_f1_vs_n_loso_overall, width = 6, height = 4, dpi = 300)
+ggsave('../writing/figures_new/f1_vs_n_overall_cv.png', p_f1_vs_n_cv_overall, width = 6, height = 4, dpi = 300)
+
+p_f1_vs_n_cv_overall + p_f1_vs_n_loso_overall
+```
+
+```{r}
+# 3. Ensemble weight vs fold performance: do folds that assign higher weight to a model do better? (LOSO merged)
+kappa_loso <- results_per_fold %>%
+  filter(type == "loso", label_set == "Collapsed classes", model == "Ensemble") %>%
+  select(fold, kappa)
+df_loso_merged$fold <- as.character(df_loso_merged$fold)
+kappa_loso$fold <- paste0("Fold ", "", as.character(kappa_loso$fold))
+df_weight_kappa <- left_join(df_loso_merged, kappa_loso, by = "fold")
+
+p_weight_vs_kappa <- ggplot(df_weight_kappa, aes(x = weight, y = kappa)) +
+  geom_point(aes(color = fold), size = 3) +
+  facet_wrap(~ model, nrow = 1) +
+  theme_bw() +
+  theme(legend.position = "bottom", legend.title = element_blank()) +
+  labs(
+    title = "LOSO: ensemble weight vs fold kappa (merged)",
+    x = "Weight assigned to base model",
+    y = "Fold kappa (Ensemble)"
+  )
+p_weight_vs_kappa
+ggsave('../writing/figures_new/weight_vs_kappa_loso.png', p_weight_vs_kappa, width = 9, height = 4, dpi = 300)
+```
+
+### Multivariate Platt Foldwise Diagnostics
+
+```{r}
+library(dplyr)
+library(tidyr)
+
+# Evaluate fold-wise multivariate calibration behavior using the same leave-one-fold-out
+# pool design used in the outer-CV script.
+extract_mv_features <- function(prob_matrix) {
+  meta_cols <- c(
+    "y", "inner_fold", "outer_fold", "indices", "study", "sample_indices",
+    "confidence_calibrated", "confidence_multivariate", "is_leftout",
+    "n_models_agree", "mean_js_convergence", "top1_prob_variance_across_models"
+  )
+  prob_cols <- colnames(prob_matrix)[!colnames(prob_matrix) %in% meta_cols]
+  if (length(prob_cols) == 0) return(data.frame())
+
+  prob_mat <- as.matrix(prob_matrix[, prob_cols, drop = FALSE])
+  n <- nrow(prob_mat)
+  if (n == 0) return(data.frame())
+
+  pred_idx <- max.col(prob_mat, ties.method = "first")
+  max_prob <- prob_mat[cbind(seq_len(n), pred_idx)]
+
+  prob_mat_mod <- prob_mat
+  prob_mat_mod[cbind(seq_len(n), pred_idx)] <- -Inf
+  second_prob <- prob_mat_mod[cbind(seq_len(n), max.col(prob_mat_mod, ties.method = "first"))]
+  margin <- max_prob - second_prob
+
+  pred <- gsub("Class\\. ", "", prob_cols[pred_idx])
+  truth <- gsub("Class\\. ", "", prob_matrix$y)
+
+  out <- data.frame(
+    max_prob = as.numeric(max_prob),
+    margin = as.numeric(margin),
+    entropy = {
+      prob_clipped <- pmax(prob_mat, 1e-12)
+      if (ncol(prob_clipped) > 1) {
+        ent <- -rowSums(prob_clipped * log(prob_clipped)) / log(ncol(prob_clipped))
+        pmin(1, pmax(0, ent))
+      } else {
+        rep(0, n)
+      }
+    },
+    n_models_agree = if ("n_models_agree" %in% colnames(prob_matrix)) as.numeric(prob_matrix$n_models_agree) else NA_real_,
+    top1_prob_variance_across_models = if ("top1_prob_variance_across_models" %in% colnames(prob_matrix)) as.numeric(prob_matrix$top1_prob_variance_across_models) else NA_real_,
+    correct = as.integer(truth == pred),
+    stringsAsFactors = FALSE
+  )
+  out
+}
+
+calc_ece <- function(y_true, p_hat, n_bins = 10) {
+  keep <- is.finite(y_true) & is.finite(p_hat)
+  if (!any(keep)) return(NA_real_)
+  y_true <- y_true[keep]
+  p_hat <- p_hat[keep]
+  bins <- cut(p_hat, breaks = seq(0, 1, length.out = n_bins + 1), include.lowest = TRUE, labels = FALSE)
+  bin_tbl <- data.frame(y_true = y_true, p_hat = p_hat, bin = bins) %>%
+    group_by(bin) %>%
+    summarise(
+      n = n(),
+      obs = mean(y_true),
+      conf = mean(p_hat),
+      .groups = "drop"
+    )
+  if (nrow(bin_tbl) == 0) return(NA_real_)
+  sum((bin_tbl$n / sum(bin_tbl$n)) * abs(bin_tbl$obs - bin_tbl$conf))
+}
+
+calc_fold_metrics <- function(y_true, p_hat) {
+  eps <- 1e-6
+  p <- pmin(1 - eps, pmax(eps, p_hat))
+  brier <- mean((y_true - p)^2, na.rm = TRUE)
+  ece <- calc_ece(y_true, p, n_bins = 10)
+  logit_p <- qlogis(p)
+  slope_fit <- tryCatch(stats::glm(y_true ~ logit_p, family = stats::binomial), error = function(e) NULL)
+  slope <- if (!is.null(slope_fit)) as.numeric(stats::coef(slope_fit)[["logit_p"]]) else NA_real_
+  intercept <- if (!is.null(slope_fit)) as.numeric(stats::coef(slope_fit)[["(Intercept)"]]) else NA_real_
+  data.frame(brier = brier, ece = ece, calib_slope = slope, calib_intercept = intercept, stringsAsFactors = FALSE)
+}
+
+safe_mcfadden_r2 <- function(fit_obj) {
+  if (is.null(fit_obj)) return(NA_real_)
+  ll_fit <- tryCatch(as.numeric(stats::logLik(fit_obj)), error = function(e) NA_real_)
+  ll_null <- tryCatch(as.numeric(stats::logLik(update(fit_obj, . ~ 1))), error = function(e) NA_real_)
+  if (!is.finite(ll_fit) || !is.finite(ll_null) || ll_null == 0) return(NA_real_)
+  1 - (ll_fit / ll_null)
+}
+
+run_mv_foldwise_diagnostics <- function(res_obj, scenario_name = "merged") {
+  all_rows <- list()
+  all_coefs <- list()
+  row_idx <- 1L
+  coef_idx <- 1L
+
+  for (regime in c("standard", "with_leftout")) {
+    for (split_type in c("cv", "loso")) {
+      mv_node <- res_obj$multivariate_results[[regime]][[split_type]]
+      if (is.null(mv_node) || is.null(mv_node$fold_matrices)) next
+      fold_mats <- mv_node$fold_matrices
+      if (!is.list(fold_mats) || length(fold_mats) < 2L) next
+
+      fold_names <- names(fold_mats)
+      for (fold in fold_names) {
+        target <- fold_mats[[fold]]
+        others <- fold_mats[setdiff(fold_names, fold)]
+        others_known <- lapply(others, function(m) {
+          if ("is_leftout" %in% colnames(m)) m[!m$is_leftout, , drop = FALSE] else m
+        })
+
+        pool_df <- bind_rows(lapply(others_known, extract_mv_features))
+        target_df <- extract_mv_features(target)
+        if (nrow(pool_df) < 10 || nrow(target_df) == 0 || length(unique(pool_df$correct)) < 2) next
+
+        candidate_terms <- c("max_prob", "margin", "entropy", "n_models_agree", "top1_prob_variance_across_models")
+        usable_terms <- candidate_terms[sapply(candidate_terms, function(v) {
+          v %in% colnames(pool_df) && any(is.finite(pool_df[[v]]))
+        })]
+        full_formula <- stats::as.formula(paste("correct ~", paste(usable_terms, collapse = " + ")))
+
+        fit_full <- tryCatch(stats::glm(full_formula, data = pool_df, family = stats::binomial), error = function(e) NULL)
+        fit_base <- tryCatch(stats::glm(correct ~ max_prob, data = pool_df, family = stats::binomial), error = function(e) NULL)
+        if (is.null(fit_base)) next
+        if (is.null(fit_full)) fit_full <- fit_base
+
+        p_full <- tryCatch(as.numeric(stats::predict(fit_full, newdata = target_df, type = "response")), error = function(e) NULL)
+        p_base <- tryCatch(as.numeric(stats::predict(fit_base, newdata = target_df, type = "response")), error = function(e) NULL)
+        if (is.null(p_full) || is.null(p_base)) next
+
+        m_full <- calc_fold_metrics(target_df$correct, p_full)
+        m_base <- calc_fold_metrics(target_df$correct, p_base)
+
+        all_rows[[row_idx]] <- data.frame(
+          scenario = scenario_name,
+          regime = regime,
+          split_type = split_type,
+          fold = fold,
+          n_pool = nrow(pool_df),
+          n_target = nrow(target_df),
+          full_formula = paste(deparse(stats::formula(fit_full)), collapse = ""),
+          aic_full = stats::AIC(fit_full),
+          aic_base = stats::AIC(fit_base),
+          aic_delta_base_minus_full = stats::AIC(fit_base) - stats::AIC(fit_full),
+          mcfadden_r2_full = safe_mcfadden_r2(fit_full),
+          mcfadden_r2_base = safe_mcfadden_r2(fit_base),
+          brier_full = m_full$brier,
+          brier_base = m_base$brier,
+          brier_delta_base_minus_full = m_base$brier - m_full$brier,
+          ece_full = m_full$ece,
+          ece_base = m_base$ece,
+          ece_delta_base_minus_full = m_base$ece - m_full$ece,
+          calib_slope_full = m_full$calib_slope,
+          calib_intercept_full = m_full$calib_intercept,
+          calib_slope_base = m_base$calib_slope,
+          calib_intercept_base = m_base$calib_intercept,
+          stringsAsFactors = FALSE
+        )
+        row_idx <- row_idx + 1L
+
+        coef_mat <- summary(fit_full)$coefficients
+        coef_df <- data.frame(
+          scenario = scenario_name,
+          regime = regime,
+          split_type = split_type,
+          fold = fold,
+          term = rownames(coef_mat),
+          estimate = as.numeric(coef_mat[, "Estimate"]),
+          std_error = as.numeric(coef_mat[, "Std. Error"]),
+          z_value = as.numeric(coef_mat[, "z value"]),
+          p_value = as.numeric(coef_mat[, "Pr(>|z|)"]),
+          stringsAsFactors = FALSE
+        )
+        all_coefs[[coef_idx]] <- coef_df
+        coef_idx <- coef_idx + 1L
+      }
+    }
+  }
+
+  fold_metrics <- bind_rows(all_rows)
+  coef_table <- bind_rows(all_coefs)
+  coef_stability <- coef_table %>%
+    filter(term != "(Intercept)") %>%
+    group_by(scenario, regime, split_type, term) %>%
+    summarise(
+      n_folds = n(),
+      mean_estimate = mean(estimate, na.rm = TRUE),
+      sd_estimate = sd(estimate, na.rm = TRUE),
+      positive_rate = mean(estimate > 0, na.rm = TRUE),
+      p_lt_0_05_rate = mean(p_value < 0.05, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    arrange(scenario, regime, split_type, desc(abs(mean_estimate)))
+
+  list(
+    fold_metrics = fold_metrics,
+    coef_table = coef_table,
+    coef_stability = coef_stability
+  )
+}
+
+mv_diag_merged <- run_mv_foldwise_diagnostics(outer_merged, "merged")
+mv_diag_unmerged <- run_mv_foldwise_diagnostics(outer_unmerged, "unmerged")
+
+mv_diag_fold_metrics <- bind_rows(mv_diag_merged$fold_metrics, mv_diag_unmerged$fold_metrics)
+mv_diag_coef_table <- bind_rows(mv_diag_merged$coef_table, mv_diag_unmerged$coef_table)
+mv_diag_coef_stability <- bind_rows(mv_diag_merged$coef_stability, mv_diag_unmerged$coef_stability)
+
+# Compact across-fold summary for quick reading.
+mv_diag_summary <- mv_diag_fold_metrics %>%
+  group_by(scenario, regime, split_type) %>%
+  summarise(
+    n_folds = n(),
+    mean_aic_delta = mean(aic_delta_base_minus_full, na.rm = TRUE),
+    mean_brier_delta = mean(brier_delta_base_minus_full, na.rm = TRUE),
+    mean_ece_delta = mean(ece_delta_base_minus_full, na.rm = TRUE),
+    mean_calib_slope_full = mean(calib_slope_full, na.rm = TRUE),
+    mean_calib_slope_base = mean(calib_slope_base, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(scenario, regime, split_type)
+
+mv_diag_out_dir <- file.path("../data/out/outer_cv", "multivariate_platt_diagnostics")
+dir.create(mv_diag_out_dir, recursive = TRUE, showWarnings = FALSE)
+write.csv(mv_diag_fold_metrics, file.path(mv_diag_out_dir, "fold_metrics.csv"), row.names = FALSE)
+write.csv(mv_diag_coef_table, file.path(mv_diag_out_dir, "coefficients_by_fold.csv"), row.names = FALSE)
+write.csv(mv_diag_coef_stability, file.path(mv_diag_out_dir, "coefficient_stability_summary.csv"), row.names = FALSE)
+write.csv(mv_diag_summary, file.path(mv_diag_out_dir, "diagnostic_summary.csv"), row.names = FALSE)
+
+mv_diag_summary
+mv_diag_coef_stability
+```
+
+```{r}
+# Final verdict table:
+# 1) model-level winner (multivariate vs simple)
+# 2) term-level usefulness call based on fold stability/significance
+model_verdict <- mv_diag_summary %>%
+  mutate(
+    # Positive deltas favor multivariate (full model).
+    support_score = as.integer(mean_aic_delta > 2) +
+      as.integer(mean_brier_delta > 0) +
+      as.integer(mean_ece_delta > 0),
+    verdict = dplyr::case_when(
+      support_score >= 2 ~ "multivariate_better",
+      support_score == 1 ~ "tie_or_context_dependent",
+      TRUE ~ "simple_better"
+    ),
+    slope_winner = dplyr::case_when(
+      is.finite(mean_calib_slope_full) & is.finite(mean_calib_slope_base) &
+        abs(mean_calib_slope_full - 1) < abs(mean_calib_slope_base - 1) ~ "multivariate",
+      is.finite(mean_calib_slope_full) & is.finite(mean_calib_slope_base) &
+        abs(mean_calib_slope_full - 1) > abs(mean_calib_slope_base - 1) ~ "simple",
+      TRUE ~ "undetermined"
+    )
+  ) %>%
+  arrange(scenario, regime, split_type)
+
+term_verdict <- mv_diag_coef_stability %>%
+  mutate(
+    sign_stable = (positive_rate >= 0.8) | (positive_rate <= 0.2),
+    significant_often = p_lt_0_05_rate >= 0.5,
+    effect_stability = dplyr::if_else(abs(mean_estimate) > sd_estimate, "stable", "noisy"),
+    term_usefulness = dplyr::case_when(
+      sign_stable & significant_often & effect_stability == "stable" ~ "likely_useful",
+      sign_stable & (significant_often | effect_stability == "stable") ~ "possibly_useful",
+      TRUE ~ "weak_or_inconsistent"
+    )
+  ) %>%
+  arrange(scenario, regime, split_type, desc(term_usefulness), term)
+
+# Optional rollup: keep only terms from groups where multivariate is favored.
+term_verdict_in_winning_groups <- term_verdict %>%
+  inner_join(
+    model_verdict %>%
+      filter(verdict == "multivariate_better") %>%
+      select(scenario, regime, split_type),
+    by = c("scenario", "regime", "split_type")
+  )
+
+write.csv(model_verdict, file.path(mv_diag_out_dir, "final_model_verdict.csv"), row.names = FALSE)
+write.csv(term_verdict, file.path(mv_diag_out_dir, "final_term_verdict.csv"), row.names = FALSE)
+write.csv(
+  term_verdict_in_winning_groups,
+  file.path(mv_diag_out_dir, "final_term_verdict_multivariate_wins_only.csv"),
+  row.names = FALSE
+)
+
+model_verdict
+term_verdict %>% select(regime, term, term_usefulness, split_type) %>% group_by(term, split_type) %>% summarise(sum(term_usefulness != "weak_or_inconsistent"))
 ```
 
 # Probability Cutoffs Analysis
@@ -2859,31 +3969,663 @@ ggsave('../writing/figures_new/weights_per_fold_loso.png', p_weights_loso, width
 ###  --CV Rejection Summary
 
 ```{r}
-outer_merged$rejection_summary$cv$summary_stats
+library(dplyr)
+library(ggplot2)
+library(tidyr)
 
-outer_merged$rejection_summary$loso$summary_stats
+# Global Ensemble-only risk-coverage analysis:
+# - method: simple Platt vs multivariate
+# - regime: test_only vs with_leftout
+# - split: cv vs loso
+
+outer_cv_root <- "../data/out/outer_cv/outer_cv_analysis_outputs_merged_summed"
+selection_out_dir <- file.path(outer_cv_root, "global_ensemble_selection")
+dir.create(selection_out_dir, recursive = TRUE, showWarnings = FALSE)
+
+scenario_map <- tibble::tribble(
+  ~method,         ~regime,        ~subdir,                               ~model_label,
+  "platt_simple",  "test_only",    "standard",                            "Global_Optimized",
+  "platt_simple",  "with_leftout", "with_leftout",                        "Global_Optimized",
+  "multivariate",  "test_only",    "ensemble_multivariate/standard",      "Global_Optimized_MV",
+  "multivariate",  "with_leftout", "ensemble_multivariate/with_leftout",  "Global_Optimized_MV_leftout"
+)
+
+read_curve <- function(base_dir, split_type, curve_source = c("heldout", "trainpool")) {
+  curve_source <- match.arg(curve_source)
+  file_name <- if (curve_source == "heldout") {
+    paste0("risk_coverage_heldout_curve_raw_", split_type, ".csv")
+  } else {
+    paste0("risk_coverage_trainpool_curve_", split_type, ".csv")
+  }
+  path <- file.path(base_dir, file_name)
+  if (!file.exists(path)) return(NULL)
+  read.csv(path, stringsAsFactors = FALSE)
+}
+
+normalize_curve_schema <- function(df, curve_source, method, regime, split_type, model_label) {
+  if (is.null(df) || nrow(df) == 0) return(NULL)
+  if (curve_source == "heldout") {
+    out <- df %>%
+      filter(model == model_label) %>%
+      transmute(
+        method = method,
+        regime = regime,
+        split_type = split_type,
+        curve_source = "heldout",
+        fold = as.character(fold),
+        prob_cutoff = prob_cutoff,
+        risk = 1 - accuracy,
+        coverage = 1 - perc_rejected,
+        model = model
+      )
+  } else {
+    out <- df %>%
+      filter(model == model_label) %>%
+      transmute(
+        method = method,
+        regime = regime,
+        split_type = split_type,
+        curve_source = "trainpool",
+        fold = as.character(held_out_fold),
+        prob_cutoff = prob_cutoff,
+        risk = train_risk,
+        coverage = train_coverage,
+        model = model
+      )
+  }
+  if (nrow(out) == 0) return(NULL)
+  out
+}
+
+build_monotonic_frontier <- function(curve_df) {
+  curve_df %>%
+    group_by(method, regime, split_type, curve_source, prob_cutoff) %>%
+    summarise(
+      risk = mean(risk, na.rm = TRUE),
+      coverage = mean(coverage, na.rm = TRUE),
+      # sd() is NA for a single observation; use 0 so SE/ribbon summaries stay defined.
+      risk_sd = ifelse(dplyr::n() > 1, sd(risk, na.rm = TRUE), 0),
+      coverage_sd = ifelse(dplyr::n() > 1, sd(coverage, na.rm = TRUE), 0),
+      n_folds = n_distinct(fold),
+      .groups = "drop"
+    ) %>%
+    arrange(method, regime, split_type, curve_source, risk, desc(coverage)) %>%
+    group_by(method, regime, split_type, curve_source) %>%
+    mutate(coverage_mono = cummax(coverage)) %>%
+    ungroup()
+}
+
+pick_cutoff_grid <- function(frontier_df, target_risks = c(0.01, 0.02, 0.05, 0.10)) {
+  out <- list()
+  idx <- 1L
+  groups <- frontier_df %>% distinct(method, regime, split_type, curve_source)
+  for (g in seq_len(nrow(groups))) {
+    grp <- groups[g, ]
+    df <- frontier_df %>%
+      filter(
+        method == grp$method,
+        regime == grp$regime,
+        split_type == grp$split_type,
+        curve_source == grp$curve_source
+      )
+    for (tr in target_risks) {
+      eligible <- df %>% filter(risk <= tr)
+      chosen <- if (nrow(eligible) > 0) {
+        eligible %>% arrange(desc(coverage_mono), risk, coverage_sd) %>% slice(1)
+      } else {
+        df %>% arrange(risk, desc(coverage_mono), coverage_sd) %>% slice(1)
+      }
+      out[[idx]] <- chosen %>%
+        mutate(
+          target_risk = tr,
+          risk_status = ifelse(chosen$risk <= tr, "within_target", "min_risk_fallback")
+        )
+      idx <- idx + 1L
+    }
+  }
+  bind_rows(out) %>%
+    select(method, regime, split_type, curve_source, target_risk, risk_status,
+           prob_cutoff, risk, coverage, coverage_mono, risk_sd, coverage_sd, n_folds)
+}
 ```
-
-###  --Cutoff Visualization
 
 ```{r}
-df_rej <- outer_merged$rejection_summary$cv$detailed_results
+# Load all scenarios into one long table.
+curve_rows <- list()
+idx <- 1L
+for (i in seq_len(nrow(scenario_map))) {
+  sc <- scenario_map[i, ]
+  base_dir <- file.path(outer_cv_root, sc$subdir)
+  for (split_type in c("cv", "loso")) {
+    for (curve_source in c("heldout", "trainpool")) {
+      raw <- read_curve(base_dir, split_type, curve_source)
+      norm <- normalize_curve_schema(raw, curve_source, sc$method, sc$regime, split_type, sc$model_label)
+      if (!is.null(norm) && nrow(norm) > 0) {
+        curve_rows[[idx]] <- norm
+        idx <- idx + 1L
+      }
+    }
+  }
+}
+all_curves <- bind_rows(curve_rows)
+stopifnot(nrow(all_curves) > 0)
 
-p_rej <- ggplot(df_rej) +
-  geom_boxplot(aes(x = model, y = prob_cutoff)) +
-  #geom_line(linewidth = 1, aes(x = model, y = weight, color = fold, group = fold)) +
-  geom_point(size = 3, aes(x = model, y = prob_cutoff, color = fold, group = fold)) +
-  theme_bw() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
-  labs(
-    title = "CV: Probability cutoffs across models and folds",
-    x = "Model",
-    y = "Probability cutoff",
-    color = "Fold"
-  ) 
-p_rej
+frontiers <- build_monotonic_frontier(all_curves)
+candidate_cutoffs <- pick_cutoff_grid(frontiers %>% filter(curve_source == "trainpool"))
+
+# Trainpool vs heldout diagnostic gap on matched keys.
+gap_table <- frontiers %>%
+  select(method, regime, split_type, curve_source, prob_cutoff, risk, coverage) %>%
+  pivot_wider(
+    names_from = curve_source,
+    values_from = c(risk, coverage)
+  ) %>%
+  mutate(
+    risk_gap = risk_heldout - risk_trainpool,
+    coverage_gap = coverage_heldout - coverage_trainpool
+  ) %>%
+  arrange(method, regime, split_type, prob_cutoff)
+
+write.csv(frontiers, file.path(selection_out_dir, "monotonic_frontiers_cv_loso.csv"), row.names = FALSE)
+write.csv(candidate_cutoffs, file.path(selection_out_dir, "candidate_cutoffs_trainpool_cv_loso.csv"), row.names = FALSE)
+write.csv(gap_table, file.path(selection_out_dir, "trainpool_vs_heldout_gap_cv_loso.csv"), row.names = FALSE)
 ```
 
+```{r}
+# Plot A: Trainpool frontiers with SE envelopes for stability comparison.
+frontiers_trainpool <- frontiers %>%
+  filter(curve_source == "trainpool") %>%
+  mutate(
+    coverage_se = coverage_sd / sqrt(pmax(n_folds, 1)),
+    coverage_upper = pmin(1, coverage_mono + coverage_se),
+    coverage_lower = pmax(0, coverage_mono - coverage_se)
+  )
+
+p_train_mono <- frontiers_trainpool %>%
+  mutate(
+    method_label = dplyr::recode(
+      method,
+      platt_simple = "Simple calibrated confidence",
+      multivariate = "Multivariate calibrated confidence"
+    ),
+    regime_label = dplyr::recode(regime, test_only = "Standard", with_leftout = "With left-out"),
+    split_label = dplyr::recode(split_type, cv = "CV", loso = "LOSO")
+  ) %>%
+  ggplot(aes(x = risk * 100, y = coverage_mono * 100, color = method_label, fill = method_label)) +
+  geom_ribbon(
+    aes(ymin = coverage_lower * 100, ymax = coverage_upper * 100),
+    alpha = 0.14,
+    linewidth = 0
+  ) +
+  geom_line(linewidth = 1.2) +
+  facet_grid(regime_label ~ split_label) +
+  labs(
+    title = "Global Ensemble Monotonic Risk-Coverage",
+    subtitle = "Training-pool frontier with standard-error envelopes",
+    x = "Risk on accepted samples (%)",
+    y = "Monotonic coverage (%)",
+    color = "Method",
+    fill = "Method"
+  ) +
+  scale_color_manual(values = c("Simple calibrated confidence" = "#377eb8", "Multivariate calibrated confidence" = "#e41a1c")) +
+  scale_fill_manual(values = c("Simple calibrated confidence" = "#377eb8", "Multivariate calibrated confidence" = "#e41a1c")) +
+  scale_x_continuous(
+    breaks = seq(0, 20, by = 2),
+    labels = function(x) paste0(x, "%")
+  ) +
+  scale_y_continuous(
+    breaks = seq(0, 100, by = 10),
+    labels = function(x) paste0(x, "%")
+  ) +
+  theme_bw(base_size = 11) +
+  theme(
+    plot.title = element_text(face = "bold", size = 12),
+    plot.subtitle = element_text(size = 10),
+    strip.background = element_rect(fill = "grey95", colour = "grey70"),
+    strip.text = element_text(face = "bold"),
+    legend.position = "bottom",
+    legend.title = element_text(face = "bold"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(color = "grey90")
+  )
+p_train_mono
+```
+
+```{r}
+# Foldwise sanity-check:
+# pick cutoff from pooled trainpool curves (excluding test fold), evaluate on heldout test fold.
+trainpool_curve <- all_curves %>%
+  filter(method == "multivariate", regime == "with_leftout", curve_source == "trainpool", split_type == "cv")
+heldout_curve <- all_curves %>%
+  filter(method == "multivariate", regime == "with_leftout", curve_source == "heldout", split_type == "cv")
+
+res_list <- list()
+for (test in unique(heldout_curve$fold)) {
+  # Use the trainpool curve that is explicitly built for this held-out fold.
+  train_curves <- trainpool_curve %>% filter(fold == test)
+  test_curve <- heldout_curve %>% filter(fold == test)
+
+  best <- train_curves %>%
+    group_by(prob_cutoff) %>%
+    summarise(
+      mean_coverage = mean(coverage, na.rm = TRUE),
+      mean_risk = mean(risk, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    filter(mean_risk <= 0.06) %>%
+    arrange(desc(mean_coverage), mean_risk) %>%
+    slice_head(n = 1)
+
+  if (nrow(best) == 0) {
+    best <- train_curves %>%
+      group_by(prob_cutoff) %>%
+      summarise(
+        mean_coverage = mean(coverage, na.rm = TRUE),
+        mean_risk = mean(risk, na.rm = TRUE),
+        .groups = "drop"
+      ) %>%
+      arrange(mean_risk, desc(mean_coverage)) %>%
+      slice_head(n = 1)
+  }
+
+  res <- test_curve %>%
+    filter(prob_cutoff == best$prob_cutoff) %>%
+    transmute(fold = test, risk, coverage, prob_cutoff)
+  res_list[[test]] <- res
+}
+
+do.call(rbind, res_list)
+do.call(rbind, res_list) %>% summarise(mean(risk), sd(risk), mean(coverage), sd(coverage))
+```
+
+```{r}
+# Optional: evaluate a chosen operating point on prediction-level decisions.
+# Script will be added in R/evaluate_global_ensemble_operating_point.R.
+source("evaluate_global_ensemble_operating_point.R")
+
+with_leftout <- evaluate_global_ensemble_operating_point(
+  analysis_output_root = outer_cv_root,
+  method = "multivariate",
+  regime = "with_leftout",
+  split_type = "cv",
+  policy = "global",
+  target_risk = 0.05,
+  candidate_cutoff_table = candidate_cutoffs,
+  write_outputs = F
+)
+
+test_only <- evaluate_global_ensemble_operating_point(
+  analysis_output_root = outer_cv_root,
+  method = "multivariate",
+  regime = "test_only",
+  split_type = "cv",
+  policy = "global",
+  target_risk = 0.02,
+  candidate_cutoff_table = candidate_cutoffs,
+  write_outputs = F
+)
+
+test_only_row <- test_only$fold_metrics %>%
+  summarise(
+    coverage_all_pct = mean(coverage, na.rm = TRUE) * 100,
+    accepted_risk_pct = mean(accepted_risk, na.rm = TRUE) * 100,
+    accepted_kappa = mean(accepted_kappa, na.rm = TRUE)
+  ) %>%
+  mutate(
+    target_risk_pct = 2.00,
+    regime = "Test only",
+    coverage_seen_pct = NA_real_,
+    pct_leftout_rejected = NA_real_
+  )
+
+with_leftout_row <- with_leftout$fold_metrics %>%
+  summarise(
+    coverage_all_pct = mean(coverage, na.rm = TRUE) * 100,
+    accepted_risk_pct = mean(accepted_risk, na.rm = TRUE) * 100,
+    accepted_kappa = mean(accepted_kappa, na.rm = TRUE),
+    coverage_seen_pct = mean(coverage_known, na.rm = TRUE) * 100,
+    pct_leftout_rejected = mean(n_unknown_rejected/n_unknown_total, na.rm = TRUE) * 100
+  ) %>%
+  mutate(
+    target_risk_pct = 5.00,
+    regime = "With left-out"
+  )
+
+operating_point_summary <- bind_rows(test_only_row, with_leftout_row) %>%
+  select(
+    regime,
+    target_risk_pct,
+    coverage_all_pct,
+    coverage_seen_pct,
+    accepted_risk_pct,
+    accepted_kappa,
+    pct_leftout_rejected
+  ) %>%
+  mutate(across(-regime, ~ round(.x, 2)))
+
+knitr::kable(
+  operating_point_summary,
+  align = c("r", "l", "r", "r", "r", "r", "r"),
+  col.names = c(
+    "Regime",
+    "Target risk (%)",
+    "Coverage all (%)",
+    "Coverage seen classes (%)",
+    "Accepted risk (%)",
+    "Accepted kappa",
+    "Perc of left-outs rejected"
+  ),
+  caption = "Global operating-point comparison (CV, multivariate)"
+) %>%
+  kableExtra::kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed"),
+    full_width = F,
+    position = "left",
+    font_size = 12
+  ) %>%
+  kableExtra::row_spec(0, bold = TRUE)
+```
+
+
+```{r}
+# Fig A: Risk-coverage curve
+regime_colors <- c(
+  "test_only" = "#1b9e77",
+  "with_leftout" = "#d95f02"
+)
+regime_labels <- c("test_only" = "Standard", "with_leftout" = "With left-out")
+percent_fmt <- function(x) paste0(x, "%")
+
+publication_theme <- theme_bw(base_size = 11) +
+  theme(
+    plot.title = element_text(face = "bold", size = 12),
+    plot.subtitle = element_text(size = 10),
+    strip.background = element_rect(fill = "grey95", colour = "grey70"),
+    strip.text = element_text(face = "bold"),
+    legend.position = "bottom",
+    legend.title = element_text(face = "bold"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(color = "grey90")
+  )
+
+risk_fig_A <- ggplot(frontiers_trainpool %>% filter(method == "multivariate", split_type == "cv"), aes(x = risk * 100, y = coverage_mono * 100)) +
+  geom_line(
+    aes(color = regime),
+    linewidth = 1.2
+  ) +
+  scale_color_manual(values = regime_colors, labels = regime_labels) +
+  labs(
+    title = "Monotonic Risk-Coverage (Training folds)",
+    subtitle = "Multivariate model; CV split",
+    x = "Risk on accepted samples (%)",
+    y = "Monotonic coverage (%)",
+    color = "Training regime"
+  ) +
+  scale_x_continuous(
+    breaks = seq(0, 20, by = 2),
+    labels = percent_fmt
+  ) +
+  scale_y_continuous(
+    breaks = seq(0, 100, by = 10),
+    labels = percent_fmt
+  ) +
+  publication_theme
+risk_fig_A
+```
+
+```{r}
+# Selected monotonic operating points from dense target-risk grids for CV and LOSO.
+build_selected_points <- function(split_name, target_risk_grid = seq(0.001, 0.12, by = 0.0005)) {
+  selected <- lapply(unique(frontiers$regime), function(reg_i) {
+    df <- frontiers %>%
+      filter(
+        curve_source == "trainpool",
+        method == "multivariate",
+        split_type == split_name,
+        regime == reg_i
+      )
+    if (nrow(df) == 0) return(NULL)
+
+    dplyr::bind_rows(lapply(target_risk_grid, function(tr) {
+      eligible <- df %>% filter(risk <= tr)
+      chosen <- if (nrow(eligible) > 0) {
+        eligible %>% arrange(desc(coverage_mono), risk, coverage_sd) %>% slice(1)
+      } else {
+        df %>% arrange(risk, desc(coverage_mono), coverage_sd) %>% slice(1)
+      }
+      chosen %>%
+        mutate(
+          target_risk = tr,
+          risk_status = ifelse(risk <= tr, "within_target", "min_risk_fallback"),
+          train_risk = risk,
+          train_coverage_mono = coverage_mono
+        )
+    }))
+  }) %>%
+    bind_rows() %>%
+    select(method, regime, split_type, target_risk, risk_status, prob_cutoff, train_risk, train_coverage_mono) %>%
+    left_join(
+      frontiers %>%
+        filter(curve_source == "heldout", method == "multivariate", split_type == split_name) %>%
+        select(method, regime, split_type, prob_cutoff, heldout_risk = risk, heldout_coverage = coverage),
+      by = c("method", "regime", "split_type", "prob_cutoff")
+    ) %>%
+    filter(is.finite(train_risk), is.finite(heldout_risk), is.finite(heldout_coverage), risk_status == "within_target", train_coverage_mono != 1)
+
+  selected
+}
+
+build_risk_fig_B <- function(selected_df, split_label) {
+  ggplot(selected_df, aes(x = target_risk * 100, y = heldout_risk * 100, color = regime)) +
+    geom_line(aes(group = regime), linewidth = 1.2) +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray50") +
+    scale_color_manual(values = regime_colors, labels = regime_labels) +
+    labs(
+      title = paste0("Realized Held-out Risk (", split_label, ")"),
+      subtitle = "Selected from monotonic training-pool frontiers",
+      x = "Selected risk on accepted samples (%),\nbased on training data",
+      y = "Realized risk on accepted samples (%)",
+      color = "Training regime"
+    ) +
+    scale_x_continuous(breaks = seq(0, 20, by = 2), labels = percent_fmt) +
+    scale_y_continuous(breaks = seq(0, 20, by = 2), labels = percent_fmt) +
+    publication_theme
+}
+
+build_risk_fig_C <- function(selected_df, split_label) {
+  ggplot(selected_df, aes(x = target_risk * 100, y = heldout_coverage * 100, color = regime)) +
+    geom_line(aes(group = regime), linewidth = 1.2) +
+    scale_color_manual(values = regime_colors, labels = regime_labels) +
+    labs(
+      title = paste0("Realized Held-out Coverage (", split_label, ")"),
+      subtitle = "Selected from monotonic training-pool frontiers",
+      x = "Selected risk on accepted samples (%),\nbased on training data",
+      y = "Realized coverage (%)",
+      color = "Training regime"
+    ) +
+    scale_x_continuous(breaks = seq(0, 20, by = 2), labels = percent_fmt) +
+    scale_y_continuous(breaks = seq(0, 100, by = 10), labels = percent_fmt) +
+    publication_theme
+}
+
+build_risk_fig_C2 <- function(selected_df, split_name, split_label) {
+  overlay_df <- bind_rows(
+    frontiers_trainpool %>%
+      filter(method == "multivariate", split_type == split_name) %>%
+      transmute(
+        regime,
+        x_risk = risk * 100,
+        y_coverage = coverage_mono * 100,
+        curve_type = "Training pool coverage"
+      ),
+    selected_df %>%
+      transmute(
+        regime,
+        x_risk = train_risk * 100,
+        y_coverage = heldout_coverage * 100,
+        curve_type = "Held-out coverage"
+      )
+  )
+
+  ggplot(overlay_df, aes(x = x_risk, y = y_coverage, color = regime, linetype = curve_type)) +
+    geom_line(linewidth = 1.2, alpha = 0.9) +
+    scale_color_manual(values = regime_colors, labels = regime_labels) +
+    scale_linetype_manual(
+      values = c(
+        "Training pool coverage" = "dashed",
+        "Held-out coverage" = "solid"
+      ),
+      name = "Curve"
+    ) +
+    labs(
+      title = paste0("Risk-Coverage Curves (", split_label, ")"),
+      x = "Selected risk on accepted samples (%),\nbased on training data",
+      y = "Coverage (%)",
+      color = "Training regime"
+    ) +
+    scale_x_continuous(breaks = seq(0, 20, by = 2), labels = percent_fmt) +
+    scale_y_continuous(breaks = seq(0, 100, by = 10), labels = percent_fmt) +
+    publication_theme
+}
+
+selected_points_figA_cv <- build_selected_points("cv")
+selected_points_figA_loso <- build_selected_points("loso")
+
+risk_fig_B_cv <- build_risk_fig_B(selected_points_figA_cv, "CV") +
+  theme(legend.position = "none")
+risk_fig_C_cv <- build_risk_fig_C(selected_points_figA_cv, "CV") +
+  theme(legend.position = "none")
+risk_fig_C_2_cv <- build_risk_fig_C2(selected_points_figA_cv, "cv", "CV") +
+  theme(legend.position = "none")
+
+risk_fig_B_loso <- build_risk_fig_B(selected_points_figA_loso, "LOSO") +
+  theme(legend.position = "none")
+risk_fig_C_loso <- build_risk_fig_C(selected_points_figA_loso, "LOSO") +
+  theme(legend.position = "none")
+risk_fig_C_2_loso <- build_risk_fig_C2(selected_points_figA_loso, "loso", "LOSO") +
+  theme(legend.position = "bottom")
+
+# Backward-compatible aliases (default to CV).
+layout = c("
+           AA
+           AA
+           BC
+           DE
+           ")
+# risk_fig_B <- risk_fig_B_cv
+# risk_fig_C <- risk_fig_C_cv
+# risk_fig_C_2 <- risk_fig_C_2_cv
+
+(
+  risk_fig_A + risk_fig_C_2_cv +
+    risk_fig_B_cv +
+  risk_fig_C_2_loso +
+  
+  risk_fig_B_loso
+) +
+  patchwork::plot_layout(guides = "collect", design = layout) +patchwork::plot_annotation(tag_levels = "A")&
+  theme(legend.position = "bottom") 
+```
+
+
+```{r}
+# Visualize dense candidate cloud + selected frontier.
+p_class_candidates <- ggplot(class_candidates, aes(x = accepted_risk * 100, y = coverage * 100)) +
+  geom_point(alpha = 0.25, size = 1, color = "gray40") +
+  geom_line(
+    data = class_policy_frontier,
+    aes(x = trainpool_risk * 100, y = trainpool_coverage * 100),
+    color = "blue",
+    linewidth = 1
+  ) +
+  # geom_line(
+  #   data = class_policy_frontier,
+  #   aes(x = heldout_risk * 100, y = heldout_coverage * 100),
+  #   color = "red",
+  #   linewidth = 1
+  # ) +
+  labs(
+    title = "Class-based policy candidate cloud and selected frontier",
+    x = "Risk on accepted set (%)",
+    y = "Coverage on accepted set (%)"
+  ) +
+  theme_bw()
+p_class_candidates
+
+p_class_kappa <- ggplot(class_policy_frontier, aes(x = target_risk_cap * 100)) +
+  geom_line(aes(y = trainpool_kappa, color = "Trainpool kappa"), linewidth = 1, alpha = 0.4) +
+  geom_line(aes(y = heldout_kappa, color = "Heldout kappa"), linewidth = 1, alpha = 0.4) +
+  scale_color_manual(values = c("Trainpool kappa" = "blue", "Heldout kappa" = "red")) +
+  labs(
+    title = "Selected class-based kappa by risk cap",
+    x = "Target risk cap (%)",
+    y = "Kappa",
+    color = NULL
+  ) +
+  theme_bw()
+p_class_kappa
+```
+
+
+
+
+# Left out predictions analysis
+
+```{r left_out_counts_and_labels}
+library(dplyr)
+library(readr)
+library(tibble)
+
+# Paths to main data (aligned by row order)
+meta_path <- "../data/meta_20aug25.csv"
+rgas_path <- "../data/rgas_10feb26.csv"
+multi_path <- "/Users/jsevere2/Library/CloudStorage/OneDrive-UMCUtrecht/AML/data/processed/prediction/multi_df.csv"
+
+meta_df <- read.csv(meta_path)
+rgas_df <- read.csv(rgas_path)
+multi_df <- read.csv(multi_path)
+
+# Extract subtype and study vectors
+icc_subtype <- rgas_df$ICC_Subtype
+studies <- meta_df$Studies
+
+
+excluded_subtypes <- c("AML NOS", "Multi")
+
+class_counts <- table(icc_subtype)
+rare_classes <- names(class_counts)[class_counts < 10]
+
+leftout_labels <- sort(union(rare_classes, excluded_subtypes))
+
+leftout_mask <- icc_subtype %in% leftout_labels
+
+sum(leftout_mask)
+
+prediction_leftout <- read.csv("../data/out/leftout_predictions/leftout_subtypes_for_prediction_predictions/leftout_subtypes_for_prediction_Global_Ensemble_predictions_merged_summed.csv")
+
+leftout_df <- tibble(
+  ICC_Subtype = icc_subtype[leftout_mask],
+  Sample_ID = meta_df$Sample.ID[leftout_mask],
+  cohort = meta_df$Studies[leftout_mask],
+  prediction = prediction_leftout$prediction,
+  passed = prediction_leftout$prediction_passed_cutoff,
+  NOS = grepl("NOS", icc_subtype[leftout_mask]),
+  multi = grepl("Multi", icc_subtype[leftout_mask]),
+  rgas = !grepl("NOS|Multi", icc_subtype[leftout_mask]),
+  survival_days = meta_df$survival_days[leftout_mask],
+  event = meta_df$outcome[leftout_mask],
+  age_days = meta_df$age_days[leftout_mask],
+  age_years = age_days / 365.25,
+  sex = meta_df$sex[leftout_mask]
+)
+```
+
+```{r}
+table(leftout_df$prediction[leftout_df$NOS], leftout_df$ICC_Subtype[leftout_df$NOS])
+```
+```{r}
+table(leftout_df$prediction[leftout_df$multi], leftout_df$ICC_Subtype[leftout_df$multi])
+```
 # Validation Cohort Analysis (MLL Lab)
 
 ##  --Load and Process MLL Lab Data
@@ -2914,7 +4656,7 @@ map_truth_to_canonical <- function(truth_labels) {
   }, USE.NAMES = FALSE)
 }
 
-files <- list.files("../data/STAR_AML_MLLlab_predictions", full.names = T)
+files <- list.files("../data/MLL_out/STAR_AML_MLLlab_predictions", full.names = T)
 
 #get_kappa <- function(file){
 MLL_lab <- read.csv("../data/MLL_lab/20231017_SampleMetadata.csv", sep = ";")
@@ -2924,8 +4666,12 @@ MLL_lab_pred_df_merged <- read.csv(files[1])
 
 #MLL_lab_truth[MLL_lab$WHO_2022 == "AML-CEBPA" | MLL_lab$WHO_2022 == "AML with biallelic CEBPA"] <- "AML-CEBPA"
 MLL_lab_truth <- map_truth_to_canonical(MLL_lab_truth)
-table(MLL_lab_truth)
-MLL_lab_truth[(MLL_lab$WHO_2022 == "AML-CEBPA" & MLL_lab$WHO_2017 == "AML with biallelic CEBPA" & MLL_lab$ICC_2022 != "AML-CEBPA")] <- "AML with in frame bZIP CEBPA"
+
+MLL_lab_truth[(MLL_lab$WHO_2022 == "AML-CEBPA" | MLL_lab$WHO_2017 == "AML with biallelic CEBPA")] <- "AML with in frame bZIP CEBPA"
+MLL_lab_truth[grepl("MECOM", MLL_lab$WHO_2022) | grepl("MECOM", MLL_lab$WHO_2017)] <- "MECOM rearrangement"
+
+MLL_lab_truth[( grepl("KMT2A", MLL_lab$WHO_2022) | grepl("KMT2A", MLL_lab$WHO_2017) ) & !grepl("KMT2A", MLL_lab$ICC_2022) ] <- "AML, NOS"
+
 MLL_lab_truth[grepl("MDS|TP53", MLL_lab_truth)] <- "AML MDS"
 MLL_lab_truth[grepl("KMT2A",MLL_lab_truth) & !grepl("MLLT3", MLL_lab_truth)] <- "Other KMT2A"
 # MECOM merged to same display name as elsewhere (MECOM rearrangement)
@@ -2949,9 +4695,20 @@ MLL_lab_truth <- factor(MLL_lab_truth, levels = levels)
 res_MLL <- caret::confusionMatrix(MLL_lab_predictions[MLL_lab_truth != "AML..NOS"], MLL_lab_truth[MLL_lab_truth != "AML..NOS"])
 
 round(res_MLL$overall["Kappa"], 3)
-#}
 
-#test <- data.frame(files, kappa = unlist(lapply(files, get_kappa)))
+# Map MLL labels to main-cohort display names (for survival and combined analyses)
+mll_to_display <- c(
+  mapping,
+  "AML..NOS" = "AML NOS",
+  "Other.KMT2A" = "Other KMT2A rearrangements",
+  "AML.MDS" = "MDS-related",
+  "AML.other.rare.transloc" = "AML-other rare transloc"
+)
+map_mll_to_display <- function(x) {
+  out <- mll_to_display[as.character(x)]
+  out[is.na(out)] <- as.character(x)[is.na(out)]
+  unname(out)
+}
 ```
 
 ##  --Table 2: MLL Lab Cohort Distribution
@@ -3021,30 +4778,18 @@ save_kable(mll_table, "../writing/tables_new/table2.png", zoom = 2)
 ###  --Overall Performance (No Cutoff)
 
 ```{r}
-res_MLL <- caret::confusionMatrix(MLL_lab_predictions[MLL_lab_truth != "AML..NOS"], MLL_lab_truth[MLL_lab_truth != "AML..NOS"])
+res_MLL <- caret::confusionMatrix(MLL_lab_predictions, MLL_lab_truth)
 
 round(res_MLL$overall, 3)
 ```
-
-```{r}
-res_MLL$table
-```
-
-
-```{r}
-MLL_lab[which(MLL_lab_predictions == "AML.with.in.frame.bZIP.CEBPA" & MLL_lab_truth != "AML..NOS" & MLL_lab_truth != "AML.with.in.frame.bZIP.CEBPA"),]$WHO_2022
-```
-
-
 ###  --Performance with Probability Cutoff 
 
 ```{r}
-cutoff <- read.csv("../data/out/final_train_test/cutoffs_merged_summed/train_test_cutoffs_merged_summed.csv")
 MLL_lab_predictions_passes <- as.logical(MLL_lab_pred_df_merged$prediction_passed_cutoff)
 
-res_MLL_cutoff <- caret::confusionMatrix(MLL_lab_predictions[MLL_lab_truth != "AML..NOS" & MLL_lab_predictions_passes], MLL_lab_truth[MLL_lab_truth != "AML..NOS" & MLL_lab_predictions_passes])
+res_MLL_cutoff <- caret::confusionMatrix(MLL_lab_predictions[MLL_lab_predictions_passes], MLL_lab_truth[MLL_lab_predictions_passes])
 
-perc_rej <- 100 - sum(MLL_lab_predictions_passes & MLL_lab_truth != "AML..NOS") / length(MLL_lab_predictions_passes[MLL_lab_truth != "AML..NOS"]) * 100 
+perc_rej <- 100 - sum(MLL_lab_predictions_passes) / length(MLL_lab_predictions_passes) * 100 
 round(perc_rej, 3)
 round(res_MLL_cutoff$overall, 3)
 ```
@@ -3053,6 +4798,836 @@ round(res_MLL_cutoff$overall, 3)
 MLL_lab_truth[MLL_lab_truth != "AML..NOS" & !MLL_lab_predictions_passes]
 ```
 ```{r}
-caret::confusionMatrix(MLL_lab_predictions[MLL_lab_truth != "AML..NOS" & !MLL_lab_predictions_passes], MLL_lab_truth[MLL_lab_truth != "AML..NOS" & !MLL_lab_predictions_passes])
+caret::confusionMatrix(MLL_lab_predictions[MLL_lab_truth != "AML..NOS" & MLL_lab_predictions_passes], MLL_lab_truth[MLL_lab_truth != "AML..NOS" & MLL_lab_predictions_passes])
+```
+
+# Survival
+
+## -- Survival: Main cohort (outer CV test set)
+
+## -- Survival: Wrong predictions vs true label
+
+Compare survival of misclassified samples (wrongly predicted as label L) to survival of samples that truly have label L. Done separately per predicted label L where both groups have enough events.
+
+```{r survival_wrong_predictions}
+library(survival)
+
+# Restrict to samples with non-NA survival and event
+surv_ok <- !is.na(sample_level_df$survival_days) & !is.na(sample_level_df$event)
+df_surv <- sample_level_df[surv_ok, ]
+
+wrong_by_pred <- split(
+  df_surv[!df_surv$correct, ],
+  df_surv$prediction_display[!df_surv$correct]
+)
+true_by_label <- split(df_surv, df_surv$truth_display)
+
+# For each predicted label L: compare (wrongly predicted as L) vs (truly L)
+survival_wrong_vs_true <- list()
+for (L in names(wrong_by_pred)) {
+  wrong_L <- wrong_by_pred[[L]]
+  true_L <- true_by_label[[L]]
+  if (is.null(true_L)) next
+  n_wrong <- nrow(wrong_L)
+  n_true <- nrow(true_L)
+  if (n_wrong < 1 || n_true < 1) next
+
+  dat <- rbind(
+    data.frame(survival_days = wrong_L$survival_days, event = wrong_L$event, group = "Wrongly predicted as"),
+    data.frame(survival_days = true_L$survival_days, event = true_L$event, group = "Truly")
+  )
+  dat$group <- factor(dat$group, levels = c("Wrongly predicted as", "Truly"))
+  s <- survdiff(Surv(survival_days, event) ~ group, data = dat)
+  survival_wrong_vs_true[[L]] <- list(
+    n_wrong = n_wrong, n_true = n_true,
+    median_wrong = median(wrong_L$survival_days), median_true = median(true_L$survival_days),
+    chisq = s$chisq, pval = 1 - pchisq(s$chisq, 1)
+  )
+}
+
+survival_wrong_summary <- do.call(rbind, lapply(names(survival_wrong_vs_true), function(L) {
+  x <- survival_wrong_vs_true[[L]]
+  if (x$n_wrong < 10) return(NULL)
+  data.frame(
+    predicted_label = L,
+    n_wrongly_predicted = x$n_wrong, n_truly = x$n_true,
+    median_survival_days_wrong = x$median_wrong, median_survival_days_true = x$median_true,
+    logrank_chisq = x$chisq, logrank_p = x$pval
+  )
+}))
+rownames(survival_wrong_summary) <- NULL
+survival_wrong_summary
+```
+
+## -- Survival: AML NOS predicted as class L vs truly L
+
+AML NOS samples were left out and predicted to a class (e.g. CEBPA). For each predicted class L, compare survival of (AML NOS predicted as L) to survival of samples that truly have class L (main cohort).
+
+```{r survival_AML_NOS}
+# Left-out AML NOS samples with valid survival; align prediction to display names
+nos_only <- leftout_df[leftout_df$NOS & !is.na(leftout_df$survival_days) & !is.na(leftout_df$event), ]
+nos_only$prediction_display <- fix_names(modify_classes(nos_only$prediction))
+
+# Truly L: from main cohort (sample_level_df) with valid survival
+surv_ok <- !is.na(sample_level_df$survival_days) & !is.na(sample_level_df$event)
+true_by_label <- split(sample_level_df[surv_ok, ], sample_level_df$truth_display[surv_ok])
+
+# Align leftout prediction names to canonical truth_display names (same as names(true_by_label))
+pred_to_canonical <- c("AML.with.in-frame.bZIP.CEBPA" = "CEBPA bZIP in-frame")
+nos_only$prediction_canonical <- ifelse(
+  nos_only$prediction_display %in% names(pred_to_canonical),
+  pred_to_canonical[nos_only$prediction_display],
+  nos_only$prediction_display
+)
+
+# For each predicted label L among AML NOS: compare (NOS predicted as L) vs (truly L)
+survival_nos_vs_true <- list()
+for (L in unique(nos_only$prediction_canonical)) {
+  nos_pred_L <- nos_only[nos_only$prediction_canonical == L, ]
+  true_L <- true_by_label[[L]]
+  if (is.null(true_L) || nrow(nos_pred_L) < 1 || nrow(true_L) < 1) next
+
+  dat <- rbind(
+    data.frame(survival_days = nos_pred_L$survival_days, event = nos_pred_L$event, group = "AML NOS predicted as"),
+    data.frame(survival_days = true_L$survival_days, event = true_L$event, group = "Truly")
+  )
+  dat$group <- factor(dat$group, levels = c("AML NOS predicted as", "Truly"))
+  s <- survdiff(Surv(survival_days, event) ~ group, data = dat)
+  survival_nos_vs_true[[L]] <- list(
+    n_nos_predicted_as_L = nrow(nos_pred_L), n_truly_L = nrow(true_L),
+    median_nos = median(nos_pred_L$survival_days), median_true = median(true_L$survival_days),
+    chisq = s$chisq, pval = 1 - pchisq(s$chisq, 1)
+  )
+}
+
+survival_nos_summary <- do.call(rbind, lapply(names(survival_nos_vs_true), function(L) {
+  x <- survival_nos_vs_true[[L]]
+  if (x$n_nos_predicted_as_L < 10) return(NULL)
+
+  data.frame(
+    predicted_class = L,
+    n_AML_NOS_predicted_as = x$n_nos_predicted_as_L, n_truly = x$n_truly_L,
+    median_survival_days_NOS_pred = x$median_nos, median_survival_days_true = x$median_true,
+    logrank_chisq = x$chisq, logrank_p = x$pval
+  )
+}))
+rownames(survival_nos_summary) <- NULL
+survival_nos_summary
+```
+
+## -- Survival: Multi predicted as class L vs truly L
+
+Multi-lineage samples were left out and predicted to a class. For each predicted class L, compare survival of (Multi predicted as L) to survival of samples that truly have class L (main cohort).
+
+```{r survival_Multi}
+# Left-out Multi samples with valid survival; align prediction to display names
+multi_only <- leftout_df[leftout_df$multi & !is.na(leftout_df$survival_days) & !is.na(leftout_df$event), ]
+multi_only$prediction_display <- fix_names(modify_classes(multi_only$prediction))
+
+# Truly L: from main cohort (sample_level_df) with valid survival
+surv_ok_multi <- !is.na(sample_level_df$survival_days) & !is.na(sample_level_df$event)
+true_by_label_multi <- split(sample_level_df[surv_ok_multi, ], sample_level_df$truth_display[surv_ok_multi])
+
+# Align leftout prediction names to canonical truth_display names
+multi_only$prediction_canonical <- ifelse(
+  multi_only$prediction_display %in% names(pred_to_canonical),
+  pred_to_canonical[multi_only$prediction_display],
+  multi_only$prediction_display
+)
+
+# For each predicted label L among Multi: compare (Multi predicted as L) vs (truly L)
+survival_multi_vs_true <- list()
+for (L in unique(multi_only$prediction_canonical)) {
+  multi_pred_L <- multi_only[multi_only$prediction_canonical == L, ]
+  true_L <- true_by_label_multi[[L]]
+  if (is.null(true_L) || nrow(multi_pred_L) < 1 || nrow(true_L) < 1) next
+
+  dat <- rbind(
+    data.frame(survival_days = multi_pred_L$survival_days, event = multi_pred_L$event, group = "Multi predicted as"),
+    data.frame(survival_days = true_L$survival_days, event = true_L$event, group = "Truly")
+  )
+  dat$group <- factor(dat$group, levels = c("Multi predicted as", "Truly"))
+  s <- survdiff(Surv(survival_days, event) ~ group, data = dat)
+  survival_multi_vs_true[[L]] <- list(
+    n_multi_predicted_as_L = nrow(multi_pred_L), n_truly_L = nrow(true_L),
+    median_multi = median(multi_pred_L$survival_days), median_true = median(true_L$survival_days),
+    chisq = s$chisq, pval = 1 - pchisq(s$chisq, 1)
+  )
+}
+
+survival_multi_summary <- do.call(rbind, lapply(names(survival_multi_vs_true), function(L) {
+  x <- survival_multi_vs_true[[L]]
+  if (x$n_multi_predicted_as_L < 10) return(NULL)
+
+  data.frame(
+    predicted_class = L,
+    n_Multi_predicted_as = x$n_multi_predicted_as_L, n_truly = x$n_truly_L,
+    median_survival_days_Multi_pred = x$median_multi, median_survival_days_true = x$median_true,
+    logrank_chisq = x$chisq, logrank_p = x$pval
+  )
+}))
+rownames(survival_multi_summary) <- NULL
+survival_multi_summary
+```
+
+### Combined pooled analysis: Truly / Wrong / NOS / Multi (main cohort, 4 groups)
+
+One stratified Cox and one KM with four groups per label L: Truly L, Wrongly predicted as L, NOS predicted as L, Multi predicted as L. Labels L are those with at least one of these groups and with a defined Truly L from the main cohort.
+
+```{r survival_main_combined_pooled}
+# Labels L that have Truly L and at least one of Wrong, NOS or Multi predicted as L
+labels_main_combined <- unique(c(
+  names(survival_wrong_vs_true),
+  names(survival_nos_vs_true),
+  names(survival_multi_vs_true)
+))
+labels_main_combined <- labels_main_combined[vapply(labels_main_combined, function(L) !is.null(true_by_label[[L]]), logical(1))]
+
+pooled_main_four_list <- list()
+for (L in labels_main_combined) {
+  true_L <- true_by_label[[L]]
+  wrong_L <- wrong_by_pred[[L]]
+  nos_pred_L <- nos_only[nos_only$prediction_canonical == L, ]
+  multi_pred_L <- multi_only[multi_only$prediction_canonical == L, ]
+  if (is.null(true_L) || nrow(true_L) < 1) next
+
+  parts <- list(
+    data.frame(
+      survival_days = true_L$survival_days,
+      event = true_L$event,
+      age_years = true_L$age_years,
+      sex = true_L$sex,
+      group = "Truly",
+      label = L,
+      cohort = true_L$cohort
+    )
+  )
+  if (!is.null(wrong_L) && nrow(wrong_L) > 0) {
+    parts[[length(parts) + 1L]] <- data.frame(
+      survival_days = wrong_L$survival_days,
+      event = wrong_L$event,
+      age_years = wrong_L$age_years,
+      sex = wrong_L$sex,
+      group = "Wrongly predicted as",
+      label = L,
+      cohort = wrong_L$cohort
+    )
+  }
+  if (nrow(nos_pred_L) > 0) {
+    parts[[length(parts) + 1L]] <- data.frame(
+      survival_days = nos_pred_L$survival_days,
+      event = nos_pred_L$event,
+      age_years = nos_pred_L$age_years,
+      sex = nos_pred_L$sex,
+      group = "NOS predicted as",
+      label = L,
+      cohort = nos_pred_L$cohort
+    )
+  }
+  if (nrow(multi_pred_L) > 0) {
+    parts[[length(parts) + 1L]] <- data.frame(
+      survival_days = multi_pred_L$survival_days,
+      event = multi_pred_L$event,
+      age_years = multi_pred_L$age_years,
+      sex = multi_pred_L$sex,
+      group = "Multi predicted as",
+      label = L,
+      cohort = multi_pred_L$cohort
+    )
+  }
+  pooled_main_four_list[[L]] <- do.call(rbind, parts)
+}
+pooled_main_four_df <- do.call(rbind, pooled_main_four_list)
+pooled_main_four_df$group <- factor(pooled_main_four_df$group, levels = c("Truly", "Wrongly predicted as", "NOS predicted as", "Multi predicted as"))
+pooled_main_four_df$cohort <- factor(pooled_main_four_df$cohort)
+
+pooled_main_four_df$sex <- factor(pooled_main_four_df$sex)
+
+cox_main_combined <- coxph(
+  Surv(survival_days, event) ~ group + age_years + sex + cohort + strata(label),
+  data = pooled_main_four_df
+)
+summary(cox_main_combined)
+```
+
+### Kaplan-Meier: Truly / Wrong / NOS / Multi by label (main cohort)
+
+```{r survival_main_combined_km, fig.width=10, fig.height=6}
+km_main_four_list <- list()
+for (L in names(pooled_main_four_list)) {
+  dat_L <- pooled_main_four_df[pooled_main_four_df$label == L, ]
+  if (length(unique(dat_L$group)) < 2) next
+  fit_L <- survfit(Surv(survival_days, event) ~ group, data = dat_L)
+  s_df <- summary(fit_L, data.frame = TRUE)
+  s_df$group <- as.character(s_df$strata)
+  if (any(grepl("=", s_df$group))) s_df$group <- sub("^[^=]+=", "", s_df$group)
+  s_df$label <- L
+  if (!"lower" %in% names(s_df)) s_df$lower <- NA_real_
+  if (!"upper" %in% names(s_df)) s_df$upper <- NA_real_
+  km_main_four_list[[L]] <- s_df[, c("time", "surv", "lower", "upper", "group", "label")]
+}
+km_main_four_df <- do.call(rbind, km_main_four_list)
+if (nrow(km_main_four_df) > 0) {
+  km_main_four_df$group <- factor(km_main_four_df$group, levels = c("Truly", "Wrongly predicted as", "NOS predicted as", "Multi predicted as"))
+  p_km_main_combined <- ggplot(km_main_four_df, aes(x = time / 365.25, y = surv, colour = group)) +
+    geom_step(linewidth = 0.8) +
+    geom_ribbon(aes(ymin = lower, ymax = upper, fill = group), alpha = 0.15, colour = NA) +
+    facet_wrap(~ label, scales = "free_x") +
+    scale_x_continuous(name = "Time (years)") +
+    scale_y_continuous(name = "Survival probability", limits = c(0, 1)) +
+    labs(colour = "Group", fill = "Group", title = "Main cohort: Truly L vs Wrong vs NOS vs Multi predicted as L") +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+  p_km_main_combined
+}
+```
+
+### Kaplan-Meier: Global groups (Correct / Wrong / NOS / Multi, main cohort)
+
+```{r survival_main_global_km, fig.width=7, fig.height=5}
+library(dplyr)
+library(ggplot2)
+
+# Global grouping by prediction correctness and NOS/Multi predictions
+surv_ok_global_main <- !is.na(sample_level_df$survival_days) & !is.na(sample_level_df$event)
+df_main_global <- sample_level_df[surv_ok_global_main, ]
+
+df_main_global$group_global <- dplyr::case_when(
+  grepl("NOS", df_main_global$truth_display) ~ "Prediction NOS",
+  grepl("Multi", df_main_global$prediction_display) ~ "Prediction Multi",
+  df_main_global$correct ~ "Predicted correctly",
+  TRUE ~ "Predicted incorrectly"
+)
+df_main_global$group_global <- factor(
+  df_main_global$group_global,
+  levels = c("Predicted correctly", "Predicted incorrectly", "Prediction NOS", "Prediction Multi")
+)
+
+if (length(unique(na.omit(df_main_global$group_global))) >= 2) {
+  fit_main_global <- survfit(Surv(survival_days, event) ~ group_global, data = df_main_global)
+  s_df <- summary(fit_main_global, data.frame = TRUE)
+  s_df$group_global <- as.character(s_df$strata)
+  if (any(grepl("=", s_df$group_global))) s_df$group_global <- sub("^[^=]+=", "", s_df$group_global)
+  if (!"lower" %in% names(s_df)) s_df$lower <- NA_real_
+  if (!"upper" %in% names(s_df)) s_df$upper <- NA_real_
+
+  p_km_main_global <- ggplot(s_df, aes(x = time / 365.25, y = surv, colour = group_global)) +
+    geom_step(linewidth = 0.8) +
+    geom_ribbon(aes(ymin = lower, ymax = upper, fill = group_global), alpha = 0.15, colour = NA) +
+    scale_x_continuous(name = "Time (years)") +
+    scale_y_continuous(name = "Survival probability", limits = c(0, 1)) +
+    labs(
+      colour = "Group",
+      fill = "Group",
+      title = "Main cohort: global KM by prediction correctness / NOS / Multi"
+    ) +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+  p_km_main_global
+}
+```
+
+## -- MLL Lab: Survival (OS_days, Censor)
+
+Build sample-level data for validation cohort with survival; use OS_days and Censor from MLL_lab.
+
+```{r MLL_lab_survival_setup}
+# Sample-level df for MLL Lab: truth, prediction, correct, survival (OS_days = time, Censor = event)
+# Use canonical display names so labels match main cohort and combined analyses
+MLL_lab_sample_df <- data.frame(
+  truth_display = map_mll_to_display(MLL_lab_truth),
+  prediction_display = map_mll_to_display(MLL_lab_predictions),
+  survival_days = MLL_lab$OS_days,
+  event = as.integer(MLL_lab$Censor),
+  age_years = NA_real_,  # age not available in current MLL metadata
+  sex = ifelse(
+    tolower(MLL_lab$Gender) %in% c("female", "f"), "Female",
+    ifelse(tolower(MLL_lab$Gender) %in% c("male", "m"), "Male", NA_character_)
+  ),
+  stringsAsFactors = FALSE
+)
+MLL_lab_sample_df$correct <- MLL_lab_sample_df$truth_display == MLL_lab_sample_df$prediction_display
+```
+
+## -- Survival: Wrong and NOS predictions vs true label (MLL Lab)
+
+Compare survival of misclassified (wrong) and NOS-predicted samples to truly L. Uses OS_days and Censor. MLL_lab_sample_df uses canonical display names (e.g. "AML NOS").
+
+```{r survival_MLL_wrong_predictions}
+# Valid survival; non-NOS for "truly L" and wrong; NOS for "NOS predicted as L"
+mll_surv_ok <- !is.na(MLL_lab_sample_df$survival_days) & !is.na(MLL_lab_sample_df$event)
+mll_non_nos <- MLL_lab_sample_df$truth_display != "AML NOS"
+mll_df_surv <- MLL_lab_sample_df[mll_surv_ok & mll_non_nos, ]
+
+wrong_by_pred_mll <- split(
+  mll_df_surv[!mll_df_surv$correct, ],
+  mll_df_surv$prediction_display[!mll_df_surv$correct]
+)
+true_by_label_mll <- split(mll_df_surv, mll_df_surv$truth_display)
+
+survival_mll_wrong_vs_true <- list()
+for (L in names(wrong_by_pred_mll)) {
+  wrong_L <- wrong_by_pred_mll[[L]]
+  true_L <- true_by_label_mll[[L]]
+  if (is.null(true_L)) next
+  n_wrong <- nrow(wrong_L)
+  n_true <- nrow(true_L)
+  if (n_wrong < 1 || n_true < 1) next
+
+  dat <- rbind(
+    data.frame(survival_days = wrong_L$survival_days, event = wrong_L$event, group = "Wrongly predicted as"),
+    data.frame(survival_days = true_L$survival_days, event = true_L$event, group = "Truly")
+  )
+  dat$group <- factor(dat$group, levels = c("Wrongly predicted as", "Truly"))
+  s <- survdiff(Surv(survival_days, event) ~ group, data = dat)
+  survival_mll_wrong_vs_true[[L]] <- list(
+    n_wrong = n_wrong, n_true = n_true,
+    median_wrong = median(wrong_L$survival_days), median_true = median(true_L$survival_days),
+    chisq = s$chisq, pval = 1 - pchisq(s$chisq, 1)
+  )
+}
+
+survival_mll_wrong_summary <- do.call(rbind, lapply(names(survival_mll_wrong_vs_true), function(L) {
+  x <- survival_mll_wrong_vs_true[[L]]
+  if (x$n_wrong < 10) return(NULL)
+  data.frame(
+    predicted_label = L,
+    n_wrongly_predicted = x$n_wrong, n_truly = x$n_true,
+    median_OS_days_wrong = x$median_wrong, median_OS_days_true = x$median_true,
+    logrank_chisq = x$chisq, logrank_p = x$pval
+  )
+}))
+rownames(survival_mll_wrong_summary) <- NULL
+survival_mll_wrong_summary
+```
+
+## -- Survival: AML NOS predicted as class L vs truly L (MLL Lab)
+
+```{r survival_MLL_NOS}
+mll_nos_only <- MLL_lab_sample_df[MLL_lab_sample_df$truth_display == "AML NOS" & mll_surv_ok, ]
+if (nrow(mll_nos_only) > 0) {
+  # true_by_label_mll already has non-NOS samples with valid survival
+  survival_mll_nos_vs_true <- list()
+  for (L in unique(mll_nos_only$prediction_display)) {
+    nos_pred_L <- mll_nos_only[mll_nos_only$prediction_display == L, ]
+    true_L <- true_by_label_mll[[L]]
+    if (is.null(true_L) || nrow(nos_pred_L) < 1 || nrow(true_L) < 1) next
+
+    dat <- rbind(
+      data.frame(survival_days = nos_pred_L$survival_days, event = nos_pred_L$event, group = "AML NOS predicted as"),
+      data.frame(survival_days = true_L$survival_days, event = true_L$event, group = "Truly")
+    )
+    dat$group <- factor(dat$group, levels = c("AML NOS predicted as", "Truly"))
+    s <- survdiff(Surv(survival_days, event) ~ group, data = dat)
+    survival_mll_nos_vs_true[[L]] <- list(
+      n_nos_predicted_as_L = nrow(nos_pred_L), n_truly_L = nrow(true_L),
+      median_nos = median(nos_pred_L$survival_days), median_true = median(true_L$survival_days),
+      chisq = s$chisq, pval = 1 - pchisq(s$chisq, 1)
+    )
+  }
+
+  survival_mll_nos_summary <- do.call(rbind, lapply(names(survival_mll_nos_vs_true), function(L) {
+    x <- survival_mll_nos_vs_true[[L]]
+    if (x$n_nos_predicted_as_L < 10) return(NULL)
+    data.frame(
+      predicted_class = L,
+      n_AML_NOS_predicted_as = x$n_nos_predicted_as_L, n_truly = x$n_truly_L,
+      median_OS_days_NOS_pred = x$median_nos, median_OS_days_true = x$median_true,
+      logrank_chisq = x$chisq, logrank_p = x$pval
+    )
+  }))
+  rownames(survival_mll_nos_summary) <- NULL
+  survival_mll_nos_summary
+} else {
+  message("No AML NOS samples with valid survival in MLL Lab cohort.")
+  survival_mll_nos_summary <- data.frame()
+  survival_mll_nos_vs_true <- list()
+}
+```
+
+### Combined pooled analysis: Truly / Wrong / NOS (MLL Lab, 3 groups)
+
+```{r survival_MLL_combined_pooled}
+labels_mll_combined <- unique(c(names(survival_mll_wrong_vs_true), names(survival_mll_nos_vs_true)))
+labels_mll_combined <- labels_mll_combined[vapply(labels_mll_combined, function(L) !is.null(true_by_label_mll[[L]]), logical(1))]
+
+pooled_mll_three_list <- list()
+for (L in labels_mll_combined) {
+  true_L <- true_by_label_mll[[L]]
+  wrong_L <- wrong_by_pred_mll[[L]]
+  nos_pred_L <- mll_nos_only[mll_nos_only$prediction_display == L, ]
+  if (is.null(true_L) || nrow(true_L) < 1) next
+
+  parts <- list(
+    data.frame(
+      survival_days = true_L$survival_days,
+      event = true_L$event,
+      age_years = true_L$age_years,
+      sex = true_L$sex,
+      group = "Truly",
+      label = L,
+      cohort = "MLL"
+    )
+  )
+  if (!is.null(wrong_L) && nrow(wrong_L) > 0)
+    parts[[length(parts) + 1L]] <- data.frame(
+      survival_days = wrong_L$survival_days,
+      event = wrong_L$event,
+      age_years = wrong_L$age_years,
+      sex = wrong_L$sex,
+      group = "Wrongly predicted as",
+      label = L,
+      cohort = "MLL"
+    )
+  if (nrow(nos_pred_L) > 0)
+    parts[[length(parts) + 1L]] <- data.frame(
+      survival_days = nos_pred_L$survival_days,
+      event = nos_pred_L$event,
+      age_years = nos_pred_L$age_years,
+      sex = nos_pred_L$sex,
+      group = "NOS predicted as",
+      label = L,
+      cohort = "MLL"
+    )
+  pooled_mll_three_list[[L]] <- do.call(rbind, parts)
+}
+pooled_mll_three_df <- do.call(rbind, pooled_mll_three_list)
+if (nrow(pooled_mll_three_df) > 0) {
+  pooled_mll_three_df$group <- factor(pooled_mll_three_df$group, levels = c("Truly", "Wrongly predicted as", "NOS predicted as"))
+  pooled_mll_three_df$cohort <- factor(pooled_mll_three_df$cohort)
+  pooled_mll_three_df$sex <- factor(pooled_mll_three_df$sex)
+  cox_mll_combined <- coxph(
+    Surv(survival_days, event) ~ group + sex + strata(label),
+    data = pooled_mll_three_df
+  )
+  summary(cox_mll_combined)
+}
+```
+
+### Kaplan-Meier: Truly / Wrong / NOS by label (MLL Lab)
+
+```{r survival_MLL_combined_km, fig.width=10, fig.height=6}
+if (length(pooled_mll_three_list) > 0) {
+  km_mll_three_list <- list()
+  for (L in names(pooled_mll_three_list)) {
+    dat_L <- pooled_mll_three_df[pooled_mll_three_df$label == L, ]
+    if (length(unique(dat_L$group)) < 2) next
+    fit_L <- survfit(Surv(survival_days, event) ~ group, data = dat_L)
+    s_df <- summary(fit_L, data.frame = TRUE)
+    s_df$group <- as.character(s_df$strata)
+    if (any(grepl("=", s_df$group))) s_df$group <- sub("^[^=]+=", "", s_df$group)
+    s_df$label <- L
+    if (!"lower" %in% names(s_df)) s_df$lower <- NA_real_
+    if (!"upper" %in% names(s_df)) s_df$upper <- NA_real_
+    km_mll_three_list[[L]] <- s_df[, c("time", "surv", "lower", "upper", "group", "label")]
+  }
+  km_mll_three_df <- do.call(rbind, km_mll_three_list)
+  if (nrow(km_mll_three_df) > 0) {
+    km_mll_three_df$group <- factor(km_mll_three_df$group, levels = c("Truly", "Wrongly predicted as", "NOS predicted as"))
+    p_km_mll_combined <- ggplot(km_mll_three_df, aes(x = time / 365.25, y = surv, colour = group)) +
+      geom_step(linewidth = 0.8) +
+      geom_ribbon(aes(ymin = lower, ymax = upper, fill = group), alpha = 0.15, colour = NA) +
+      facet_wrap(~ label, scales = "free_x") +
+      scale_x_continuous(name = "Time (years)") +
+      scale_y_continuous(name = "Survival probability", limits = c(0, 1)) +
+      labs(colour = "Group", fill = "Group", title = "MLL Lab: Truly L vs Wrongly predicted as L vs NOS predicted as L") +
+      theme_minimal() +
+      theme(legend.position = "bottom")
+    p_km_mll_combined
+  }
+}
+```
+
+### Kaplan-Meier: Global groups (Correct / Wrong / NOS, MLL Lab)
+
+```{r survival_MLL_global_km, fig.width=7, fig.height=5}
+library(dplyr)
+library(ggplot2)
+
+# Global grouping by prediction correctness and NOS predictions in MLL Lab
+mll_surv_ok_global <- !is.na(MLL_lab_sample_df$survival_days) & !is.na(MLL_lab_sample_df$event)
+df_mll_global <- MLL_lab_sample_df[mll_surv_ok_global, ]
+
+df_mll_global$group_global <- dplyr::case_when(
+  grepl("NOS", df_mll_global$truth_display) ~ "Prediction NOS",
+  df_mll_global$correct ~ "Predicted correctly",
+  TRUE ~ "Predicted incorrectly"
+)
+df_mll_global$group_global <- factor(
+  df_mll_global$group_global,
+  levels = c("Predicted correctly", "Predicted incorrectly", "Prediction NOS")
+)
+
+if (length(unique(na.omit(df_mll_global$group_global))) >= 2) {
+  fit_mll_global <- survfit(Surv(survival_days, event) ~ group_global, data = df_mll_global)
+  s_df_mll <- summary(fit_mll_global, data.frame = TRUE)
+  s_df_mll$group_global <- as.character(s_df_mll$strata)
+  if (any(grepl("=", s_df_mll$group_global))) s_df_mll$group_global <- sub("^[^=]+=", "", s_df_mll$group_global)
+  if (!"lower" %in% names(s_df_mll)) s_df_mll$lower <- NA_real_
+  if (!"upper" %in% names(s_df_mll)) s_df_mll$upper <- NA_real_
+
+  p_km_mll_global <- ggplot(s_df_mll, aes(x = time / 365.25, y = surv, colour = group_global)) +
+    geom_step(linewidth = 0.8) +
+    geom_ribbon(aes(ymin = lower, ymax = upper, fill = group_global), alpha = 0.15, colour = NA) +
+    scale_x_continuous(name = "Time (years)") +
+    scale_y_continuous(name = "Survival probability", limits = c(0, 1)) +
+    labs(
+      colour = "Group",
+      fill = "Group",
+      title = "MLL Lab: global KM by prediction correctness / NOS"
+    ) +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+  p_km_mll_global
+}
+```
+
+## -- Combined survival: Outer CV + MLL Lab (boost n)
+
+Pool outer-fold predictions (main cohort), MLL Lab validation cohort, and left-out AML NOS (main cohort) for survival analysis. Class names use main-cohort display names; MLL_lab_sample_df already uses map_mll_to_display.
+
+```{r combined_survival_setup}
+# Main cohort: samples with valid survival; cohort = study (BEAT, TARGET, etc.)
+surv_ok_main <- !is.na(sample_level_df$survival_days) & !is.na(sample_level_df$event)
+df_main <- data.frame(
+  truth_display = sample_level_df$truth_display[surv_ok_main],
+  prediction_display = sample_level_df$prediction_display[surv_ok_main],
+  correct = sample_level_df$correct[surv_ok_main],
+  survival_days = sample_level_df$survival_days[surv_ok_main],
+  event = sample_level_df$event[surv_ok_main],
+  cohort = sample_level_df$cohort[surv_ok_main],
+  age_years = sample_level_df$age_years[surv_ok_main],
+  sex = sample_level_df$sex[surv_ok_main],
+  source = "outer_cv",
+  stringsAsFactors = FALSE
+)
+
+# MLL Lab: valid survival (already canonical); cohort = MLL
+mll_surv_ok_combined <- !is.na(MLL_lab_sample_df$survival_days) & !is.na(MLL_lab_sample_df$event)
+df_mll <- data.frame(
+  truth_display = MLL_lab_sample_df$truth_display[mll_surv_ok_combined],
+  prediction_display = MLL_lab_sample_df$prediction_display[mll_surv_ok_combined],
+  correct = MLL_lab_sample_df$correct[mll_surv_ok_combined],
+  survival_days = MLL_lab_sample_df$survival_days[mll_surv_ok_combined],
+  event = MLL_lab_sample_df$event[mll_surv_ok_combined],
+  cohort = "MLL",
+  age_years = MLL_lab_sample_df$age_years[mll_surv_ok_combined],
+  sex = MLL_lab_sample_df$sex[mll_surv_ok_combined],
+  source = "MLL_lab",
+  stringsAsFactors = FALSE
+)
+
+# Left-out AML NOS (main cohort): cohort = study from leftout_df
+df_leftout_nos <- data.frame(
+  truth_display = "AML NOS",
+  prediction_display = nos_only$prediction_canonical,
+  correct = FALSE,
+  survival_days = nos_only$survival_days,
+  event = nos_only$event,
+  cohort = nos_only$cohort,
+  age_years = nos_only$age_years,
+  sex = nos_only$sex,
+  source = "leftout_NOS",
+  stringsAsFactors = FALSE
+)
+
+# Left-out Multi (main cohort): cohort = study from leftout_df
+df_leftout_multi <- data.frame(
+  truth_display = "Multi",
+  prediction_display = multi_only$prediction_canonical,
+  correct = FALSE,
+  survival_days = multi_only$survival_days,
+  event = multi_only$event,
+  cohort = multi_only$cohort,
+  age_years = multi_only$age_years,
+  sex = multi_only$sex,
+  source = "leftout_Multi",
+  stringsAsFactors = FALSE
+)
+
+combined_survival_df <- rbind(df_main, df_mll, df_leftout_nos, df_leftout_multi)
+table(combined_survival_df$source)
+```
+
+### Combined: Truly / Wrong / NOS / Multi (4 groups) — one pooled Cox and KM
+
+Truly L = outer CV + MLL non-NOS, non-Multi with truth L. Wrong L = RGAS misclassified as L only (exclude NOS and Multi). NOS predicted as L = left-out NOS (main) + MLL NOS with prediction L. Multi predicted as L = left-out Multi (main) with prediction L. All use main-cohort display names.
+
+```{r survival_combined_four_groups}
+true_by_label_comb <- split(combined_survival_df, combined_survival_df$truth_display)
+# Wrong = misclassified, exclude NOS and Multi (only RGAS wrong predictions)
+wrong_comb_rgas_only <- combined_survival_df[
+  !combined_survival_df$correct &
+  combined_survival_df$truth_display != "AML NOS" &
+  combined_survival_df$truth_display != "Multi",
+]
+wrong_by_pred_comb <- split(wrong_comb_rgas_only, wrong_comb_rgas_only$prediction_display)
+combined_nos_only <- combined_survival_df[combined_survival_df$truth_display == "AML NOS", ]
+combined_multi_only <- combined_survival_df[combined_survival_df$truth_display == "Multi", ]
+
+# Labels L that have at least Truly L and one of Wrong, NOS or Multi
+labels_comb_four <- unique(c(
+  names(true_by_label_comb),
+  names(wrong_by_pred_comb),
+  unique(combined_nos_only$prediction_display),
+  unique(combined_multi_only$prediction_display)
+))
+labels_comb_four <- labels_comb_four[!labels_comb_four %in% c("AML NOS", "Multi")]
+labels_comb_four <- labels_comb_four[vapply(labels_comb_four, function(L) !is.null(true_by_label_comb[[L]]) && nrow(true_by_label_comb[[L]]) > 0, logical(1))]
+
+pooled_comb_four_list <- list()
+for (L in labels_comb_four) {
+  true_L <- true_by_label_comb[[L]]
+  wrong_L <- wrong_by_pred_comb[[L]]
+  nos_L <- combined_nos_only[combined_nos_only$prediction_display == L, ]
+  multi_L <- combined_multi_only[combined_multi_only$prediction_display == L, ]
+  if (is.null(true_L) || nrow(true_L) < 1) next
+
+  parts <- list(
+    data.frame(
+      survival_days = true_L$survival_days,
+      event = true_L$event,
+      age_years = true_L$age_years,
+      sex = true_L$sex,
+      group = "Truly",
+      label = L,
+      cohort = true_L$cohort
+    )
+  )
+  if (!is.null(wrong_L) && nrow(wrong_L) > 0)
+    parts[[length(parts) + 1L]] <- data.frame(
+      survival_days = wrong_L$survival_days,
+      event = wrong_L$event,
+      age_years = wrong_L$age_years,
+      sex = wrong_L$sex,
+      group = "Wrongly predicted as",
+      label = L,
+      cohort = wrong_L$cohort
+    )
+  if (nrow(nos_L) > 0)
+    parts[[length(parts) + 1L]] <- data.frame(
+      survival_days = nos_L$survival_days,
+      event = nos_L$event,
+      age_years = nos_L$age_years,
+      sex = nos_L$sex,
+      group = "NOS predicted as",
+      label = L,
+      cohort = nos_L$cohort
+    )
+  if (nrow(multi_L) > 0)
+    parts[[length(parts) + 1L]] <- data.frame(
+      survival_days = multi_L$survival_days,
+      event = multi_L$event,
+      age_years = multi_L$age_years,
+      sex = multi_L$sex,
+      group = "Multi predicted as",
+      label = L,
+      cohort = multi_L$cohort
+    )
+  pooled_comb_four_list[[L]] <- do.call(rbind, parts)
+}
+pooled_comb_four_df <- do.call(rbind, pooled_comb_four_list)
+pooled_comb_four_df$group <- factor(pooled_comb_four_df$group, levels = c("Truly", "Wrongly predicted as", "NOS predicted as", "Multi predicted as"))
+pooled_comb_four_df$cohort <- factor(pooled_comb_four_df$cohort)
+pooled_comb_four_df$sex <- factor(pooled_comb_four_df$sex)
+
+# Summary n per group per label
+survival_combined_summary_n <- do.call(rbind, lapply(names(pooled_comb_four_list), function(L) {
+  d <- pooled_comb_four_list[[L]]
+  data.frame(
+    label = L,
+    n_Truly = sum(d$group == "Truly"),
+    n_Wrong = sum(d$group == "Wrongly predicted as"),
+    n_NOS = sum(d$group == "NOS predicted as"),
+    n_Multi = sum(d$group == "Multi predicted as")
+  )
+}))
+survival_combined_summary_n
+```
+
+### Combined: Pooled Cox (4 groups, stratified by label)
+
+```{r survival_combined_pooled}
+cox_combined_four <- coxph(
+  Surv(survival_days, event) ~ group + sex + cohort + strata(label),
+  data = pooled_comb_four_df
+)
+summary(cox_combined_four)
+```
+
+### Combined: Kaplan-Meier Truly / Wrong / NOS / Multi by label
+
+```{r survival_combined_km, fig.width=10, fig.height=6}
+km_comb_four_list <- list()
+for (L in names(pooled_comb_four_list)) {
+  dat_L <- pooled_comb_four_df[pooled_comb_four_df$label == L, ]
+  if (length(unique(dat_L$group)) < 2) next
+  fit_L <- survfit(Surv(survival_days, event) ~ group, data = dat_L)
+  s_df <- summary(fit_L, data.frame = TRUE)
+  s_df$group <- as.character(s_df$strata)
+  if (any(grepl("=", s_df$group))) s_df$group <- sub("^[^=]+=", "", s_df$group)
+  s_df$label <- L
+  if (!"lower" %in% names(s_df)) s_df$lower <- NA_real_
+  if (!"upper" %in% names(s_df)) s_df$upper <- NA_real_
+  km_comb_four_list[[L]] <- s_df[, c("time", "surv", "lower", "upper", "group", "label")]
+}
+km_comb_four_df <- do.call(rbind, km_comb_four_list)
+if (nrow(km_comb_four_df) > 0) {
+  km_comb_four_df$group <- factor(km_comb_four_df$group, levels = c("Truly", "Wrongly predicted as", "NOS predicted as", "Multi predicted as"))
+  p_km_combined <- ggplot(km_comb_four_df, aes(x = time / 365.25, y = surv, colour = group)) +
+    geom_step(linewidth = 0.8) +
+    geom_ribbon(aes(ymin = lower, ymax = upper, fill = group), alpha = 0.15, colour = NA) +
+    facet_wrap(~ label, scales = "free_x") +
+    scale_x_continuous(name = "Time (years)") +
+    scale_y_continuous(name = "Survival probability", limits = c(0, 1)) +
+    labs(colour = "Group", fill = "Group", title = "Combined: Truly L vs Wrong vs NOS vs Multi predicted as L") +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+  p_km_combined
+}
+```
+
+### Combined: Global KM (Correct / Wrong / NOS / Multi)
+
+```{r survival_combined_global_km, fig.width=7, fig.height=5}
+library(dplyr)
+library(ggplot2)
+
+# Global grouping in combined survival data (outer CV + MLL + left-out NOS/Multi)
+combined_survival_df$group_global <- dplyr::case_when(
+  combined_survival_df$truth_display == "AML NOS" ~ "Truth AML NOS",
+  combined_survival_df$truth_display == "Multi" ~ "Truth Multi",
+  grepl("NOS", combined_survival_df$prediction_display) ~ "Prediction NOS",
+  grepl("Multi", combined_survival_df$prediction_display) ~ "Prediction Multi",
+  combined_survival_df$correct ~ "Predicted correctly",
+  TRUE ~ "Predicted incorrectly"
+)
+combined_survival_df$group_global <- factor(
+  combined_survival_df$group_global,
+  levels = c("Predicted correctly", "Predicted incorrectly", "Prediction NOS", "Prediction Multi", "Truth AML NOS", "Truth Multi")
+)
+
+if (length(unique(na.omit(combined_survival_df$group_global))) >= 2) {
+  fit_comb_global <- survfit(Surv(survival_days, event) ~ group_global, data = combined_survival_df)
+  s_df_comb <- summary(fit_comb_global, data.frame = TRUE)
+  s_df_comb$group_global <- as.character(s_df_comb$strata)
+  if (any(grepl("=", s_df_comb$group_global))) s_df_comb$group_global <- sub("^[^=]+=", "", s_df_comb$group_global)
+  if (!"lower" %in% names(s_df_comb)) s_df_comb$lower <- NA_real_
+  if (!"upper" %in% names(s_df_comb)) s_df_comb$upper <- NA_real_
+
+  p_km_comb_global <- ggplot(s_df_comb, aes(x = time / 365.25, y = surv, colour = group_global)) +
+    geom_step(linewidth = 0.8) +
+    geom_ribbon(aes(ymin = lower, ymax = upper, fill = group_global), alpha = 0.15, colour = NA) +
+    scale_x_continuous(name = "Time (years)") +
+    scale_y_continuous(name = "Survival probability", limits = c(0, 1)) +
+    labs(
+      colour = "Group",
+      fill = "Group",
+      title = "Combined: global KM by prediction correctness / NOS / Multi"
+    ) +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+  p_km_comb_global
+}
 ```
 

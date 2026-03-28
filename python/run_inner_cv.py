@@ -61,6 +61,7 @@ def main():
         )
 
     args = parser.parse_args() # Parse the command-line arguments
+    random.seed(train_test.CV_RANDOM_STATE)
     n_jobs = args.n_jobs # Get the value of n_jobs from the parsed arguments
     # Get the number of inner and outer folds
     k_out = args.k_out

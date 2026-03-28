@@ -17,6 +17,11 @@ from sklearn.base import clone
 from joblib import Parallel, delayed
 import itertools
 import ast
+from collections import Counter
+
+# Project-wide seed for CV shuffling (StratifiedKFold, left-out assignment).
+CV_RANDOM_STATE = 1
+
 ###################################################################################
 # Helper functions                                                                #
 ###################################################################################
@@ -144,6 +149,145 @@ def filter_data(X, y, study_labels, min_n=20):
     print(f"  y: {len(filtered_y)}")
 
     return filtered_X, filtered_y, filtered_study_labels
+
+
+def build_hybrid_stratify_labels(y, study_labels, n_splits):
+    """
+    Build labels for StratifiedKFold on the given slice of data.
+
+    Uses joint (subtype, study) when that cell has >= n_splits samples here;
+    otherwise subtype-only so sparse (class, study) pairs do not form tiny
+    strata. Matches main CV and left-out fold assignment logic.
+    """
+    y = np.asarray(y)
+    study_labels = np.asarray(study_labels)
+    if len(study_labels) != len(y):
+        raise ValueError("y and study_labels must have the same length.")
+    pairs = list(zip(y, study_labels))
+    counts = Counter(pairs)
+    return [
+        str(a) + " " + str(b) if counts[(a, b)] >= n_splits else str(a)
+        for a, b in pairs
+    ]
+
+
+def get_leftout_samples(X, y, study_labels, min_n=20):
+    """
+    Returns samples excluded from training by filter_data(), except Multi
+    and Missing data, within the selected studies.
+
+    These represent real subtypes the model may encounter at deployment but
+    was not trained on (AML NOS, rare subtypes with n < min_n).
+    """
+    X = np.array(X, dtype=np.float32)
+
+    unique_classes, class_counts = np.unique(y, return_counts=True)
+    valid_classes = unique_classes[class_counts >= min_n]
+    valid_classes = [c for c in valid_classes if c != "AML NOS" and c != "Missing data" and c != "Multi"]
+
+    selected_studies = [
+        "TCGA-LAML",
+        "LEUCEGENE",
+        "BEATAML1.0-COHORT",
+        "AAML0531",
+        "AAML1031",
+        "AAML03P1",
+        "100LUMC",
+    ]
+
+    in_selected_studies = np.isin(study_labels, selected_studies)
+    is_valid_class = np.isin(y, valid_classes)
+    is_excluded_from_leftout = np.isin(y, ["Multi", "Missing data"])
+
+    leftout_mask = in_selected_studies & ~is_valid_class & ~is_excluded_from_leftout
+
+    leftout_X = X[leftout_mask]
+    leftout_y = y[leftout_mask]
+    leftout_study = study_labels[leftout_mask]
+    leftout_global_idx = np.where(leftout_mask)[0]
+
+    print(f"\n  Left-out samples: {len(leftout_y)}")
+    if len(leftout_y) > 0:
+        unique_leftout, counts = np.unique(leftout_y, return_counts=True)
+        for cls, cnt in zip(unique_leftout, counts):
+            print(f"    {cls}: {cnt}")
+    print(f"  Left-out X shape: {leftout_X.shape}")
+
+    return leftout_X, leftout_y, leftout_study, leftout_global_idx
+
+
+def assign_leftout_to_cv_folds(y_leftout, study_leftout, n_folds=5, random_state=None):
+    """
+    Assign left-out samples to CV folds with stratification and deterministic fallback.
+
+    Same rule as main CV: hybrid strata (joint subtype+study when count >= n_folds
+    in the left-out set, else subtype-only), then subtype-only, study-only, then
+    balanced random modulo.
+
+    random_state defaults to CV_RANDOM_STATE when None.
+    """
+    y_leftout = np.asarray(y_leftout)
+    study_leftout = np.asarray(study_leftout)
+    n_leftout = len(y_leftout)
+    if n_leftout != len(study_leftout):
+        raise ValueError("y_leftout and study_leftout must have the same length.")
+    if n_leftout == 0:
+        return np.array([], dtype=int)
+
+    if random_state is None:
+        random_state = CV_RANDOM_STATE
+    rng = np.random.RandomState(random_state)
+
+    # StratifiedKFold requires every stratum to have at least n_folds samples.
+    def can_stratify(strata):
+        _, counts = np.unique(strata, return_counts=True)
+        return np.all(counts >= n_folds)
+
+    def try_stratified_assignment(strata, label_name):
+        if not can_stratify(strata):
+            return None
+        splitter = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=random_state)
+        assignments = np.zeros(n_leftout, dtype=int)
+        dummy_X = np.zeros((n_leftout, 1), dtype=np.int8)
+        for fold_idx, (_, test_idx) in enumerate(splitter.split(dummy_X, strata)):
+            assignments[test_idx] = fold_idx
+        print(f"Left-out fold assignment stratified by {label_name}.")
+        return assignments
+
+    hybrid = np.array(
+        build_hybrid_stratify_labels(y_leftout, study_leftout, n_folds), dtype=object
+    )
+    for strata, label_name in (
+        (hybrid, "hybrid (joint if n>=k else subtype)"),
+        (y_leftout, "subtype"),
+        (study_leftout, "study"),
+    ):
+        assignments = try_stratified_assignment(strata, label_name)
+        if assignments is not None:
+            return assignments
+
+    # Final fallback keeps folds balanced and reproducible when strata are too sparse.
+    assignments = np.zeros(n_leftout, dtype=int)
+    shuffled_order = rng.permutation(n_leftout)
+    for rank, idx in enumerate(shuffled_order):
+        assignments[idx] = rank % n_folds
+    print("Left-out fold assignment used balanced random fallback (no feasible stratification).")
+    return assignments
+
+
+def extract_n_genes_list(best_params):
+    """Extract sorted unique n_genes values from a best_params DataFrame."""
+    n_genes_list = []
+    for params in best_params["params"]:
+        try:
+            parsed = ast.literal_eval(params) if isinstance(params, str) else params
+            n_genes_list.append(parsed["n_genes"])
+        except (ValueError, SyntaxError, KeyError) as e:
+            print(f"Error parsing params: {params}, Error: {e}")
+            continue
+    if not n_genes_list:
+        raise ValueError("No valid n_genes values found in best_params")
+    return sorted(set(n_genes_list))
 
 
 def encode_labels(y):
@@ -648,10 +792,14 @@ def pre_process_data(
     val_idx,
     study_labels_outer,
     pipe,
+    return_pipelines=False,
 ):
     """
     Preprocesses training and validation sets for different n_genes.
     Fits the pipeline ONLY on the training set.
+
+    When return_pipelines is True, also returns the fitted pipeline objects
+    so they can be reused to transform additional data (e.g. left-out samples).
     """
     X_train = X_train_outer[train_idx]
     X_val = X_train_outer[val_idx]
@@ -665,6 +813,7 @@ def pre_process_data(
     y_val = np.array(y_val, dtype=np.int32)
 
     processed_X = {}
+    fitted_pipelines = {}
     for n_genes_i in n_genes_list:
         pipe_clone = clone(pipe)
 
@@ -678,6 +827,11 @@ def pre_process_data(
         X_val_proc = pipe_clone.transform(X_val).astype(np.float32)
 
         processed_X[n_genes_i] = [X_train_proc, X_val_proc]
+        if return_pipelines:
+            fitted_pipelines[n_genes_i] = pipe_clone
+
+    if return_pipelines:
+        return processed_X, y_train, y_val, fitted_pipelines
     return processed_X, y_train, y_val
 
 
@@ -695,16 +849,19 @@ def run_inner_cv(
     model_type = "any"
 ):
     # Define cv folds
-    outer_cv = StratifiedKFold(n_splits=k_out, shuffle=True, random_state=42)
-    inner_cv = StratifiedKFold(n_splits=k_in, shuffle=True, random_state=42)
+    outer_cv = StratifiedKFold(
+        n_splits=k_out, shuffle=True, random_state=CV_RANDOM_STATE
+    )
+    inner_cv = StratifiedKFold(
+        n_splits=k_in, shuffle=True, random_state=CV_RANDOM_STATE
+    )
 
     param_combos = param_grid
     n_genes_list = sorted({params["n_genes"] for params in param_combos})
     # Empty list to append results to
     all_results = []
 
-    # Combine y and study labels so can be stratified on study and y
-    combined = [str(a) + " " + str(b) for a, b in zip(y, study_labels)]
+    combined = build_hybrid_stratify_labels(y, study_labels, k_out)
 
     # Make outer fold splits
     for outer_fold, (train_idx, test_idx) in enumerate(outer_cv.split(X, combined)):
@@ -714,9 +871,9 @@ def run_inner_cv(
         y_train_outer = y[train_idx]
         study_labels_outer = study_labels[train_idx]
 
-        combined_outer = [
-            str(a) + " " + str(b) for a, b in zip(y_train_outer, study_labels_outer)
-        ]
+        combined_outer = build_hybrid_stratify_labels(
+            y_train_outer, study_labels_outer, k_in
+        )
 
         # Make inner fold splits
         for inner_fold, (train_inner_idx, val_inner_idx) in enumerate(
@@ -798,15 +955,18 @@ def run_inner_cv_single_param(
     Used for SLURM array jobs where each job handles one parameter set.
     """
     # Define cv folds
-    outer_cv = StratifiedKFold(n_splits=k_out, shuffle=True, random_state=42)
-    inner_cv = StratifiedKFold(n_splits=k_in, shuffle=True, random_state=42)
+    outer_cv = StratifiedKFold(
+        n_splits=k_out, shuffle=True, random_state=CV_RANDOM_STATE
+    )
+    inner_cv = StratifiedKFold(
+        n_splits=k_in, shuffle=True, random_state=CV_RANDOM_STATE
+    )
 
     # Single parameter instead of list
     n_genes_list = [single_param["n_genes"]]
     all_results = []
 
-    # Combine y and study labels so can be stratified on study and y
-    combined = [str(a) + " " + str(b) for a, b in zip(y, study_labels)]
+    combined = build_hybrid_stratify_labels(y, study_labels, k_out)
 
     # Make outer fold splits
     for outer_fold, (train_idx, test_idx) in enumerate(outer_cv.split(X, combined)):
@@ -815,9 +975,9 @@ def run_inner_cv_single_param(
         y_train_outer = y[train_idx]
         study_labels_outer = study_labels[train_idx]
 
-        combined_outer = [
-            str(a) + " " + str(b) for a, b in zip(y_train_outer, study_labels_outer)
-        ]
+        combined_outer = build_hybrid_stratify_labels(
+            y_train_outer, study_labels_outer, k_in
+        )
 
         # Make inner fold splits
         for inner_fold, (train_inner_idx, val_inner_idx) in enumerate(
@@ -884,14 +1044,15 @@ def run_train_test_single_param(
     Used to select the best hyperparameters after inner CV evaluation.
     """
     # Define cv folds for train/test splits
-    outer_cv = StratifiedKFold(n_splits=k_out, shuffle=True, random_state=42)
-    
+    outer_cv = StratifiedKFold(
+        n_splits=k_out, shuffle=True, random_state=CV_RANDOM_STATE
+    )
+
     # Single parameter instead of list
     n_genes_list = [single_param["n_genes"]]
     all_results = []
 
-    # Combine y and study labels so can be stratified on study and y
-    combined = [str(a) + " " + str(b) for a, b in zip(y, study_labels)]
+    combined = build_hybrid_stratify_labels(y, study_labels, k_out)
 
     # Make train/test splits (no inner CV)
     for fold, (train_idx, test_idx) in enumerate(outer_cv.split(X, combined)):
@@ -1051,15 +1212,16 @@ def run_outer_cv(
     
     # Remove duplicates and sort
     n_genes_list = sorted(list(set(n_genes_list)))
-    # Define cv folds
-    outer_cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    # Keep outer CV fold assignments reproducible and aligned with inner-CV setup.
+    outer_cv = StratifiedKFold(
+        n_splits=5, shuffle=True, random_state=CV_RANDOM_STATE
+    )
 
     # Empty list to append results to
     all_results = []
 
-    # Combine y and study labels so can be stratified on study and y
-    combined = [str(a) + " " + str(b) for a, b in zip(y, study_labels)]
-    
+    combined = build_hybrid_stratify_labels(y, study_labels, 5)
+
     # Make outer fold splits
     for outer_fold, (train_idx, test_idx) in enumerate(outer_cv.split(X, combined)):
         print("outer_fold")
@@ -1119,13 +1281,18 @@ def pre_process_data_loso(
     X_test,
     study_labels_inner,  # Labels corresponding to X_train_inner
     y_train_inner,       # Subtype labels for X_train (required for FeatureSelectionEta)
-    pipe
+    pipe,
+    return_pipelines=False,
 ):
     """
     Preprocesses training and test/validation sets for different n_genes.
     Fits the pipeline ONLY on the training set.
+
+    When return_pipelines is True, also returns the fitted pipeline objects
+    so they can be reused to transform additional data (e.g. left-out samples).
     """
     processed_X = {}
+    fitted_pipelines = {}
     for n_genes_i in n_genes_list:
         # Clone the pipeline for this specific n_genes setting
         pipe_inner = clone(pipe)
@@ -1142,8 +1309,11 @@ def pre_process_data_loso(
         X_test_proc = pipe_inner.transform(X_test)
 
         processed_X[n_genes_i] = [X_train_proc, X_test_proc]
+        if return_pipelines:
+            fitted_pipelines[n_genes_i] = pipe_inner
 
-    # Return the dictionary of processed data and the original inner y values
+    if return_pipelines:
+        return processed_X, fitted_pipelines
     return processed_X
 
 
@@ -1463,10 +1633,270 @@ def run_outer_cv_loso(
     return df_parallel_results
 
 ###################################################################################
+# Left-out sample prediction functions for outer CV                               #
+###################################################################################
+
+
+def predict_leftout_for_fold(
+    outer_fold,
+    fitted_pipelines,
+    processed_X,
+    y_train,
+    X_leftout_raw,
+    y_leftout,
+    leftout_indices,
+    model,
+    best_params_fold,
+    multi_type="standard",
+    model_type="any"
+):
+    """
+    Predict on left-out samples for a single outer fold.
+
+    Re-fits the model on the already-preprocessed training data (fast),
+    then transforms and predicts on left-out samples using the fitted
+    pipeline from that fold.
+    """
+
+    def _standard_leftout():
+        params = best_params_fold.iloc[0]["params"]
+        params = ast.literal_eval(params) if isinstance(params, str) else params
+        n_genes = params.pop("n_genes")
+
+        X_train = processed_X[n_genes][0]
+        X_leftout_proc = fitted_pipelines[n_genes].transform(
+            X_leftout_raw
+        ).astype(np.float32)
+
+        label_encoder = LabelEncoder()
+        label_encoder.fit(y_train)
+        y_train_encoded = label_encoder.transform(y_train)
+
+        clf = model(**params)
+        params["n_genes"] = n_genes
+
+        if model_type == "NN":
+            best_epoch = params.get("best_epoch", None)
+            if best_epoch is None:
+                raise ValueError("Best Epochs for NN is not available.")
+            clf.fit(X_train, y_train_encoded, epochs=best_epoch)
+        else:
+            clf.fit(X_train, y_train_encoded)
+
+        preds_prob = clf.predict_proba(X_leftout_proc)
+        preds_encoded = np.argmax(preds_prob, axis=1)
+        preds = label_encoder.inverse_transform(preds_encoded)
+        classes = label_encoder.classes_
+
+        preds_prob = preds_prob.flatten()
+        preds_prob = np.round(preds_prob, 4)
+        preds_prob = preds_prob.tolist()
+
+        return {
+            "outer_fold": outer_fold,
+            "classes": classes,
+            "params": params,
+            "accuracy": 0,
+            "f1_macro": 0,
+            "mcc": 0,
+            "kappa": 0,
+            "y_val": y_leftout,
+            "preds": preds,
+            "preds_prob": json.dumps(preds_prob),
+            "sample_indices": leftout_indices,
+        }
+
+    def _ovr_leftout():
+        results = []
+        classes = np.unique(y_train)
+
+        for cl in classes:
+            class_params = best_params_fold[best_params_fold["class"] == cl]
+            if len(class_params) == 0:
+                print(f"Skipping class {cl} for OvR leftout - no best parameters")
+                continue
+
+            params = class_params.iloc[0]["params"]
+            params = ast.literal_eval(params) if isinstance(params, str) else params
+            n_genes = params.pop("n_genes")
+
+            X_train = processed_X[n_genes][0]
+            X_leftout_proc = fitted_pipelines[n_genes].transform(
+                X_leftout_raw
+            ).astype(np.float32)
+
+            clf = model(**params)
+            params["n_genes"] = n_genes
+
+            y_train_bin = np.array(
+                [1 if yy == cl else 0 for yy in y_train], dtype=np.int32
+            )
+            # Left-out true class is never a training class, so always 0
+            y_leftout_bin = np.zeros(len(y_leftout), dtype=np.int32)
+
+            clf.fit(X_train, y_train_bin)
+            preds_prob = clf.predict_proba(X_leftout_proc)
+            pos_class_index = list(clf.classes_).index(1)
+            preds_prob = preds_prob[:, pos_class_index]
+            preds = (preds_prob >= 0.5).astype(int)
+
+            preds_prob = np.round(preds_prob, 4)
+            preds_prob = preds_prob.tolist()
+
+            results.append({
+                "outer_fold": outer_fold,
+                "class": cl,
+                "params": params,
+                "accuracy": 0,
+                "f1_binary": 0,
+                "mcc": 0,
+                "kappa": 0,
+                "y_val": y_leftout_bin,
+                "preds": preds,
+                "preds_prob": json.dumps(preds_prob),
+                "sample_indices": leftout_indices,
+            })
+        return results
+
+    dispatch = {"standard": _standard_leftout, "OvR": _ovr_leftout}
+    if multi_type not in dispatch:
+        raise ValueError(f"Unsupported multi_type for leftout: {multi_type}")
+
+    return dispatch[multi_type]()
+
+
+def run_outer_cv_leftout(
+    X, y, study_labels,
+    X_leftout, y_leftout, leftout_global_idx, leftout_fold_assignments,
+    model, pipe, best_params,
+    multi_type="standard", model_type="any"
+):
+    """
+    Predict on left-out samples for each outer CV fold.
+
+    Mirrors run_outer_cv() fold structure (same StratifiedKFold seed) so
+    each fold's model is identical. For each fold, transforms and predicts
+    on the left-out samples assigned to that fold.
+    """
+    if isinstance(best_params, str):
+        best_params = pd.read_csv(best_params)
+
+    n_genes_list = extract_n_genes_list(best_params)
+    # Mirror run_outer_cv() fold assignments exactly for left-out inference.
+    outer_cv = StratifiedKFold(
+        n_splits=5, shuffle=True, random_state=CV_RANDOM_STATE
+    )
+    combined = build_hybrid_stratify_labels(y, study_labels, 5)
+
+    all_leftout_results = []
+
+    for outer_fold, (train_idx, test_idx) in enumerate(outer_cv.split(X, combined)):
+        print(f"Leftout predictions for outer fold {outer_fold}")
+
+        fold_mask = leftout_fold_assignments == outer_fold
+        if not np.any(fold_mask):
+            print(f"  No left-out samples assigned to fold {outer_fold}, skipping")
+            continue
+
+        # Preprocess training data and get fitted pipelines
+        processed_X, y_train, y_test, fitted_pipelines = pre_process_data(
+            n_genes_list, X, y, train_idx, test_idx, study_labels, pipe,
+            return_pipelines=True,
+        )
+
+        X_leftout_fold = X_leftout[fold_mask]
+        y_leftout_fold = y_leftout[fold_mask]
+        leftout_idx_fold = leftout_global_idx[fold_mask]
+
+        best_params_fold = best_params[best_params["outer_fold"] == outer_fold]
+
+        print(f"  Predicting on {len(y_leftout_fold)} left-out samples")
+        leftout_results = predict_leftout_for_fold(
+            outer_fold, fitted_pipelines, processed_X, y_train,
+            X_leftout_fold, y_leftout_fold, leftout_idx_fold,
+            model, best_params_fold,
+            multi_type=multi_type, model_type=model_type,
+        )
+
+        if isinstance(leftout_results, dict):
+            all_leftout_results.append(leftout_results)
+        elif isinstance(leftout_results, list):
+            all_leftout_results.extend(leftout_results)
+
+    return pd.DataFrame(all_leftout_results)
+
+
+def run_outer_cv_loso_leftout(
+    X, y, study_labels,
+    X_leftout, y_leftout, study_leftout, leftout_global_idx,
+    model, pipe, best_params,
+    multi_type="standard", model_type="any"
+):
+    """
+    Predict on left-out samples for each LOSO outer fold.
+
+    Left-out samples are assigned to the fold of their study. Mirrors
+    run_outer_cv_loso() fold structure so each fold's model is identical.
+    """
+    if isinstance(best_params, str):
+        best_params = pd.read_csv(best_params)
+
+    n_genes_list = extract_n_genes_list(best_params)
+    studies_as_folds = np.unique(study_labels)
+
+    all_leftout_results = []
+
+    for test_study_name in studies_as_folds:
+        print(f"Leftout predictions for LOSO fold '{test_study_name}'")
+
+        # Left-out samples belonging to this study
+        leftout_study_mask = study_leftout == test_study_name
+        if not np.any(leftout_study_mask):
+            print(f"  No left-out samples in study '{test_study_name}', skipping")
+            continue
+
+        # Same split as normal LOSO
+        test_mask = study_labels == test_study_name
+        train_mask = ~test_mask
+
+        X_train = X[train_mask]
+        y_train = y[train_mask]
+        study_labels_train = study_labels[train_mask]
+
+        # Preprocess and get fitted pipelines
+        processed_X, fitted_pipelines = pre_process_data_loso(
+            n_genes_list, X_train, X[test_mask],
+            study_labels_train, y_train, pipe,
+            return_pipelines=True,
+        )
+
+        X_leftout_fold = X_leftout[leftout_study_mask]
+        y_leftout_fold = y_leftout[leftout_study_mask]
+        leftout_idx_fold = leftout_global_idx[leftout_study_mask]
+
+        best_params_fold = best_params[best_params["outer_fold"] == test_study_name]
+
+        print(f"  Predicting on {len(y_leftout_fold)} left-out samples")
+        leftout_results = predict_leftout_for_fold(
+            test_study_name, fitted_pipelines, processed_X, y_train,
+            X_leftout_fold, y_leftout_fold, leftout_idx_fold,
+            model, best_params_fold,
+            multi_type=multi_type, model_type=model_type,
+        )
+
+        if isinstance(leftout_results, dict):
+            all_leftout_results.append(leftout_results)
+        elif isinstance(leftout_results, list):
+            all_leftout_results.extend(leftout_results)
+
+    return pd.DataFrame(all_leftout_results)
+
+
+###################################################################################
 # Pipeline management functions                                                   #
 ###################################################################################
 
-def get_or_create_pipeline(X, study_labels, pipe, n_genes, pipelines_dir):
+def get_or_create_pipeline(X, y, study_labels, pipe, n_genes, pipelines_dir):
     """
     Get an existing fitted pipeline or create and save a new one.
     Pipeline caching is based only on n_genes since preprocessing is identical
@@ -1504,6 +1934,7 @@ def get_or_create_pipeline(X, study_labels, pipe, n_genes, pipelines_dir):
         fitted_pipeline = clone(pipe)
         X_processed = fitted_pipeline.fit_transform(
             X,
+            y,
             feature_selection__study_per_patient=study_labels,
             feature_selection__n_genes=n_genes,
         ).astype(np.float32)
@@ -1565,7 +1996,7 @@ def train_final_model_standard(X, y, study_labels, model, pipe, best_params, mod
     if pipelines_dir is not None:
         print(f"  Using pipeline cache directory: {pipelines_dir}")
         pipe_clone, X_processed = get_or_create_pipeline(
-            X, study_labels, pipe, n_genes, pipelines_dir
+            X, y, study_labels, pipe, n_genes, pipelines_dir
         )
     else:
         # Fallback to original method if no cache directory provided
@@ -1573,6 +2004,7 @@ def train_final_model_standard(X, y, study_labels, model, pipe, best_params, mod
         pipe_clone = clone(pipe)
         X_processed = pipe_clone.fit_transform(
             X,
+            y,
             feature_selection__study_per_patient=study_labels,
             feature_selection__n_genes=n_genes,
         ).astype(np.float32)
@@ -1645,7 +2077,7 @@ def train_final_model_ovr(X, y, study_labels, model, pipe, best_params, model_ty
         print(f"  Using pipeline cache directory: {pipelines_dir}")
         for n_genes in n_genes_values:
             fitted_pipeline, X_processed = get_or_create_pipeline(
-                X, study_labels, pipe, n_genes, pipelines_dir
+                X, y, study_labels, pipe, n_genes, pipelines_dir
             )
             pipelines_cache[n_genes] = fitted_pipeline
             processed_data_cache[n_genes] = X_processed
@@ -1736,7 +2168,7 @@ scoring = {
     'mcc': make_scorer(matthews_corrcoef)
 }
 
-def run_inner_cv_scikeras(X, y, study_per_patient, pipeline, param_grid,k = 2, n_jobs = 1, inner_state = 42):
+def run_inner_cv_scikeras(X, y, study_per_patient, pipeline, param_grid,k = 2, n_jobs = 1, inner_state = 1):
     # ---------------------------------------------------------------------------
     # SET UP CROSS-VALIDATION STRATEGIES
     # ---------------------------------------------------------------------------
@@ -1808,7 +2240,7 @@ def run_inner_cv_scikeras(X, y, study_per_patient, pipeline, param_grid,k = 2, n
             inner_predictions[key].append(results_dict)
     return inner_predictions
 
-def run_inner_cv(X, y, study_per_patient, pipeline, param_grid,k = 2, n_jobs = 1, inner_state = 42):
+def run_inner_cv(X, y, study_per_patient, pipeline, param_grid,k = 2, n_jobs = 1, inner_state = 1):
     # ---------------------------------------------------------------------------
     # SET UP CROSS-VALIDATION STRATEGIES
     # ---------------------------------------------------------------------------

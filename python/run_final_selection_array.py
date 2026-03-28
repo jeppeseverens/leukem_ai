@@ -49,8 +49,8 @@ def main():
         },
         'random_seed': {
             'type': int,
-            'default': 42,
-            'help': 'Random seed for reproducibility (default: 42)'
+            'default': 1,
+            'help': 'Random seed for reproducibility (default: 1)'
         },
         'run_name': {
             'type': str,
