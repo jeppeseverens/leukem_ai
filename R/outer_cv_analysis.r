@@ -32,22 +32,22 @@ OUTER_MODEL_CONFIGS <- list(
   svm = list(
     classification_type = "OvR",
     file_paths = list(
-      cv   = find_latest_csv(OUTER_CV_DIRS$svm, "^SVM_outer_cv_CV_OvR_fs_eta_\\d+_\\d+\\.csv$"),
-      loso = find_latest_csv(OUTER_CV_DIRS$svm, "^SVM_outer_cv_loso_OvR_fs_eta_\\d+_\\d+\\.csv$")
+      cv   = find_latest_csv(OUTER_CV_DIRS$svm, "^SVM_outer_cv_CV_OvR_fs_eta_\\d+_\\d+(_with_knn)?\\.csv$"),
+      loso = find_latest_csv(OUTER_CV_DIRS$svm, "^SVM_outer_cv_loso_OvR_fs_eta_\\d+_\\d+(_with_knn)?\\.csv$")
     )
   ),
   xgboost = list(
     classification_type = "OvR",
     file_paths = list(
-      cv   = find_latest_csv(OUTER_CV_DIRS$xgboost, "^XGBOOST_outer_cv_CV_OvR_fs_eta_\\d+_\\d+\\.csv$"),
-      loso = find_latest_csv(OUTER_CV_DIRS$xgboost, "^XGBOOST_outer_cv_loso_OvR_fs_eta_\\d+_\\d+\\.csv$")
+      cv   = find_latest_csv(OUTER_CV_DIRS$xgboost, "^XGBOOST_outer_cv_CV_OvR_fs_eta_\\d+_\\d+(_with_knn)?\\.csv$"),
+      loso = find_latest_csv(OUTER_CV_DIRS$xgboost, "^XGBOOST_outer_cv_loso_OvR_fs_eta_\\d+_\\d+(_with_knn)?\\.csv$")
     )
   ),
   neural_net = list(
     classification_type = "standard",
     file_paths = list(
-      cv   = find_latest_csv(OUTER_CV_DIRS$nn, "^NN_outer_cv_CV_standard_fs_eta_\\d+_\\d+\\.csv$"),
-      loso = find_latest_csv(OUTER_CV_DIRS$nn, "^NN_outer_cv_loso_standard_fs_eta_\\d+_\\d+\\.csv$")
+      cv   = find_latest_csv(OUTER_CV_DIRS$nn, "^NN_outer_cv_CV_standard_fs_eta_\\d+_\\d+(_with_knn)?\\.csv$"),
+      loso = find_latest_csv(OUTER_CV_DIRS$nn, "^NN_outer_cv_loso_standard_fs_eta_\\d+_\\d+(_with_knn)?\\.csv$")
     )
   )
 )
@@ -57,22 +57,22 @@ LEFTOUT_MODEL_CONFIGS <- list(
   svm = list(
     classification_type = "OvR",
     file_paths = list(
-      cv   = find_latest_csv(OUTER_CV_DIRS$svm, "^SVM_outer_cv_CV_OvR_leftout_fs_eta_\\d+_\\d+\\.csv$"),
-      loso = find_latest_csv(OUTER_CV_DIRS$svm, "^SVM_outer_cv_loso_OvR_leftout_fs_eta_\\d+_\\d+\\.csv$")
+      cv   = find_latest_csv(OUTER_CV_DIRS$svm, "^SVM_outer_cv_CV_OvR_leftout_fs_eta_\\d+_\\d+(_with_knn)?\\.csv$"),
+      loso = find_latest_csv(OUTER_CV_DIRS$svm, "^SVM_outer_cv_loso_OvR_leftout_fs_eta_\\d+_\\d+(_with_knn)?\\.csv$")
     )
   ),
   xgboost = list(
     classification_type = "OvR",
     file_paths = list(
-      cv   = find_latest_csv(OUTER_CV_DIRS$xgboost, "^XGBOOST_outer_cv_CV_OvR_leftout_fs_eta_\\d+_\\d+\\.csv$"),
-      loso = find_latest_csv(OUTER_CV_DIRS$xgboost, "^XGBOOST_outer_cv_loso_OvR_leftout_fs_eta_\\d+_\\d+\\.csv$")
+      cv   = find_latest_csv(OUTER_CV_DIRS$xgboost, "^XGBOOST_outer_cv_CV_OvR_leftout_fs_eta_\\d+_\\d+(_with_knn)?\\.csv$"),
+      loso = find_latest_csv(OUTER_CV_DIRS$xgboost, "^XGBOOST_outer_cv_loso_OvR_leftout_fs_eta_\\d+_\\d+(_with_knn)?\\.csv$")
     )
   ),
   neural_net = list(
     classification_type = "standard",
     file_paths = list(
-      cv   = find_latest_csv(OUTER_CV_DIRS$nn, "^NN_outer_cv_CV_standard_leftout_fs_eta_\\d+_\\d+\\.csv$"),
-      loso = find_latest_csv(OUTER_CV_DIRS$nn, "^NN_outer_cv_loso_standard_leftout_fs_eta_\\d+_\\d+\\.csv$")
+      cv   = find_latest_csv(OUTER_CV_DIRS$nn, "^NN_outer_cv_CV_standard_leftout_fs_eta_\\d+_\\d+(_with_knn)?\\.csv$"),
+      loso = find_latest_csv(OUTER_CV_DIRS$nn, "^NN_outer_cv_loso_standard_leftout_fs_eta_\\d+_\\d+(_with_knn)?\\.csv$")
     )
   )
 )
@@ -96,10 +96,9 @@ DATA_FILTERS <- list(
 WEIGHTS_BASE_DIR_UNMERGED <- "../data/out/inner_cv/ensemble_weights_unmerged_eta2/"
 WEIGHTS_BASE_DIR_MERGED <- "../data/out/inner_cv/ensemble_weights_merged_summed_eta2/"
 
-# NOTE: Rejection cutoffs are now computed via leave-one-fold-out cross-fitting
-# directly on outer CV results, rather than loaded from inner CV.
-# Set to FALSE to inspect monotonic risk-coverage curves without cutoff selection.
-ENABLE_CUTOFF_SELECTION <- FALSE
+# Nested analysis (R/calibration_reject_models.R) reads outer_cv_results.rds ->
+# multivariate_results$with_leftout_ood_aware$Global_Product_Optimized: augmented
+# fold matrices with disagreement features (no confidence_multivariate).
 
 # =============================================================================
 # Source Utility Functions
@@ -110,6 +109,56 @@ source("utility_functions.R")
 # =============================================================================
 # Outer CV Specific Functions
 # =============================================================================
+
+#' Map filtered-dataset 0-based indices to full-dataset 0-based indices.
+map_filtered_local_to_global_indices_outer <- function(sample_indices_zero_based, filtered_index_map_zero_based) {
+  local_one_based <- sample_indices_zero_based + 1L
+  if (length(local_one_based) == 0) return(integer(0))
+  if (any(local_one_based < 1L | local_one_based > length(filtered_index_map_zero_based))) {
+    stop(
+      sprintf(
+        "Found sample_indices outside filtered index range [0, %d]. Example values: %s",
+        length(filtered_index_map_zero_based) - 1L,
+        paste(head(sample_indices_zero_based, 15), collapse = ", ")
+      )
+    )
+  }
+  as.integer(filtered_index_map_zero_based[local_one_based])
+}
+
+KNN_DISTANCE_COLUMNS <- c(
+  "knn10_mean_d", "knn10_min_d", "knn10_q90_d",
+  "knn20_mean_d", "knn20_min_d", "knn20_q90_d"
+)
+REJECT_OPTION_EXTRA_FEATURE_COLUMNS <- c(
+  "trust_ratio_knn10",
+  "conformal_set_size_90"
+)
+
+# Not class-probability columns when scanning fold matrices (metadata + every calibration score).
+# Keep in sync with augmented-matrix builders / utility_functions merge helpers.
+PROB_MATRIX_META_COLUMNS <- c(
+  "y", "inner_fold", "outer_fold", "indices", "study", "sample_indices",
+  "confidence_multivariate",
+  "confidence_id", "confidence_correct", "confidence_two_head",
+  "confidence_seen_new_cohort", "confidence_unseen", "confidence_three_head",
+  "confidence_two_head_postcal", "confidence_two_head_min_gate", "confidence_two_head_id_veto",
+  "is_leftout", "n_models_agree",
+  "top1_prob_variance_across_models",
+  KNN_DISTANCE_COLUMNS,
+  REJECT_OPTION_EXTRA_FEATURE_COLUMNS
+)
+
+add_optional_knn_columns <- function(probability_matrix, source_row, num_samples) {
+  for (knn_col in KNN_DISTANCE_COLUMNS) {
+    if (!knn_col %in% colnames(source_row)) next
+    parsed <- parse_numeric_string(source_row[[knn_col]][1])
+    if (length(parsed) == num_samples) {
+      probability_matrix[[knn_col]] <- parsed
+    }
+  }
+  probability_matrix
+}
 
 #' Load outer CV results for a single model
 #' @param file_path Path to the CSV file containing outer CV results
@@ -148,7 +197,7 @@ load_outer_cv_results <- function(file_path, classification_type) {
 #' @param label_mapping Label mapping data frame
 #' @param filter_unseen_classes Whether to filter samples with classes not in training (default: TRUE)
 #' @return List of probability matrices organized by outer fold (and filtering statistics if filtered)
-generate_outer_ovr_probability_matrices <- function(outer_cv_results, label_mapping, filter_unseen_classes = TRUE, merge_classes = FALSE) {
+generate_outer_ovr_probability_matrices <- function(outer_cv_results, label_mapping, filtered_index_map_zero_based, filter_unseen_classes = TRUE, merge_classes = FALSE) {
   cat("Generating outer One-vs-Rest probability matrices...\n")
 
   if (filter_unseen_classes) {
@@ -227,17 +276,20 @@ generate_outer_ovr_probability_matrices <- function(outer_cv_results, label_mapp
     probability_matrix$outer_fold <- outer_fold_id
 
     # Store sample indices for reference
-    sample_indices <- parse_numeric_string(first_row$sample_indices)
-    if (length(sample_indices) == num_samples) {
-      probability_matrix$sample_indices <- sample_indices
+    sample_indices_local <- parse_numeric_string(first_row$sample_indices)
+    if (length(sample_indices_local) == num_samples) {
+      probability_matrix$sample_indices <- map_filtered_local_to_global_indices_outer(
+        sample_indices_local, filtered_index_map_zero_based
+      )
     }
+    probability_matrix <- add_optional_knn_columns(probability_matrix, first_row, num_samples)
 
     # Apply class merging if requested (before filtering)
     if (merge_classes) {
       probability_matrix <- merge_classes_in_matrix(probability_matrix, merge_prob_method = "sum")
       # Update class_labels after merging for filtering
       class_labels <- colnames(probability_matrix)[!colnames(probability_matrix) %in%
-                                                    c("y", "outer_fold", "sample_indices")]
+                                                    c("y", "outer_fold", "sample_indices", KNN_DISTANCE_COLUMNS, REJECT_OPTION_EXTRA_FEATURE_COLUMNS)]
     }
 
     # Apply filtering if requested
@@ -272,7 +324,7 @@ generate_outer_ovr_probability_matrices <- function(outer_cv_results, label_mapp
 #' @param filtered_subtypes Filtered leukemia subtypes
 #' @param filter_unseen_classes Whether to filter samples with classes not in training (default: TRUE)
 #' @return List of probability matrices organized by outer fold (and filtering statistics if filtered)
-generate_outer_standard_probability_matrices <- function(outer_cv_results, label_mapping, filtered_subtypes, filter_unseen_classes = TRUE, merge_classes = FALSE) {
+generate_outer_standard_probability_matrices <- function(outer_cv_results, label_mapping, filtered_subtypes, filtered_index_map_zero_based, filter_unseen_classes = TRUE, merge_classes = FALSE) {
   cat("Generating outer CV standard probability matrices...\n")
 
   if (filter_unseen_classes) {
@@ -301,8 +353,8 @@ generate_outer_standard_probability_matrices <- function(outer_cv_results, label
     class_labels <- label_mapping$Label[class_indices + 1]
 
     # Extract sample information
-    sample_indices <- parse_numeric_string(fold_row$sample_indices)
-    num_samples <- length(sample_indices)
+    sample_indices_local <- parse_numeric_string(fold_row$sample_indices)
+    num_samples <- length(sample_indices_local)
 
     if (num_samples == 0) {
       warning(sprintf("No samples for outer fold %d", outer_fold_id))
@@ -326,16 +378,19 @@ generate_outer_standard_probability_matrices <- function(outer_cv_results, label
     probability_matrix <- ensure_all_class_columns(probability_matrix, label_mapping)
 
     # Add true labels using sample indices
-    probability_matrix$y <- make.names(filtered_subtypes[sample_indices + 1])
+    probability_matrix$y <- make.names(filtered_subtypes[sample_indices_local + 1])
     probability_matrix$outer_fold <- outer_fold_id
-    probability_matrix$sample_indices <- sample_indices
+    probability_matrix$sample_indices <- map_filtered_local_to_global_indices_outer(
+      sample_indices_local, filtered_index_map_zero_based
+    )
+    probability_matrix <- add_optional_knn_columns(probability_matrix, fold_row, num_samples)
 
     # Apply class merging if requested (before filtering)
     if (merge_classes) {
       probability_matrix <- merge_classes_in_matrix(probability_matrix, merge_prob_method = "sum")
       # Update class_labels after merging for filtering
       class_labels <- colnames(probability_matrix)[!colnames(probability_matrix) %in%
-                                                    c("y", "outer_fold", "sample_indices")]
+                                                    c("y", "outer_fold", "sample_indices", KNN_DISTANCE_COLUMNS, REJECT_OPTION_EXTRA_FEATURE_COLUMNS)]
     }
 
     # Apply filtering if requested
@@ -364,24 +419,17 @@ generate_outer_standard_probability_matrices <- function(outer_cv_results, label
   return(result)
 }
 
-#' Apply ensemble weights from inner CV to outer CV probability matrices
+#' Apply global product-of-experts ensemble weights from inner CV to outer CV probability matrices
 #' @param outer_prob_matrices Outer CV probability matrices for all models
 #' @param ensemble_weights_data Ensemble weights from inner CV analysis
 #' @param type Type of analysis ("cv" or "loso")
-#' @param ensemble_method Method to use ("ovr" or "global")
 #' @return List of ensemble probability matrices
-apply_ensemble_weights_to_outer_cv <- function(outer_prob_matrices, ensemble_weights_data, type = "cv", ensemble_method = "ovr") {
-  cat(sprintf("Applying %s ensemble weights to outer CV results...\n", ensemble_method))
+apply_ensemble_weights_to_outer_cv <- function(outer_prob_matrices, ensemble_weights_data, type = "cv") {
+  cat("Applying global product-of-experts ensemble weights to outer CV results...\n")
 
-  # Get the appropriate weights
-  weights_to_use <- if (ensemble_method == "ovr") {
-    ensemble_weights_data$ovr_weights
-  } else {
-    ensemble_weights_data$global_weights
-  }
-
+  weights_to_use <- ensemble_weights_data$global_weights
   if (is.null(weights_to_use)) {
-    warning(sprintf("No %s weights available for %s analysis", ensemble_method, type))
+    warning(sprintf("No global weights available for %s analysis", type))
     return(NULL)
   }
 
@@ -449,9 +497,9 @@ apply_ensemble_weights_to_outer_cv <- function(outer_prob_matrices, ensemble_wei
     truth <- svm_matrix$y
 
     # Remove non-probability columns
-    svm_probs <- svm_matrix[, !colnames(svm_matrix) %in% c("y", "outer_fold", "sample_indices"), drop = FALSE]
-    xgb_probs <- xgb_matrix[, !colnames(xgb_matrix) %in% c("y", "outer_fold", "sample_indices"), drop = FALSE]
-    nn_probs <- nn_matrix[, !colnames(nn_matrix) %in% c("y", "outer_fold", "sample_indices"), drop = FALSE]
+    svm_probs <- svm_matrix[, !colnames(svm_matrix) %in% c("y", "outer_fold", "sample_indices", KNN_DISTANCE_COLUMNS, REJECT_OPTION_EXTRA_FEATURE_COLUMNS), drop = FALSE]
+    xgb_probs <- xgb_matrix[, !colnames(xgb_matrix) %in% c("y", "outer_fold", "sample_indices", KNN_DISTANCE_COLUMNS, REJECT_OPTION_EXTRA_FEATURE_COLUMNS), drop = FALSE]
+    nn_probs <- nn_matrix[, !colnames(nn_matrix) %in% c("y", "outer_fold", "sample_indices", KNN_DISTANCE_COLUMNS, REJECT_OPTION_EXTRA_FEATURE_COLUMNS), drop = FALSE]
 
     # Ensure all probability columns are numeric
     svm_probs <- data.frame(lapply(svm_probs, function(x) as.numeric(as.character(x))))
@@ -473,70 +521,23 @@ apply_ensemble_weights_to_outer_cv <- function(outer_prob_matrices, ensemble_wei
     xgb_probs <- xgb_probs[, all_classes, drop = FALSE]
     nn_probs <- nn_probs[, all_classes, drop = FALSE]
 
-    # Apply ensemble weights
-    if (ensemble_method == "ovr") {
-      # Use class-specific weights
-      fold_weights <- weights_to_use[[fold_name]]
-      if (is.null(fold_weights)) {
-        warning(sprintf("No OvR weights for fold %s, using DNN-only fallback", fold_name))
-        fold_weights <- list()
-        for (class_name in all_classes) {
-          fold_weights[[gsub("Class.", "", class_name)]] <- list(weights = list(SVM = 0, XGB = 0, NN = 1))
-        }
-      }
-
-      # Initialize ensemble matrix
-      ensemble_matrix <- matrix(0, nrow = nrow(svm_probs), ncol = length(all_classes))
-      colnames(ensemble_matrix) <- all_classes
-
-      # Apply class-specific weights
-      for (class_name in all_classes) {
-        clean_class_name <- gsub("Class.", "", class_name)
-        clean_class_name_no_dots <- gsub("\\.", "", clean_class_name)
-
-        # Find weights for this class
-        class_weights <- NULL
-        if (clean_class_name %in% names(fold_weights)) {
-          class_weights <- fold_weights[[clean_class_name]]$weights
-        } else if (clean_class_name_no_dots %in% names(fold_weights)) {
-          class_weights <- fold_weights[[clean_class_name_no_dots]]$weights
-        } else {
-          # Use DNN-only as fallback
-          class_weights <- list(SVM = 0, XGB = 0, NN = 1)
-        }
-
-        # Calculate weighted ensemble for this class
-        # Ensure weights are numeric and handle any NA values
-        svm_weight <- ifelse(is.null(class_weights$SVM) || is.na(class_weights$SVM), 1, as.numeric(class_weights$SVM))
-        xgb_weight <- ifelse(is.null(class_weights$XGB) || is.na(class_weights$XGB), 1, as.numeric(class_weights$XGB))
-        nn_weight <- ifelse(is.null(class_weights$NN) || is.na(class_weights$NN), 1, as.numeric(class_weights$NN))
-
-        ensemble_matrix[, class_name] <-
-          svm_probs[[class_name]] * svm_weight +
-          xgb_probs[[class_name]] * xgb_weight +
-          nn_probs[[class_name]] * nn_weight
-      }
-
-    } else {
-      # Use global weights
-      fold_weights <- weights_to_use[[fold_name]]
-      if (is.null(fold_weights)) {
-        warning(sprintf("No global weights for fold %s, using DNN-only fallback", fold_name))
-        fold_weights <- list(weights = list(SVM = 0, XGB = 0, NN = 1))
-      }
-
-      weights <- fold_weights$weights
-
-      # Ensure weights are numeric and handle any NA values
-      svm_weight <- ifelse(is.null(weights$SVM) || is.na(weights$SVM), 1, as.numeric(weights$SVM))
-      xgb_weight <- ifelse(is.null(weights$XGB) || is.na(weights$XGB), 1, as.numeric(weights$XGB))
-      nn_weight <- ifelse(is.null(weights$NN) || is.na(weights$NN), 1, as.numeric(weights$NN))
-
-      # Calculate weighted ensemble
-      ensemble_matrix <- svm_probs * svm_weight +
-                        xgb_probs * xgb_weight +
-                        nn_probs * nn_weight
+    # Global weights: product-of-experts in probability space, p ∝ Π_m p_m^{w_m}
+    fold_weights <- weights_to_use[[fold_name]]
+    if (is.null(fold_weights)) {
+      warning(sprintf("No global weights for fold %s, using DNN-only fallback", fold_name))
+      fold_weights <- list(weights = list(SVM = 0, XGB = 0, NN = 1))
     }
+
+    weights <- fold_weights$weights
+
+    svm_weight <- ifelse(is.null(weights$SVM) || is.na(weights$SVM), 1, as.numeric(weights$SVM))
+    xgb_weight <- ifelse(is.null(weights$XGB) || is.na(weights$XGB), 1, as.numeric(weights$XGB))
+    nn_weight <- ifelse(is.null(weights$NN) || is.na(weights$NN), 1, as.numeric(weights$NN))
+
+    eps <- 1e-12
+    ensemble_matrix <- (pmax(svm_probs, eps) ^ svm_weight) *
+      (pmax(xgb_probs, eps) ^ xgb_weight) *
+      (pmax(nn_probs, eps) ^ nn_weight)
 
     # Normalize probabilities
     ensemble_matrix <- t(apply(ensemble_matrix, 1, function(row) {
@@ -576,6 +577,45 @@ apply_ensemble_weights_to_outer_cv <- function(outer_prob_matrices, ensemble_wei
       ensemble_matrix$sample_indices <- svm_matrix$sample_indices
     }
 
+    # KNN reject features are defined in the same transformed space for every model.
+    # After row alignment above, copy from SVM and require XGB/NN to match (no silent NA).
+    knn_tol <- 1e-4
+    for (kcol in KNN_DISTANCE_COLUMNS) {
+      if (!kcol %in% colnames(svm_matrix)) next
+      svm_k <- as.numeric(svm_matrix[[kcol]])
+      if (!all(is.finite(svm_k))) {
+        stop(
+          sprintf(
+            "Ensemble fold %s (%s): non-finite KNN column '%s' on SVM matrix. Regenerate or backfill outer CSV KNN for all models.",
+            fold_name, type, kcol
+          )
+        )
+      }
+      ensemble_matrix[[kcol]] <- svm_k
+      if (kcol %in% colnames(xgb_matrix)) {
+        xgb_k <- as.numeric(xgb_matrix[[kcol]])
+        if (!all(is.finite(xgb_k)) || max(abs(svm_k - xgb_k), na.rm = TRUE) > knn_tol) {
+          stop(
+            sprintf(
+              "Ensemble fold %s (%s): KNN column '%s' mismatch or non-finite on XGB vs SVM.",
+              fold_name, type, kcol
+            )
+          )
+        }
+      }
+      if (kcol %in% colnames(nn_matrix)) {
+        nn_k <- as.numeric(nn_matrix[[kcol]])
+        if (!all(is.finite(nn_k)) || max(abs(svm_k - nn_k), na.rm = TRUE) > knn_tol) {
+          stop(
+            sprintf(
+              "Ensemble fold %s (%s): KNN column '%s' mismatch or non-finite on NN vs SVM.",
+              fold_name, type, kcol
+            )
+          )
+        }
+      }
+    }
+
     ensemble_matrices[[fold_name]] <- ensemble_matrix
   }
 
@@ -605,7 +645,7 @@ calculate_outer_cv_performance <- function(probability_matrices, type = "cv") {
 
       # Extract true labels and predictions
       truth <- prob_matrix$y
-      prob_cols <- prob_matrix[, !colnames(prob_matrix) %in% c("y", "outer_fold", "sample_indices", "study"), drop = FALSE]
+      prob_cols <- prob_matrix[, !colnames(prob_matrix) %in% c("y", "outer_fold", "sample_indices", "study", KNN_DISTANCE_COLUMNS, REJECT_OPTION_EXTRA_FEATURE_COLUMNS), drop = FALSE]
 
       # Get predictions (class with highest probability)
       preds <- colnames(prob_cols)[apply(prob_cols, 1, which.max)]
@@ -771,428 +811,59 @@ summarize_per_class_performance <- function(performance_results) {
 }
 
 # =============================================================================
-# Rejection Analysis Functions
-# =============================================================================
-
-#' Load optimal cutoffs from inner CV analysis
-#' @param rejection_base_dir Base directory containing rejection analysis results
-#' @param type Type of analysis ("cv" or "loso")
-#' @return List containing optimal cutoffs and summary statistics
-load_optimal_cutoffs <- function(rejection_base_dir, type = "cv") {
-  cat(sprintf("Loading optimal cutoffs for %s analysis...\n", toupper(type)))
-
-  # Load cutoffs from the main directory
-  optimal_cutoffs_file <- file.path(rejection_base_dir, "cutoffs.csv")
-
-  if (!file.exists(optimal_cutoffs_file)) {
-    warning(sprintf("Cutoffs file not found: %s", optimal_cutoffs_file))
-    return(NULL)
-  }
-
-  # Load all cutoffs and filter by type
-  all_cutoffs <- safe_read_file(optimal_cutoffs_file, read.csv)
-  if (is.null(all_cutoffs)) {
-    warning("Failed to load cutoffs file")
-    return(NULL)
-  }
-
-  # Filter cutoffs by type
-  optimal_cutoffs <- all_cutoffs[all_cutoffs$source == type, ]
-
-  if (nrow(optimal_cutoffs) == 0) {
-    warning(sprintf("No cutoffs found for type: %s", type))
-    return(NULL)
-  }
-
-  cat(sprintf("  Loaded %d cutoffs for %s analysis from: %s\n", nrow(optimal_cutoffs), toupper(type), optimal_cutoffs_file))
-
-  return(list(
-    optimal_cutoffs = optimal_cutoffs
-  ))
-}
-
-#' Apply rejection analysis to outer CV probability matrices using inner CV cutoffs
-#' @param probability_matrices Probability matrices for all models and ensembles
-#' @param optimal_cutoffs Optimal cutoffs from inner CV analysis
-#' @param type Type of analysis ("cv" or "loso")
-#' @return List of rejection analysis results
-apply_rejection_analysis_to_outer_cv <- function(probability_matrices, optimal_cutoffs, type = "cv") {
-  cat(sprintf("Applying rejection analysis to outer CV results for %s...\n", toupper(type)))
-
-  if (is.null(optimal_cutoffs) || is.null(optimal_cutoffs$optimal_cutoffs)) {
-    warning("No optimal cutoffs available for rejection analysis")
-    return(NULL)
-  }
-
-  rejection_results <- list()
-
-  # Get unique models from optimal cutoffs
-  models_with_cutoffs <- unique(optimal_cutoffs$optimal_cutoffs$model)
-
-  for (model_name in models_with_cutoffs) {
-    cat(sprintf("  Processing %s...\n", model_name))
-
-    # Use mean cutoff across folds
-    # mean_cutoff <- mean(model_cutoffs$prob_cutoff, na.rm = TRUE)
-    # cat(sprintf("    Using cutoff %.3f for %s\n", mean_cutoff, model_name))
-
-    # Find corresponding probability matrix
-    if (model_name %in% names(probability_matrices) && type %in% names(probability_matrices[[model_name]])) {
-      model_matrices <- probability_matrices[[model_name]][[type]]
-
-      for (fold_name in names(model_matrices)) {
-        prob_matrix <- model_matrices[[fold_name]]
-
-        # Get cutoff for this model (use mean across inner folds)
-        mean_cutoff <- optimal_cutoffs$optimal_cutoffs[
-          optimal_cutoffs$optimal_cutoffs$model == model_name &
-            optimal_cutoffs$optimal_cutoffs$source == type &
-            optimal_cutoffs$optimal_cutoffs$outer_fold == fold_name, "mean_cutoff"
-          ]
-        if (length(mean_cutoff) == 0) {
-          cat(sprintf("    No cutoffs found for %s, skipping\n", model_name))
-          next
-        }
-
-        if (!is.null(prob_matrix) && nrow(prob_matrix) > 0) {
-          # Apply rejection analysis
-          rejection_result <- evaluate_single_matrix_with_rejection_and_cutoff(
-            prob_matrix, fold_name, model_name, type, mean_cutoff
-          )
-
-          if (!is.null(rejection_result)) {
-            rejection_results[[paste(model_name, fold_name, sep = "_")]] <- rejection_result
-          }
-        }
-      }
-    } else if (model_name == "Global_Optimized") {
-      # Ensemble method (Global only; OvR removed)
-      ensemble_found <- FALSE
-      if ("Global_Optimized" %in% names(probability_matrices) && type %in% names(probability_matrices[["Global_Optimized"]])) {
-        ensemble_matrices <- probability_matrices[["Global_Optimized"]][[type]]
-
-        for (fold_name in names(ensemble_matrices)) {
-          prob_matrix <- ensemble_matrices[[fold_name]]
-          mean_cutoff <- optimal_cutoffs$optimal_cutoffs[
-            optimal_cutoffs$optimal_cutoffs$model == "Global_Optimized" &
-              optimal_cutoffs$optimal_cutoffs$source == type &
-              optimal_cutoffs$optimal_cutoffs$outer_fold == fold_name, "mean_cutoff"
-          ]
-          if (length(mean_cutoff) > 0 && !is.null(prob_matrix) && nrow(prob_matrix) > 0) {
-            rejection_result <- evaluate_single_matrix_with_rejection_and_cutoff(
-              prob_matrix, fold_name, "Global_Optimized", type, mean_cutoff[1]
-            )
-            if (!is.null(rejection_result)) {
-              rejection_results[[paste("Global_Optimized", fold_name, sep = "_")]] <- rejection_result
-            }
-            ensemble_found <- TRUE
-          }
-        }
-      }
-
-      if (!ensemble_found) {
-        cat(sprintf("    No probability matrices found for %s, skipping\n", model_name))
-      }
-    } else {
-      cat(sprintf("    Skipping %s (no longer used)\n", model_name))
-    }
-  }
-
-  return(rejection_results)
-}
-
-#' Evaluate single matrix with rejection using specific cutoff
-#' @param prob_matrix Probability matrix with class probabilities and true labels
-#' @param fold_name Name of the fold being analyzed
-#' @param model_name Name of the model being analyzed
-#' @param type Type of analysis ("cv" or "loso")
-#' @param cutoff Probability cutoff to apply
-#' @return List with rejection analysis results and per-class metrics
-evaluate_single_matrix_with_rejection_and_cutoff <- function(prob_matrix, fold_name, model_name, type, cutoff) {
-  # Exclude meta columns and optional Platt-calibrated confidence from prob columns
-  meta_cols <- c(
-    "y", "outer_fold", "sample_indices", "confidence_calibrated", "confidence_multivariate",
-    "is_leftout", "n_models_agree", "mean_js_convergence", "top1_prob_variance_across_models"
-  )
-  prob_matrix_clean <- prob_matrix[, !colnames(prob_matrix) %in% meta_cols, drop = FALSE]
-
-  truth <- prob_matrix$y
-  truth <- gsub("Class.", "", truth)
-
-  # Predictions from class probabilities
-  pred_indices <- apply(prob_matrix_clean, 1, which.max)
-  preds <- colnames(prob_matrix_clean)[pred_indices]
-  preds <- gsub("Class.", "", preds)
-
-  # Use Platt-calibrated confidence for rejection if present, else max probability
-  if ("confidence_calibrated" %in% colnames(prob_matrix)) {
-    confidence_vals <- prob_matrix$confidence_calibrated
-  } else {
-    confidence_vals <- apply(prob_matrix_clean, 1, max)
-  }
-
-  all_classes <- unique(c(truth, preds))
-  truth <- factor(truth, levels = all_classes)
-  preds <- factor(preds, levels = all_classes)
-
-  # Apply rejection using the specific cutoff
-  rejected_indices <- which(confidence_vals < cutoff)
-  accepted_indices <- which(confidence_vals >= cutoff)
-
-  # Calculate metrics for accepted samples only
-  if (length(accepted_indices) == 0) {
-    # If all samples are rejected, return NULL
-    return(NULL)
-  }
-
-  accepted_truth <- truth[accepted_indices]
-  accepted_preds <- preds[accepted_indices]
-
-  # Calculate confusion matrix and metrics for accepted samples
-  cm <- caret::confusionMatrix(accepted_preds, accepted_truth)
-  kappa <- as.numeric(cm$overall["Kappa"])
-  accuracy <- as.numeric(cm$overall["Accuracy"])
-
-  # Extract per-class metrics for accepted samples
-  per_class_metrics <- list()
-  if (!is.null(cm$byClass) && nrow(cm$byClass) > 0) {
-    for (class_name in rownames(cm$byClass)) {
-      per_class_metrics[[class_name]] <- list(
-        Sensitivity = cm$byClass[class_name, "Sensitivity"],
-        Specificity = cm$byClass[class_name, "Specificity"],
-        Precision = cm$byClass[class_name, "Precision"],
-        Recall = cm$byClass[class_name, "Recall"],
-        F1 = cm$byClass[class_name, "F1"],
-        Balanced_Accuracy = cm$byClass[class_name, "Balanced Accuracy"]
-      )
-    }
-  }
-
-  # Calculate metrics for rejected samples (if any)
-  rejected_accuracy <- NA
-  if (length(rejected_indices) > 0) {
-    rejected_truth <- truth[rejected_indices]
-    rejected_preds <- preds[rejected_indices]
-    rejected_accuracy <- sum(rejected_truth == rejected_preds) / length(rejected_indices)
-  }
-
-  # Return results as a list
-  list(
-    summary = data.frame(
-      model = model_name,
-      type = type,
-      fold = fold_name,
-      prob_cutoff = cutoff,
-      kappa = kappa,
-      accuracy = accuracy,
-      n_accepted = length(accepted_indices),
-      n_rejected = length(rejected_indices),
-      perc_rejected = length(rejected_indices) / nrow(prob_matrix),
-      rejected_accuracy = rejected_accuracy,
-      total_samples = nrow(prob_matrix),
-      stringsAsFactors = FALSE
-    ),
-    per_class_metrics = per_class_metrics
-  )
-}
-
-#' Generate rejection analysis summary for outer CV
-#' @param rejection_results Rejection analysis results
-#' @param type Type of analysis ("cv" or "loso")
-#' @return Data frame with summary statistics
-summarize_rejection_analysis <- function(rejection_results, type = "cv") {
-  cat(sprintf("Summarizing rejection analysis for %s...\n", toupper(type)))
-
-  if (is.null(rejection_results) || length(rejection_results) == 0) {
-    return(NULL)
-  }
-
-  # Extract summary results
-  all_summaries <- lapply(rejection_results, function(x) x$summary)
-  all_results <- do.call(rbind, all_summaries)
-
-  if (nrow(all_results) == 0) {
-    return(NULL)
-  }
-
-  # Calculate summary statistics across folds for each model
-  summary_stats <- all_results %>%
-    group_by(model) %>%
-    summarise(
-      mean_cutoff = mean(prob_cutoff, na.rm = TRUE),
-      sd_cutoff = sd(prob_cutoff, na.rm = TRUE),
-      mean_kappa = mean(kappa, na.rm = TRUE),
-      sd_kappa = sd(kappa, na.rm = TRUE),
-      mean_accuracy = mean(accuracy, na.rm = TRUE),
-      sd_accuracy = sd(accuracy, na.rm = TRUE),
-      mean_perc_rejected = mean(perc_rejected, na.rm = TRUE),
-      sd_perc_rejected = sd(perc_rejected, na.rm = TRUE),
-      mean_n_accepted = mean(n_accepted, na.rm = TRUE),
-      mean_n_rejected = mean(n_rejected, na.rm = TRUE),
-      n_folds = n(),
-      .groups = "drop"
-    )
-
-  # Extract and summarize per-class metrics
-  per_class_summary <- data.frame()
-
-  for (model_name in unique(all_results$model)) {
-    model_results <- rejection_results[grepl(paste0("^", model_name, "_"), names(rejection_results))]
-
-    # Get all unique classes across all folds for this model
-    all_classes <- unique(unlist(lapply(model_results, function(x) names(x$per_class_metrics))))
-
-    for (class_name in all_classes) {
-      # Extract metrics for this class across all folds
-      sensitivities <- numeric(0)
-      specificities <- numeric(0)
-      precisions <- numeric(0)
-      recalls <- numeric(0)
-      f1_scores <- numeric(0)
-      balanced_accuracies <- numeric(0)
-
-      for (fold_result in model_results) {
-        if (!is.null(fold_result$per_class_metrics) && class_name %in% names(fold_result$per_class_metrics)) {
-          class_metrics <- fold_result$per_class_metrics[[class_name]]
-          sensitivities <- c(sensitivities, class_metrics$Sensitivity)
-          specificities <- c(specificities, class_metrics$Specificity)
-          precisions <- c(precisions, class_metrics$Precision)
-          recalls <- c(recalls, class_metrics$Recall)
-          f1_scores <- c(f1_scores, class_metrics$F1)
-          balanced_accuracies <- c(balanced_accuracies, class_metrics$Balanced_Accuracy)
-        }
-      }
-
-      # Calculate summary statistics for this class
-      if (length(sensitivities) > 0) {
-        class_summary <- data.frame(
-          Model = model_name,
-          Class = class_name,
-          Type = type,
-          N_Folds = length(sensitivities),
-          Mean_Sensitivity = mean(sensitivities, na.rm = TRUE),
-          SD_Sensitivity = sd(sensitivities, na.rm = TRUE),
-          Mean_Specificity = mean(specificities, na.rm = TRUE),
-          SD_Specificity = sd(specificities, na.rm = TRUE),
-          Mean_Precision = mean(precisions, na.rm = TRUE),
-          SD_Precision = sd(precisions, na.rm = TRUE),
-          Mean_Recall = mean(recalls, na.rm = TRUE),
-          SD_Recall = sd(recalls, na.rm = TRUE),
-          Mean_F1 = mean(f1_scores, na.rm = TRUE),
-          SD_F1 = sd(f1_scores, na.rm = TRUE),
-          Mean_Balanced_Accuracy = mean(balanced_accuracies, na.rm = TRUE),
-          SD_Balanced_Accuracy = sd(balanced_accuracies, na.rm = TRUE),
-          stringsAsFactors = FALSE
-        )
-
-        per_class_summary <- rbind(per_class_summary, class_summary)
-      }
-    }
-  }
-
-  # Sort by model and then by mean F1 score (descending)
-  if (nrow(per_class_summary) > 0) {
-    per_class_summary <- per_class_summary[order(per_class_summary$Model, -per_class_summary$Mean_F1), ]
-  }
-
-  return(list(
-    detailed_results = all_results,
-    summary_stats = summary_stats,
-    per_class_summary = per_class_summary
-  ))
-}
-
-
-#' Compare performance with and without rejection analysis
-#' @param detailed_performance Performance results without rejection
-#' @param rejection_summary Rejection analysis summary
-#' @param type Type of analysis ("cv" or "loso")
-#' @return Data frame with performance comparison
-compare_performance_with_rejection <- function(detailed_performance, rejection_summary, type = "cv") {
-  cat(sprintf("Comparing performance with and without rejection for %s...\n", toupper(type)))
-
-  if (is.null(rejection_summary) || is.null(detailed_performance)) {
-    warning("Missing data for performance comparison")
-    return(NULL)
-  }
-
-  comparison_results <- data.frame()
-
-  # Get models that have both performance data and rejection analysis
-  models_with_rejection <- unique(rejection_summary$detailed_results$model)
-
-  for (model_name in models_with_rejection) {
-    # Get rejection performance for this model
-    model_rejection <- rejection_summary$detailed_results[rejection_summary$detailed_results$model == model_name, ]
-
-    if (nrow(model_rejection) == 0) next
-
-    # Calculate mean rejection performance across folds
-    mean_rejection_kappa <- mean(model_rejection$kappa, na.rm = TRUE)
-    mean_rejection_accuracy <- mean(model_rejection$accuracy, na.rm = TRUE)
-    mean_perc_rejected <- mean(model_rejection$perc_rejected, na.rm = TRUE)
-
-    # Get original performance for this model (if available)
-    original_kappa <- NA
-    original_accuracy <- NA
-
-    if (model_name %in% names(detailed_performance)) {
-      model_perf <- detailed_performance[[model_name]]
-      if (length(model_perf) > 0) {
-        # Calculate mean original performance across folds
-        kappas <- sapply(model_perf, function(x) x$kappa)
-        accuracies <- sapply(model_perf, function(x) x$accuracy)
-        original_kappa <- mean(kappas, na.rm = TRUE)
-        original_accuracy <- mean(accuracies, na.rm = TRUE)
-      }
-    }
-
-    # Create comparison row
-    comparison_row <- data.frame(
-      Model = model_name,
-      Type = type,
-      Original_Kappa = original_kappa,
-      Rejection_Kappa = mean_rejection_kappa,
-      Kappa_Improvement = mean_rejection_kappa - original_kappa,
-      Original_Accuracy = original_accuracy,
-      Rejection_Accuracy = mean_rejection_accuracy,
-      Accuracy_Improvement = mean_rejection_accuracy - original_accuracy,
-      Mean_Percent_Rejected = mean_perc_rejected * 100,
-      stringsAsFactors = FALSE
-    )
-
-    comparison_results <- rbind(comparison_results, comparison_row)
-  }
-
-  # Sort by kappa improvement (descending)
-  if (nrow(comparison_results) > 0) {
-    comparison_results <- comparison_results[order(comparison_results$Rejection_Kappa, decreasing = TRUE), ]
-  }
-
-  return(comparison_results)
-}
-
-
-
-# =============================================================================
 # Ensemble-Specific: Model Disagreement Features
 # =============================================================================
 
 #' Compute model disagreement features and attach to ensemble probability matrices.
-#' For each sample, calculates how many of {SVM, XGB, NN} agree on the top-1,
-#' mean Jensen-Shannon convergence, and variance of model top-1 probabilities.
+#' For each sample, calculates how many of {SVM, XGB, NN} agree on the top-1 and
+#' variance of model top-1 probabilities across models.
+#'
+#' Class-probability columns are whatever remains after dropping metadata and calibration
+#' scores (`confidence_*`) using \code{PROB_MATRIX_META_COLUMNS}; variance uses only
+#' SVM/XGB/NN class probabilities.
 #' @param ensemble_fold_matrices Named list of fold -> ensemble data.frame
 #' @param per_model_matrices Named list: model_name -> list(type -> list(fold -> data.frame))
 #' @param type "cv" or "loso"
-#' @return Modified ensemble_fold_matrices with n_models_agree, mean_js_convergence,
-#' and top1_prob_variance_across_models columns
+#' @return Modified ensemble_fold_matrices with n_models_agree and
+#'   top1_prob_variance_across_models columns
 compute_disagreement_features <- function(ensemble_fold_matrices, per_model_matrices, type) {
   cat("Computing model disagreement features for ensemble...\n")
 
-  meta_cols <- c("y", "inner_fold", "outer_fold", "indices", "study",
-                 "sample_indices", "confidence_calibrated", "confidence_multivariate",
-                 "is_leftout", "n_models_agree", "mean_js_convergence",
-                 "top1_prob_variance_across_models")
+  add_roi_reject_features <- function(df, alpha = 0.10, eps = 1e-8) {
+    if (is.null(df) || nrow(df) == 0) return(df)
+    prob_cols <- colnames(df)[!colnames(df) %in% PROB_MATRIX_META_COLUMNS]
+    if (length(prob_cols) == 0) {
+      df$trust_ratio_knn10 <- NA_real_
+      df$conformal_set_size_90 <- NA_real_
+      return(df)
+    }
+    prob_mat <- as.matrix(df[, prob_cols, drop = FALSE])
+    prob_mat <- pmax(prob_mat, 0)
+    rs <- rowSums(prob_mat)
+    rs[!is.finite(rs) | rs <= 0] <- 1
+    prob_mat <- prob_mat / rs
+
+    # Trust-score style distance-density proxy from KNN summaries.
+    if (all(c("knn10_min_d", "knn10_q90_d") %in% colnames(df))) {
+      knn_min <- as.numeric(df$knn10_min_d)
+      knn_q90 <- as.numeric(df$knn10_q90_d)
+      df$trust_ratio_knn10 <- knn_min / pmax(knn_q90, eps)
+    } else {
+      df$trust_ratio_knn10 <- NA_real_
+    }
+
+    # Conformal-style set size: smallest k with cumulative top-k probability >= 1-alpha.
+    p_sorted <- t(apply(prob_mat, 1, sort, decreasing = TRUE))
+    cum_sorted <- t(apply(p_sorted, 1, cumsum))
+    threshold <- 1 - alpha
+    n_classes <- ncol(cum_sorted)
+    set_size <- apply(cum_sorted, 1, function(cs) {
+      idx <- which(cs >= threshold)[1]
+      if (is.na(idx)) n_classes else idx
+    })
+    df$conformal_set_size_90 <- as.numeric(set_size)
+    df
+  }
 
   for (fold_name in names(ensemble_fold_matrices)) {
     ens <- ensemble_fold_matrices[[fold_name]]
@@ -1205,8 +876,8 @@ compute_disagreement_features <- function(ensemble_fold_matrices, per_model_matr
 
     if (is.null(svm_mat) || is.null(xgb_mat) || is.null(nn_mat)) {
       ens$n_models_agree <- NA
-      ens$mean_js_convergence <- NA_real_
       ens$top1_prob_variance_across_models <- NA_real_
+      ens <- add_roi_reject_features(ens)
       ensemble_fold_matrices[[fold_name]] <- ens
       next
     }
@@ -1232,8 +903,8 @@ compute_disagreement_features <- function(ensemble_fold_matrices, per_model_matr
       )
       if (length(common_idx) == 0) {
         ens$n_models_agree <- NA
-        ens$mean_js_convergence <- NA_real_
         ens$top1_prob_variance_across_models <- NA_real_
+        ens <- add_roi_reject_features(ens)
         ensemble_fold_matrices[[fold_name]] <- ens
         next
       }
@@ -1257,8 +928,8 @@ compute_disagreement_features <- function(ensemble_fold_matrices, per_model_matr
       n_min <- min(nrow(ens), nrow(svm_mat), nrow(xgb_mat), nrow(nn_mat))
       if (n_min == 0) {
         ens$n_models_agree <- NA
-        ens$mean_js_convergence <- NA_real_
         ens$top1_prob_variance_across_models <- NA_real_
+        ens <- add_roi_reject_features(ens)
         ensemble_fold_matrices[[fold_name]] <- ens
         next
       }
@@ -1269,9 +940,9 @@ compute_disagreement_features <- function(ensemble_fold_matrices, per_model_matr
     }
 
     # Extract probability-only columns
-    svm_prob_cols <- colnames(svm_mat)[!colnames(svm_mat) %in% meta_cols]
-    xgb_prob_cols <- colnames(xgb_mat)[!colnames(xgb_mat) %in% meta_cols]
-    nn_prob_cols  <- colnames(nn_mat)[!colnames(nn_mat) %in% meta_cols]
+    svm_prob_cols <- colnames(svm_mat)[!colnames(svm_mat) %in% PROB_MATRIX_META_COLUMNS]
+    xgb_prob_cols <- colnames(xgb_mat)[!colnames(xgb_mat) %in% PROB_MATRIX_META_COLUMNS]
+    nn_prob_cols  <- colnames(nn_mat)[!colnames(nn_mat) %in% PROB_MATRIX_META_COLUMNS]
     all_prob_cols <- unique(c(svm_prob_cols, xgb_prob_cols, nn_prob_cols))
 
     # Build aligned probability matrices (fill 0 for missing columns)
@@ -1291,28 +962,30 @@ compute_disagreement_features <- function(ensemble_fold_matrices, per_model_matr
     xgb_p <- make_aligned(xgb_mat, xgb_prob_cols)
     nn_p  <- make_aligned(nn_mat, nn_prob_cols)
 
-    # Final safety guard: enforce identical row counts before row-wise indexing.
-    n_eff <- min(nrow(ens), nrow(svm_p), nrow(xgb_p), nrow(nn_p))
-    if (n_eff == 0) {
-      ens$n_models_agree <- NA
-      ens$mean_js_convergence <- NA_real_
-      ens$top1_prob_variance_across_models <- NA_real_
-      ensemble_fold_matrices[[fold_name]] <- ens
-      next
-    }
-    if (nrow(ens) != n_eff || nrow(svm_p) != n_eff || nrow(xgb_p) != n_eff || nrow(nn_p) != n_eff) {
-      ens <- ens[seq_len(n_eff), , drop = FALSE]
-      svm_p <- svm_p[seq_len(n_eff), , drop = FALSE]
-      xgb_p <- xgb_p[seq_len(n_eff), , drop = FALSE]
-      nn_p <- nn_p[seq_len(n_eff), , drop = FALSE]
+    # Fail fast if any model has rows with no finite class probabilities.
+    find_all_nonfinite_rows <- function(m) which(rowSums(is.finite(m)) == 0)
+    bad_svm <- find_all_nonfinite_rows(svm_p)
+    bad_xgb <- find_all_nonfinite_rows(xgb_p)
+    bad_nn <- find_all_nonfinite_rows(nn_p)
+    if (length(bad_svm) > 0 || length(bad_xgb) > 0 || length(bad_nn) > 0) {
+      idx_vals <- if ("sample_indices" %in% colnames(ens)) ens$sample_indices else seq_len(nrow(ens))
+      bad_idx <- unique(c(idx_vals[bad_svm], idx_vals[bad_xgb], idx_vals[bad_nn]))
+      stop(sprintf(
+        paste0(
+          "Disagreement feature computation failed in outer CV: rows with no finite class probabilities ",
+          "detected (SVM=%d, XGB=%d, NN=%d). Example sample_indices: %s"
+        ),
+        length(bad_svm), length(bad_xgb), length(bad_nn),
+        paste(head(bad_idx, 15), collapse = ", ")
+      ))
     }
 
     # Final safety guard: enforce identical row counts before row-wise indexing.
     n_eff <- min(nrow(ens), nrow(svm_p), nrow(xgb_p), nrow(nn_p))
     if (n_eff == 0) {
       ens$n_models_agree <- NA
-      ens$mean_js_convergence <- NA_real_
       ens$top1_prob_variance_across_models <- NA_real_
+      ens <- add_roi_reject_features(ens)
       ensemble_fold_matrices[[fold_name]] <- ens
       next
     }
@@ -1325,7 +998,6 @@ compute_disagreement_features <- function(ensemble_fold_matrices, per_model_matr
 
     n <- nrow(ens)
     n_agree <- integer(n)
-    mean_js_convergence <- numeric(n)
 
     svm_pred <- all_prob_cols[max.col(svm_p, ties.method = "first")]
     xgb_pred <- all_prob_cols[max.col(xgb_p, ties.method = "first")]
@@ -1339,240 +1011,31 @@ compute_disagreement_features <- function(ensemble_fold_matrices, per_model_matr
 
     for (i in seq_len(n)) {
       preds_3 <- c(svm_pred[i], xgb_pred[i], nn_pred[i])
-      n_agree[i] <- max(table(preds_3))
-
-      # Mean Jensen-Shannon divergence across the 3 model distributions.
-      # Convert to a convergence score in [0, 1] where higher means more agreement.
-      p1 <- pmax(as.numeric(svm_p[i, ]), 1e-12)
-      p2 <- pmax(as.numeric(xgb_p[i, ]), 1e-12)
-      p3 <- pmax(as.numeric(nn_p[i, ]), 1e-12)
-      m <- (p1 + p2 + p3) / 3
-      kl1 <- sum(p1 * log(p1 / m))
-      kl2 <- sum(p2 * log(p2 / m))
-      kl3 <- sum(p3 * log(p3 / m))
-      js_mean <- (kl1 + kl2 + kl3) / 3
-      mean_js_convergence[i] <- 1 - (js_mean / log(3))
+      preds_3 <- preds_3[!is.na(preds_3)]
+      if (length(preds_3) == 0) {
+        n_agree[i] <- NA_integer_
+      } else {
+        n_agree[i] <- max(table(preds_3))
+      }
     }
 
     ens$n_models_agree <- n_agree
-    ens$mean_js_convergence <- pmin(1, pmax(0, mean_js_convergence))
+    if (any(!is.finite(ens$n_models_agree))) {
+      bad_rows <- which(!is.finite(ens$n_models_agree))
+      idx_vals <- if ("sample_indices" %in% colnames(ens)) ens$sample_indices else seq_len(nrow(ens))
+      stop(sprintf(
+        "Disagreement feature computation failed in outer CV: n_models_agree not finite for %d rows. Example sample_indices: %s",
+        length(bad_rows), paste(head(idx_vals[bad_rows], 15), collapse = ", ")
+      ))
+    }
     ens$top1_prob_variance_across_models <- pmax(0, as.numeric(top1_prob_var))
+    ens <- add_roi_reject_features(ens)
     ensemble_fold_matrices[[fold_name]] <- ens
     cat(sprintf("  Fold %s: %d samples, mean agreement = %.2f, mean top1 variance = %.4f\n",
                 fold_name, n, mean(n_agree), mean(ens$top1_prob_variance_across_models, na.rm = TRUE)))
   }
 
   ensemble_fold_matrices
-}
-
-
-# =============================================================================
-# Ensemble-Specific: Per-Class Rejection Analysis
-# =============================================================================
-
-#' Sweep rejection cutoffs per predicted class for a single probability matrix.
-#' Same logic as evaluate_single_matrix_with_rejection_vectorized but grouped by
-#' predicted class.
-#' @param prob_matrix Probability matrix with confidence column
-#' @param fold_name Fold identifier
-#' @param model_name Model identifier
-#' @param type Analysis type
-#' @param cutoff_step Step for cutoff sweep
-#' @param confidence_col Which confidence column to use
-#' @return Data frame with per-class risk-coverage rows
-evaluate_per_class_rejection <- function(prob_matrix, fold_name, model_name, type,
-                                         cutoff_step = 0.01,
-                                         confidence_col = "confidence_multivariate") {
-  meta_cols <- c("y", "inner_fold", "outer_fold", "indices", "study",
-                 "sample_indices", "confidence_calibrated", "confidence_multivariate",
-                 "is_leftout", "n_models_agree", "mean_js_convergence",
-                 "top1_prob_variance_across_models")
-  prob_cols <- colnames(prob_matrix)[!colnames(prob_matrix) %in% meta_cols]
-  prob_mat <- as.matrix(prob_matrix[, prob_cols, drop = FALSE])
-
-  truth <- gsub("Class\\. ", "", prob_matrix$y)
-  pred_indices <- max.col(prob_mat, ties.method = "first")
-  preds <- gsub("Class\\. ", "", prob_cols[pred_indices])
-
-  if (confidence_col %in% colnames(prob_matrix)) {
-    confidence_vals <- prob_matrix[[confidence_col]]
-  } else {
-    confidence_vals <- prob_mat[cbind(seq_len(nrow(prob_mat)), pred_indices)]
-  }
-
-  correct <- as.integer(truth == preds)
-  prob_cutoffs <- seq(0.00, 1.00, by = cutoff_step)
-
-  results <- list()
-  idx <- 1L
-
-  for (cls in unique(preds)) {
-    cls_mask <- preds == cls
-    cls_conf <- confidence_vals[cls_mask]
-    cls_correct <- correct[cls_mask]
-    n_cls <- sum(cls_mask)
-
-    if (n_cls == 0) next
-
-    for (cutoff in prob_cutoffs) {
-      accepted <- cls_conf >= cutoff
-      n_accepted <- sum(accepted)
-
-      if (n_accepted == 0) next
-
-      results[[idx]] <- data.frame(
-        model = model_name,
-        type = type,
-        fold = fold_name,
-        pred_class = cls,
-        prob_cutoff = cutoff,
-        accuracy = mean(cls_correct[accepted]),
-        n_accepted = n_accepted,
-        n_total_class = n_cls,
-        perc_rejected = 1 - n_accepted / n_cls,
-        stringsAsFactors = FALSE
-      )
-      idx <- idx + 1L
-    }
-  }
-
-  if (length(results) == 0) return(data.frame())
-  do.call(rbind, results)
-}
-
-
-#' Find per-class cutoffs via leave-one-fold-out cross-fitting (ensemble only).
-#' Classes with fewer than min_class_n predicted samples in the training folds
-#' fall back to the global cutoff.
-#' @param per_class_rc Per-class risk-coverage data (from evaluate_per_class_rejection)
-#' @param global_cutoffs Global cross-fitted cutoffs (from find_cutoffs_leave_one_fold_out)
-#' @param target_risk Maximum acceptable error rate
-#' @param min_class_n Minimum predicted samples in training folds for class-specific cutoff
-#' @return Data frame of per-fold, per-class cutoffs with cutoff_source column
-find_per_class_cutoffs_leave_one_fold_out <- function(per_class_rc, global_cutoffs,
-                                                       target_risk = 0.02,
-                                                       min_class_n = 20) {
-  cat("Finding per-class cutoffs via leave-one-fold-out cross-fitting...\n")
-
-  all_folds <- unique(per_class_rc$fold)
-  all_models <- unique(per_class_rc$model)
-  all_classes <- unique(per_class_rc$pred_class)
-  cutoff_rows <- list()
-  idx <- 1L
-
-  for (held_out_fold in all_folds) {
-    for (m in all_models) {
-      # Get global cutoff for this model/fold as fallback
-      global_row <- global_cutoffs$per_fold_cutoffs[
-        global_cutoffs$per_fold_cutoffs$model == m &
-          global_cutoffs$per_fold_cutoffs$fold == held_out_fold, ,
-        drop = FALSE
-      ]
-      global_co <- if (nrow(global_row) > 0) global_row$prob_cutoff[1] else 0.5
-
-      for (cls in all_classes) {
-        # Training data: other folds, this model, this class
-        train_data <- per_class_rc[
-          per_class_rc$fold != held_out_fold &
-            per_class_rc$model == m &
-            per_class_rc$pred_class == cls, ,
-          drop = FALSE
-        ]
-
-        # Count total predicted samples for this class across training folds
-        n_train_samples <- sum(train_data$n_total_class[!duplicated(train_data$fold)])
-
-        if (n_train_samples < min_class_n || nrow(train_data) == 0) {
-          # Fall back to global cutoff
-          cutoff_rows[[idx]] <- data.frame(
-            model = m,
-            fold = held_out_fold,
-            pred_class = cls,
-            prob_cutoff = global_co,
-            cutoff_source = "global_fallback",
-            n_train_samples = n_train_samples,
-            stringsAsFactors = FALSE
-          )
-          idx <- idx + 1L
-          next
-        }
-
-        # Aggregate across training folds per cutoff
-        agg <- train_data %>%
-          dplyr::group_by(prob_cutoff) %>%
-          dplyr::summarise(
-            mean_accuracy = mean(accuracy, na.rm = TRUE),
-            mean_perc_rejected = mean(perc_rejected, na.rm = TRUE),
-            mean_risk = 1 - mean(accuracy, na.rm = TRUE),
-            mean_coverage = 1 - mean(perc_rejected, na.rm = TRUE),
-            .groups = "drop"
-          )
-
-        # Pick cutoff using same logic as global
-        meets <- agg$mean_risk <= target_risk
-        if (any(meets)) {
-          df_ok <- agg[meets, , drop = FALSE]
-          best_cov <- max(df_ok$mean_coverage, na.rm = TRUE)
-          df_ok <- df_ok[df_ok$mean_coverage == best_cov, , drop = FALSE]
-          chosen <- df_ok[1, , drop = FALSE]
-        } else {
-          best_risk <- min(agg$mean_risk, na.rm = TRUE)
-          df_r <- agg[agg$mean_risk == best_risk, , drop = FALSE]
-          best_cov <- max(df_r$mean_coverage, na.rm = TRUE)
-          df_r <- df_r[df_r$mean_coverage == best_cov, , drop = FALSE]
-          chosen <- df_r[1, , drop = FALSE]
-        }
-
-        cutoff_rows[[idx]] <- data.frame(
-          model = m,
-          fold = held_out_fold,
-          pred_class = cls,
-          prob_cutoff = chosen$prob_cutoff,
-          cutoff_source = "class_specific",
-          n_train_samples = n_train_samples,
-          stringsAsFactors = FALSE
-        )
-        idx <- idx + 1L
-      }
-    }
-  }
-
-  if (length(cutoff_rows) == 0) return(NULL)
-  result <- do.call(rbind, cutoff_rows)
-
-  n_specific <- sum(result$cutoff_source == "class_specific")
-  n_fallback <- sum(result$cutoff_source == "global_fallback")
-  cat(sprintf("  %d class-specific cutoffs, %d global fallbacks (min_class_n=%d)\n",
-              n_specific, n_fallback, min_class_n))
-
-  result
-}
-
-#' Build per-class cutoff table using only global fold cutoffs.
-#' This creates a no-class-specific variant aligned to the per-class output shape.
-#' @param per_class_rc Per-class risk-coverage data (from evaluate_per_class_rejection)
-#' @param global_cutoffs Global cross-fitted cutoffs (from find_cutoffs_leave_one_fold_out)
-#' @return Data frame of per-fold, per-class rows with global-only cutoffs
-build_global_only_per_class_cutoffs <- function(per_class_rc, global_cutoffs) {
-  if (is.null(per_class_rc) || nrow(per_class_rc) == 0 ||
-      is.null(global_cutoffs) || is.null(global_cutoffs$per_fold_cutoffs) ||
-      nrow(global_cutoffs$per_fold_cutoffs) == 0) {
-    return(NULL)
-  }
-
-  classes_by_fold_model <- unique(per_class_rc[, c("model", "fold", "pred_class"), drop = FALSE])
-  global_pf <- global_cutoffs$per_fold_cutoffs[, c("model", "fold", "prob_cutoff"), drop = FALSE]
-
-  global_only <- merge(classes_by_fold_model, global_pf, by = c("model", "fold"), all.x = TRUE)
-  global_only <- global_only[!is.na(global_only$prob_cutoff), , drop = FALSE]
-  if (nrow(global_only) == 0) return(NULL)
-
-  # Keep output schema close to per-class cutoffs for easy downstream reuse.
-  global_only$cutoff_source <- "global_only"
-  global_only$n_train_samples <- NA_integer_
-  global_only <- global_only[, c("model", "fold", "pred_class", "prob_cutoff", "cutoff_source", "n_train_samples")]
-  rownames(global_only) <- NULL
-  global_only
 }
 
 
@@ -1626,6 +1089,10 @@ generate_leftout_ovr_probability_matrices <- function(leftout_results, label_map
     probability_matrix$y <- make.names(all_subtypes[sample_indices + 1])
     probability_matrix$outer_fold <- outer_fold_id
     probability_matrix$sample_indices <- sample_indices
+    # Propagate per-sample KNN vectors from left-out CSV rows.
+    probability_matrix <- add_optional_knn_columns(probability_matrix, fold_data[1, , drop = FALSE], num_samples)
+    # Propagate per-sample KNN vectors from left-out CSV rows.
+    probability_matrix <- add_optional_knn_columns(probability_matrix, fold_data[1, , drop = FALSE], num_samples)
 
     if (merge_classes) {
       probability_matrix <- merge_classes_in_matrix(probability_matrix, merge_prob_method = "sum")
@@ -1675,6 +1142,10 @@ generate_leftout_standard_probability_matrices <- function(leftout_results, labe
     probability_matrix$y <- make.names(all_subtypes[sample_indices + 1])
     probability_matrix$outer_fold <- outer_fold_id
     probability_matrix$sample_indices <- sample_indices
+    # Propagate per-sample KNN vectors from left-out CSV rows.
+    probability_matrix <- add_optional_knn_columns(probability_matrix, fold_row, num_samples)
+    # Propagate per-sample KNN vectors from left-out CSV rows.
+    probability_matrix <- add_optional_knn_columns(probability_matrix, fold_row, num_samples)
 
     if (merge_classes) {
       probability_matrix <- merge_classes_in_matrix(probability_matrix, merge_prob_method = "sum")
@@ -1702,10 +1173,27 @@ augment_fold_matrices_with_leftout <- function(known_fold_matrices, leftout_fold
       known_df <- augmented[[fold_name]]
       known_df$is_leftout <- FALSE
 
-      # Remove columns present only in one side (e.g. confidence_calibrated)
-      shared_cols <- intersect(colnames(known_df), colnames(leftout_df))
-      augmented[[fold_name]] <- rbind(known_df[, shared_cols, drop = FALSE],
-                                      leftout_df[, shared_cols, drop = FALSE])
+      # Keep all columns by filling missing fields with NA before row-binding.
+      all_cols <- union(colnames(known_df), colnames(leftout_df))
+      for (cn in setdiff(all_cols, colnames(known_df))) known_df[[cn]] <- NA
+      for (cn in setdiff(all_cols, colnames(leftout_df))) leftout_df[[cn]] <- NA
+      known_df <- known_df[, all_cols, drop = FALSE]
+      leftout_df <- leftout_df[, all_cols, drop = FALSE]
+      combined_df <- rbind(known_df, leftout_df)
+      # If KNN columns exist anywhere on this fold, every row must be finite (no silent NA padding).
+      for (kcol in KNN_DISTANCE_COLUMNS) {
+        if (!kcol %in% colnames(combined_df)) next
+        kv <- suppressWarnings(as.numeric(combined_df[[kcol]]))
+        if (!all(is.finite(kv))) {
+          stop(
+            sprintf(
+              "Per-model augment fold %s: KNN column '%s' has missing or non-finite values after binding known + leftout. Backfill KNN on both regular and *_leftout_* outer CSVs for this model.",
+              fold_name, kcol
+            )
+          )
+        }
+      }
+      augmented[[fold_name]] <- combined_df
     } else {
       augmented[[fold_name]] <- leftout_df
     }
@@ -1716,8 +1204,7 @@ augment_fold_matrices_with_leftout <- function(known_fold_matrices, leftout_fold
 
 
 #' Build augmented ensemble matrices by combining per-model left-out predictions.
-#' Applies ensemble weights to left-out probability rows and appends to existing
-#' ensemble matrices.
+#' Product-of-experts in probability space using the same global inner-CV weights.
 #' @param known_ensemble_matrices List of fold -> ensemble prob matrix (known only)
 #' @param leftout_per_model List of model -> fold -> leftout prob matrix
 #' @param ensemble_weights Weights from inner CV for this analysis type
@@ -1740,7 +1227,7 @@ build_augmented_ensemble <- function(known_ensemble_matrices, leftout_per_model,
       next
     }
 
-    meta_cols <- c("y", "outer_fold", "sample_indices", "is_leftout")
+    meta_cols <- c("y", "outer_fold", "sample_indices", "is_leftout", KNN_DISTANCE_COLUMNS, REJECT_OPTION_EXTRA_FEATURE_COLUMNS)
 
     # Align samples (match by sample_indices)
     common_idx <- Reduce(intersect, list(svm_lo$sample_indices, xgb_lo$sample_indices, nn_lo$sample_indices))
@@ -1780,10 +1267,10 @@ build_augmented_ensemble <- function(known_ensemble_matrices, leftout_per_model,
       w_nn  <- as.numeric(w$NN)
     }
 
-    # Weighted ensemble
-    ens_probs <- as.matrix(svm_lo[, all_prob_cols]) * w_svm +
-                 as.matrix(xgb_lo[, all_prob_cols]) * w_xgb +
-                 as.matrix(nn_lo[, all_prob_cols])  * w_nn
+    eps <- 1e-12
+    ens_probs <- (pmax(as.matrix(svm_lo[, all_prob_cols]), eps) ^ w_svm) *
+      (pmax(as.matrix(xgb_lo[, all_prob_cols]), eps) ^ w_xgb) *
+      (pmax(as.matrix(nn_lo[, all_prob_cols]), eps) ^ w_nn)
 
     # Normalise rows
     row_sums <- rowSums(ens_probs, na.rm = TRUE)
@@ -1796,201 +1283,82 @@ build_augmented_ensemble <- function(known_ensemble_matrices, leftout_per_model,
     ens_df$sample_indices <- svm_lo$sample_indices
     ens_df$is_leftout <- TRUE
 
+    # Left-out ensemble rows must carry the same KNN geometry as per-model leftout matrices.
+    # Previously these columns were never copied from svm_lo/xgb_lo/nn_lo, so union-padding
+    # filled them with NA and multivariate+KNN calibration failed on the pooled set.
+    knn_tol <- 1e-4
+    for (kcol in KNN_DISTANCE_COLUMNS) {
+      if (!all(c(kcol %in% colnames(svm_lo), kcol %in% colnames(xgb_lo), kcol %in% colnames(nn_lo)))) {
+        stop(
+          sprintf(
+            "Augmented ensemble fold %s: missing KNN column '%s' on at least one model's leftout matrix. Run KNN backfill on all *_leftout_* outer CSVs for SVM, XGBOOST, and NN.",
+            fold_name, kcol
+          )
+        )
+      }
+      svm_k <- as.numeric(svm_lo[[kcol]])
+      xgb_k <- as.numeric(xgb_lo[[kcol]])
+      nn_k <- as.numeric(nn_lo[[kcol]])
+      if (!all(is.finite(svm_k)) || !all(is.finite(xgb_k)) || !all(is.finite(nn_k))) {
+        stop(
+          sprintf(
+            "Augmented ensemble fold %s: non-finite KNN values in '%s' for leftout rows.",
+            fold_name, kcol
+          )
+        )
+      }
+      if (max(abs(svm_k - xgb_k), na.rm = TRUE) > knn_tol || max(abs(svm_k - nn_k), na.rm = TRUE) > knn_tol) {
+        stop(
+          sprintf(
+            "Augmented ensemble fold %s: KNN column '%s' disagrees across models on leftout rows.",
+            fold_name, kcol
+          )
+        )
+      }
+      ens_df[[kcol]] <- svm_k
+    }
+
     # Append to existing ensemble matrix for this fold
     if (fold_name %in% names(augmented) && !is.null(augmented[[fold_name]])) {
       known_ens <- augmented[[fold_name]]
       known_ens$is_leftout <- FALSE
-      shared_cols <- intersect(colnames(known_ens), colnames(ens_df))
-      augmented[[fold_name]] <- rbind(known_ens[, shared_cols, drop = FALSE],
-                                      ens_df[, shared_cols, drop = FALSE])
+      all_cols <- union(colnames(known_ens), colnames(ens_df))
+      for (cn in setdiff(all_cols, colnames(known_ens))) known_ens[[cn]] <- NA
+      for (cn in setdiff(all_cols, colnames(ens_df))) ens_df[[cn]] <- NA
+      known_ens <- known_ens[, all_cols, drop = FALSE]
+      ens_df <- ens_df[, all_cols, drop = FALSE]
+      combined_ens <- rbind(known_ens, ens_df)
+      for (kcol in KNN_DISTANCE_COLUMNS) {
+        if (!kcol %in% colnames(combined_ens)) next
+        kv <- suppressWarnings(as.numeric(combined_ens[[kcol]]))
+        if (!all(is.finite(kv))) {
+          stop(
+            sprintf(
+              "Augmented ensemble fold %s: after binding known + leftout ensemble rows, KNN column '%s' is not finite on all rows. Known ensemble must include KNN (from backfilled per-model outer CSVs) before augmentation; leftout ensemble rows must include matching KNN.",
+              fold_name, kcol
+            )
+          )
+        }
+      }
+      augmented[[fold_name]] <- combined_ens
     } else {
+      for (kcol in KNN_DISTANCE_COLUMNS) {
+        if (!kcol %in% colnames(ens_df)) next
+        kv <- suppressWarnings(as.numeric(ens_df[[kcol]]))
+        if (!all(is.finite(kv))) {
+          stop(
+            sprintf(
+              "Augmented ensemble fold %s: leftout-only ensemble matrix has non-finite KNN column '%s'.",
+              fold_name, kcol
+            )
+          )
+        }
+      }
       augmented[[fold_name]] <- ens_df
     }
   }
 
   augmented
-}
-
-
-# =============================================================================
-# Platt Scaling for Augmented (Known + Left-Out) Matrices
-# =============================================================================
-
-#' Apply Platt calibration to augmented fold matrices.
-#' Fits the logistic model on known-class rows (is_leftout == FALSE) from OTHER
-#' folds only, but applies calibrated confidence to ALL rows (known + leftout)
-#' of the target fold.
-#' @param fold_matrices Named list of fold_name -> data.frame (augmented probability matrices)
-#' @return List of fold matrices with confidence_calibrated column added
-apply_platt_to_augmented_fold_matrices <- function(fold_matrices) {
-  n_folds <- length(fold_matrices)
-  if (n_folds < 2L) return(fold_matrices)
-  fold_names <- names(fold_matrices)
-  result <- list()
-
-  for (k in seq_along(fold_names)) {
-    target <- fold_matrices[[fold_names[k]]]
-    others <- fold_matrices[setdiff(fold_names, fold_names[k])]
-
-    # Filter pool to known-class rows only
-    others_known <- lapply(others, function(m) {
-      if ("is_leftout" %in% colnames(m)) {
-        m[!m$is_leftout, , drop = FALSE]
-      } else {
-        m
-      }
-    })
-
-    # Fit on known-class pool, apply to full target (known + leftout)
-    result[[fold_names[k]]] <- apply_platt_to_target_from_pool(others_known, target)
-  }
-  result
-}
-
-
-# =============================================================================
-# Leave-One-Fold-Out Cutoff Optimization (Cross-Fitting)
-# =============================================================================
-
-#' Find optimal cutoff for each fold using leave-one-fold-out cross-fitting.
-#' For each target fold, the cutoff is optimized on all OTHER folds' risk-coverage
-#' data, then applied to the target fold. This prevents data leakage.
-#'
-#' @param risk_coverage_raw Raw per-fold risk-coverage data from
-#'   evaluate_all_matrices_with_rejection_unified (columns: model, fold,
-#'   prob_cutoff, kappa, accuracy, perc_rejected, ...)
-#' @param target_risk Maximum acceptable error rate (default 0.02)
-#' @return List with per-fold cutoffs and summary statistics
-find_cutoffs_leave_one_fold_out <- function(risk_coverage_raw, target_risk = 0.02) {
-  cat("Finding cutoffs via leave-one-fold-out cross-fitting...\n")
-
-  all_folds <- unique(risk_coverage_raw$fold)
-  all_models <- unique(risk_coverage_raw$model)
-  cutoff_rows <- list()
-  idx <- 1L
-
-  for (held_out_fold in all_folds) {
-    for (m in all_models) {
-      # Train on all folds EXCEPT held_out_fold
-      train_data <- risk_coverage_raw[
-        risk_coverage_raw$fold != held_out_fold & risk_coverage_raw$model == m, ,
-        drop = FALSE
-      ]
-      if (nrow(train_data) == 0) next
-
-      # Aggregate across training folds per cutoff
-      agg <- train_data %>%
-        dplyr::group_by(prob_cutoff) %>%
-        dplyr::summarise(
-          mean_kappa    = mean(kappa, na.rm = TRUE),
-          mean_accuracy = mean(accuracy, na.rm = TRUE),
-          mean_perc_rejected = mean(perc_rejected, na.rm = TRUE),
-          mean_risk     = 1 - mean(accuracy, na.rm = TRUE),
-          mean_coverage = 1 - mean(perc_rejected, na.rm = TRUE),
-          .groups = "drop"
-        )
-
-      # Pick cutoff: among those meeting target_risk, highest coverage then kappa
-      meets <- agg$mean_risk <= target_risk
-      if (any(meets)) {
-        df_ok <- agg[meets, , drop = FALSE]
-        best_cov <- max(df_ok$mean_coverage, na.rm = TRUE)
-        df_ok <- df_ok[df_ok$mean_coverage == best_cov, , drop = FALSE]
-        best_kappa <- max(df_ok$mean_kappa, na.rm = TRUE)
-        df_ok <- df_ok[df_ok$mean_kappa == best_kappa, , drop = FALSE]
-        chosen <- df_ok[1, , drop = FALSE]
-      } else {
-        best_risk <- min(agg$mean_risk, na.rm = TRUE)
-        df_r <- agg[agg$mean_risk == best_risk, , drop = FALSE]
-        best_cov <- max(df_r$mean_coverage, na.rm = TRUE)
-        df_r <- df_r[df_r$mean_coverage == best_cov, , drop = FALSE]
-        best_kappa <- max(df_r$mean_kappa, na.rm = TRUE)
-        df_r <- df_r[df_r$mean_kappa == best_kappa, , drop = FALSE]
-        chosen <- df_r[1, , drop = FALSE]
-      }
-
-      cutoff_rows[[idx]] <- data.frame(
-        model = m,
-        fold = held_out_fold,
-        prob_cutoff = chosen$prob_cutoff,
-        train_risk = chosen$mean_risk,
-        train_coverage = chosen$mean_coverage,
-        train_kappa = chosen$mean_kappa,
-        stringsAsFactors = FALSE
-      )
-      idx <- idx + 1L
-    }
-  }
-
-  if (length(cutoff_rows) == 0) {
-    warning("No cutoffs could be determined via cross-fitting")
-    return(NULL)
-  }
-
-  cutoffs_df <- do.call(rbind, cutoff_rows)
-
-  # Summary across folds per model
-  summary_stats <- cutoffs_df %>%
-    dplyr::group_by(model) %>%
-    dplyr::summarise(
-      mean_cutoff   = mean(prob_cutoff, na.rm = TRUE),
-      sd_cutoff     = sd(prob_cutoff, na.rm = TRUE),
-      mean_train_risk = mean(train_risk, na.rm = TRUE),
-      mean_train_coverage = mean(train_coverage, na.rm = TRUE),
-      mean_train_kappa = mean(train_kappa, na.rm = TRUE),
-      .groups = "drop"
-    ) %>%
-    dplyr::arrange(dplyr::desc(mean_train_kappa))
-
-  cat("  Cross-fitted cutoff summary:\n")
-  print(summary_stats)
-
-  return(list(
-    per_fold_cutoffs = cutoffs_df,
-    summary_stats = summary_stats
-  ))
-}
-
-
-#' Evaluate cross-fitted cutoffs on the held-out fold they were trained for.
-#' @param risk_coverage_raw Raw per-fold risk-coverage data
-#' @param cross_fitted_cutoffs Output of find_cutoffs_leave_one_fold_out()
-#' @return Data frame with per-fold evaluation metrics
-evaluate_cross_fitted_cutoffs <- function(risk_coverage_raw, cross_fitted_cutoffs) {
-  if (is.null(cross_fitted_cutoffs)) return(NULL)
-
-  cutoffs_df <- cross_fitted_cutoffs$per_fold_cutoffs
-  eval_rows <- list()
-  idx <- 1L
-
-  for (i in seq_len(nrow(cutoffs_df))) {
-    row <- cutoffs_df[i, ]
-    fold_data <- risk_coverage_raw[
-      risk_coverage_raw$fold == row$fold & risk_coverage_raw$model == row$model, ,
-      drop = FALSE
-    ]
-    if (nrow(fold_data) == 0) next
-
-    # Find the closest cutoff in the held-out fold's data
-    cutoff_match <- fold_data[which.min(abs(fold_data$prob_cutoff - row$prob_cutoff)), , drop = FALSE]
-    if (nrow(cutoff_match) == 0) next
-
-    eval_rows[[idx]] <- data.frame(
-      model = row$model,
-      fold = row$fold,
-      prob_cutoff = row$prob_cutoff,
-      eval_kappa = cutoff_match$kappa,
-      eval_accuracy = cutoff_match$accuracy,
-      eval_perc_rejected = cutoff_match$perc_rejected,
-      eval_risk = 1 - cutoff_match$accuracy,
-      eval_coverage = 1 - cutoff_match$perc_rejected,
-      stringsAsFactors = FALSE
-    )
-    idx <- idx + 1L
-  }
-
-  if (length(eval_rows) == 0) return(NULL)
-  do.call(rbind, eval_rows)
 }
 
 
@@ -2028,13 +1396,15 @@ main_outer_cv <- function(merge_classes = FALSE) {
     stop("Failed to load study metadata")
   }
 
-  # Filter data based on criteria
+  # Filter data based on criteria and keep index mapping to full dataset.
   subtypes_with_sufficient_samples <- names(which(table(leukemia_subtypes) >= DATA_FILTERS$min_samples_per_subtype))
-  filtered_leukemia_subtypes <- leukemia_subtypes[
+  filter <- which(
     leukemia_subtypes %in% subtypes_with_sufficient_samples &
-    !leukemia_subtypes %in% DATA_FILTERS$excluded_subtypes &
-    study_names %in% DATA_FILTERS$selected_studies
-  ]
+      !leukemia_subtypes %in% DATA_FILTERS$excluded_subtypes &
+      study_names %in% DATA_FILTERS$selected_studies
+  )
+  filtered_index_map_zero_based <- filter - 1L
+  filtered_leukemia_subtypes <- leukemia_subtypes[filter]
 
   # Load outer CV results for all models
   cat("Loading outer CV results...\n")
@@ -2078,9 +1448,22 @@ main_outer_cv <- function(merge_classes = FALSE) {
       if (!is.null(results)) {
         # Generate probability matrices (with filtering and optional merging)
         if (config$classification_type == "OvR") {
-          result <- generate_outer_ovr_probability_matrices(results, label_mapping, filter_unseen_classes = TRUE, merge_classes = merge_classes)
+          result <- generate_outer_ovr_probability_matrices(
+            results,
+            label_mapping,
+            filtered_index_map_zero_based,
+            filter_unseen_classes = TRUE,
+            merge_classes = merge_classes
+          )
         } else {
-          result <- generate_outer_standard_probability_matrices(results, label_mapping, filtered_leukemia_subtypes, filter_unseen_classes = TRUE, merge_classes = merge_classes)
+          result <- generate_outer_standard_probability_matrices(
+            results,
+            label_mapping,
+            filtered_leukemia_subtypes,
+            filtered_index_map_zero_based,
+            filter_unseen_classes = TRUE,
+            merge_classes = merge_classes
+          )
         }
 
         # Extract matrices and filtering stats
@@ -2135,16 +1518,16 @@ main_outer_cv <- function(merge_classes = FALSE) {
       next
     }
 
-    cat(sprintf("Processing %s ensemble...\n", toupper(type)))
+    cat(sprintf("Processing %s ensemble (global product-of-experts)...\n", toupper(type)))
     ensemble_matrices[[type]] <- list()
 
-    # Generate global ensemble only (OvR removed)
-    global_ensemble <- apply_ensemble_weights_to_outer_cv(
-      outer_probability_matrices, ensemble_weights[[type]], type, "global"
+    global_product_ensemble <- apply_ensemble_weights_to_outer_cv(
+      outer_probability_matrices, ensemble_weights[[type]], type
     )
-    if (!is.null(global_ensemble)) {
-      ensemble_matrices[[type]][["global_ensemble"]] <- global_ensemble
+    if (!is.null(global_product_ensemble)) {
+      ensemble_matrices[[type]][["global_product_ensemble"]] <- global_product_ensemble
     }
+
   }
 
   # Combine individual models and ensemble results for performance calculation
@@ -2153,11 +1536,11 @@ main_outer_cv <- function(merge_classes = FALSE) {
 
   for (type in c("cv", "loso")) {
     if (type %in% names(ensemble_matrices)) {
-      if ("global_ensemble" %in% names(ensemble_matrices[[type]])) {
-        if (!"Global_Optimized" %in% names(all_probability_matrices)) {
-          all_probability_matrices[["Global_Optimized"]] <- list()
+      if ("global_product_ensemble" %in% names(ensemble_matrices[[type]])) {
+        if (!"Global_Product_Optimized" %in% names(all_probability_matrices)) {
+          all_probability_matrices[["Global_Product_Optimized"]] <- list()
         }
-        all_probability_matrices[["Global_Optimized"]][[type]] <- ensemble_matrices[[type]][["global_ensemble"]]
+        all_probability_matrices[["Global_Product_Optimized"]][[type]] <- ensemble_matrices[[type]][["global_product_ensemble"]]
       }
     }
   }
@@ -2180,68 +1563,12 @@ main_outer_cv <- function(merge_classes = FALSE) {
     per_class_summaries[[type]] <- summarize_per_class_performance(detailed_performance[[type]])
   }
 
-  # Save pre-Platt matrices for leftout-aware analysis (uses raw max-prob, not calibrated)
+  # Snapshot before augmentation (same rows as all_probability_matrices).
   all_probability_matrices_raw <- all_probability_matrices
-
-  # Apply Platt scaling for rejection confidence (out-of-sample per outer fold)
-  cat("Applying Platt scaling to probability matrices for rejection...\n")
-  for (model_name in names(all_probability_matrices)) {
-    for (type in c("cv", "loso")) {
-      if (!type %in% names(all_probability_matrices[[model_name]])) next
-      fold_list <- all_probability_matrices[[model_name]][[type]]
-      if (!is.list(fold_list) || length(fold_list) < 2L) next
-      calibrated_list <- apply_platt_to_inner_fold_matrices(fold_list)
-      for (fold_name in names(calibrated_list)) {
-        all_probability_matrices[[model_name]][[type]][[fold_name]] <- calibrated_list[[fold_name]]
-      }
-    }
-  }
-
-  # Run full risk–coverage rejection analysis (independent of fixed inner-CV cutoffs).
-  # Pass ensemble_matrices as NULL so Global_Optimized is only taken from
-  # all_probability_matrices (already includes it), avoiding duplicate rows per fold/cutoff.
-  cat("Running full risk–coverage rejection analysis on outer CV results...\n")
-  risk_coverage_results <- list()
-  for (type in c("cv", "loso")) {
-    if (!type %in% names(ensemble_matrices)) next
-    cat(sprintf("  Processing %s risk–coverage analysis...\n", toupper(type)))
-    full_res <- evaluate_all_matrices_with_rejection_unified(
-      all_probability_matrices,
-      list(global_optimized_ensemble_matrices = NULL),
-      type,
-      has_inner_folds = FALSE
-    )
-    risk_coverage_results[[type]] <- full_res
-  }
-
-  # -------------------------------------------------------------------------
-  # Optional: leave-one-fold-out cutoff optimization (cross-fitting)
-  # -------------------------------------------------------------------------
-  cross_fitted_cutoffs <- list()
-  cross_fitted_evaluation <- list()
-  if (ENABLE_CUTOFF_SELECTION) {
-    cat("Running leave-one-fold-out cutoff optimization...\n")
-    for (type in c("cv", "loso")) {
-      if (!type %in% names(risk_coverage_results)) next
-      rc_raw <- risk_coverage_results[[type]]
-      if (is.null(rc_raw) || nrow(rc_raw) == 0) next
-
-      cat(sprintf("  Cross-fitting cutoffs for %s...\n", toupper(type)))
-      cross_fitted_cutoffs[[type]] <- find_cutoffs_leave_one_fold_out(rc_raw)
-      cross_fitted_evaluation[[type]] <- evaluate_cross_fitted_cutoffs(
-        rc_raw, cross_fitted_cutoffs[[type]]
-      )
-    }
-  } else {
-    cat("Skipping cutoff selection (ENABLE_CUTOFF_SELECTION=FALSE); exporting risk-coverage curves only.\n")
-  }
 
   # -------------------------------------------------------------------------
   # Left-out-aware analysis (optional, requires leftout prediction CSVs)
   # -------------------------------------------------------------------------
-  augmented_cross_fitted_cutoffs <- list()
-  augmented_cross_fitted_evaluation <- list()
-  augmented_risk_coverage_results <- list()
 
   # Check if any leftout file paths are configured
   has_leftout_data <- any(sapply(LEFTOUT_MODEL_CONFIGS, function(cfg) {
@@ -2304,201 +1631,69 @@ main_outer_cv <- function(merge_classes = FALSE) {
         }
       }
 
-      # Ensemble augmentation
-      if (type %in% names(ensemble_weights) && "Global_Optimized" %in% names(all_probability_matrices_raw)) {
-        known_ens <- all_probability_matrices_raw[["Global_Optimized"]][[type]]
+      # Augmented product ensemble only
+      if (type %in% names(ensemble_weights)) {
         lo_per_model <- list()
         for (mn in c("svm", "xgboost", "neural_net")) {
           lo_per_model[[mn]] <- leftout_probability_matrices[[mn]][[type]]
         }
         has_all_lo <- all(sapply(lo_per_model, function(x) !is.null(x) && length(x) > 0))
-
-        if (!is.null(known_ens) && has_all_lo) {
-          if (is.null(all_augmented_matrices[["Global_Optimized"]])) {
-            all_augmented_matrices[["Global_Optimized"]] <- list()
+        ens_model <- "Global_Product_Optimized"
+        known_ens <- all_probability_matrices_raw[[ens_model]][[type]]
+        if (!is.null(known_ens)) {
+          if (is.null(all_augmented_matrices[[ens_model]])) {
+            all_augmented_matrices[[ens_model]] <- list()
           }
-          all_augmented_matrices[["Global_Optimized"]][[type]] <- build_augmented_ensemble(
-            known_ens, lo_per_model, ensemble_weights[[type]], type
-          )
-        } else if (!is.null(known_ens)) {
-          if (is.null(all_augmented_matrices[["Global_Optimized"]])) {
-            all_augmented_matrices[["Global_Optimized"]] <- list()
+          if (has_all_lo) {
+            all_augmented_matrices[[ens_model]][[type]] <- build_augmented_ensemble(
+              known_ens, lo_per_model, ensemble_weights[[type]], type
+            )
+          } else {
+            all_augmented_matrices[[ens_model]][[type]] <- known_ens
           }
-          all_augmented_matrices[["Global_Optimized"]][[type]] <- known_ens
         }
       }
     }
 
-    # Apply Platt scaling to augmented matrices (fit on known-class only, apply to all)
-    cat("Applying Platt scaling to augmented matrices...\n")
-    for (model_name in names(all_augmented_matrices)) {
-      for (type in c("cv", "loso")) {
-        if (!type %in% names(all_augmented_matrices[[model_name]])) next
-        fold_list <- all_augmented_matrices[[model_name]][[type]]
-        if (!is.list(fold_list) || length(fold_list) < 2L) next
-        calibrated_list <- apply_platt_to_augmented_fold_matrices(fold_list)
-        for (fold_name in names(calibrated_list)) {
-          all_augmented_matrices[[model_name]][[type]][[fold_name]] <- calibrated_list[[fold_name]]
-        }
-      }
-    }
-
-    # Run augmented risk-coverage analysis
-    cat("Running augmented risk-coverage analysis (known + left-out)...\n")
-    for (type in c("cv", "loso")) {
-      if (!type %in% names(ensemble_matrices)) next
-
-      aug_res <- evaluate_all_matrices_with_rejection_unified(
-        all_augmented_matrices,
-        list(global_optimized_ensemble_matrices = NULL),
-        type,
-        has_inner_folds = FALSE
-      )
-      augmented_risk_coverage_results[[type]] <- aug_res
-    }
-
-    # Optional cutoff selection on augmented data
-    if (ENABLE_CUTOFF_SELECTION) {
-      cat("Running leave-one-fold-out cutoff optimization on augmented data...\n")
-      for (type in c("cv", "loso")) {
-        if (!type %in% names(augmented_risk_coverage_results)) next
-        rc_aug <- augmented_risk_coverage_results[[type]]
-        if (is.null(rc_aug) || nrow(rc_aug) == 0) next
-
-        cat(sprintf("  Cross-fitting augmented cutoffs for %s...\n", toupper(type)))
-        augmented_cross_fitted_cutoffs[[type]] <- find_cutoffs_leave_one_fold_out(rc_aug)
-        augmented_cross_fitted_evaluation[[type]] <- evaluate_cross_fitted_cutoffs(
-          rc_aug, augmented_cross_fitted_cutoffs[[type]]
-        )
-      }
-    } else {
-      cat("Skipping augmented cutoff selection (ENABLE_CUTOFF_SELECTION=FALSE).\n")
-    }
   } else {
     cat("\nNo left-out prediction files configured. Skipping augmented analysis.\n")
     cat("To enable: run run_outer_cv.py --include_leftout, then set paths in LEFTOUT_MODEL_CONFIGS.\n")
   }
 
   # -------------------------------------------------------------------------
-  # Ensemble-specific: multivariate calibration + per-class cutoffs (additive)
-  # Runs only on Global_Optimized ensemble, after all existing analyses.
-  # Computes both:
-  #   - standard (known-only) multivariate analysis
-  #   - augmented (known + leftout) multivariate analysis, when leftout is enabled
+  # Fold bundles for R/calibration_reject_models.R (SCENARIO_KEY with_leftout_ood_aware):
+  # augmented Global_Product_Optimized folds + disagreement / ROI-style columns.
+  # No confidence_multivariate: nested script uses get_rejection_features_from_matrix() only.
   # -------------------------------------------------------------------------
-  multivariate_results <- list(standard = list(), with_leftout = list())
+  CALIBRATION_MV_BASE_MODEL <- "Global_Product_Optimized"
+  CALIBRATION_MV_MODEL_LABEL <- "Global_Product_Optimized_augmented_disagreement_folds"
 
-  run_multivariate_for_ensemble <- function(ens_folds, per_model_matrices, type, model_label) {
-    if (!is.list(ens_folds) || length(ens_folds) < 2L) return(NULL)
-
-    cat(sprintf("  Processing %s (%s)...\n", toupper(type), model_label))
-
-    # 1. Disagreement features (ensemble only)
-    ens_folds <- compute_disagreement_features(ens_folds, per_model_matrices, type)
-
-    # 2. Multivariate Platt calibration (leave-one-fold-out)
-    cat("  Applying multivariate Platt calibration to ensemble...\n")
-    fold_names <- names(ens_folds)
-    for (k in seq_along(fold_names)) {
-      target <- ens_folds[[fold_names[k]]]
-      others <- ens_folds[setdiff(fold_names, fold_names[k])]
-
-      # If augmented matrices, fit only on known-class rows
-      others_for_fit <- lapply(others, function(m) {
-        if ("is_leftout" %in% colnames(m)) m[!m$is_leftout, , drop = FALSE] else m
-      })
-
-      ens_folds[[fold_names[k]]] <- apply_multivariate_platt_to_target_from_pool(
-        others_for_fit, target
-      )
-    }
-
-    # 3. Risk-coverage sweep using confidence_multivariate
-    cat("  Running multivariate risk-coverage sweep...\n")
-    ens_folds_mv <- lapply(ens_folds, function(m) {
-      if ("confidence_multivariate" %in% colnames(m)) {
-        m$confidence_calibrated <- m$confidence_multivariate
-      }
-      m
-    })
-
-    mv_rc_list <- list()
-    for (fold_name in names(ens_folds_mv)) {
-      mv_rc_list[[length(mv_rc_list) + 1]] <- evaluate_single_matrix_with_rejection_vectorized(
-        ens_folds_mv[[fold_name]], fold_name, model_label, type
-      )
-    }
-    mv_rc_raw <- do.call(rbind, mv_rc_list)
-
-    # 4. Optional cross-fitted global cutoffs
-    mv_global_cutoffs <- NULL
-    mv_global_evaluation <- NULL
-    if (ENABLE_CUTOFF_SELECTION) {
-      cat("  Cross-fitting global cutoffs on multivariate confidence...\n")
-      mv_global_cutoffs <- find_cutoffs_leave_one_fold_out(mv_rc_raw)
-      mv_global_evaluation <- evaluate_cross_fitted_cutoffs(mv_rc_raw, mv_global_cutoffs)
-    }
-
-    # 5. Per-class rejection + cutoffs (with fallback)
-    cat("  Running per-class rejection analysis...\n")
-    per_class_rc_list <- list()
-    for (fold_name in names(ens_folds_mv)) {
-      per_class_rc_list[[length(per_class_rc_list) + 1]] <- evaluate_per_class_rejection(
-        ens_folds_mv[[fold_name]], fold_name, model_label, type,
-        confidence_col = "confidence_calibrated"
-      )
-    }
-    per_class_rc <- do.call(rbind, per_class_rc_list)
-
-    mv_per_class_cutoffs <- NULL
-    if (ENABLE_CUTOFF_SELECTION && !is.null(mv_global_cutoffs) && !is.null(per_class_rc) && nrow(per_class_rc) > 0) {
-      mv_per_class_cutoffs <- find_per_class_cutoffs_leave_one_fold_out(
-        per_class_rc, mv_global_cutoffs
-      )
-    }
-    mv_per_class_cutoffs_global_only <- NULL
-    if (ENABLE_CUTOFF_SELECTION && !is.null(mv_global_cutoffs)) {
-      mv_per_class_cutoffs_global_only <- build_global_only_per_class_cutoffs(
-        per_class_rc, mv_global_cutoffs
-      )
-    }
-
-    list(
-      risk_coverage = mv_rc_raw,
-      global_cutoffs = mv_global_cutoffs,
-      global_evaluation = mv_global_evaluation,
-      per_class_risk_coverage = per_class_rc,
-      per_class_cutoffs = mv_per_class_cutoffs,
-      per_class_cutoffs_global_only = mv_per_class_cutoffs_global_only,
-      fold_matrices = ens_folds_mv,
-      model_label = model_label
+  multivariate_results <- list(with_leftout_ood_aware = list())
+  if (!has_leftout_data || !exists("all_augmented_matrices")) {
+    cat("\nSkipping with_leftout_ood_aware fold bundles (no left-out matrices).\n")
+  } else if (!CALIBRATION_MV_BASE_MODEL %in% names(all_augmented_matrices)) {
+    cat("\nSkipping with_leftout_ood_aware fold bundles (", CALIBRATION_MV_BASE_MODEL, " missing).\n", sep = "")
+  } else {
+    cat(
+      "\n=== Augmented ensemble fold bundles (",
+      CALIBRATION_MV_BASE_MODEL,
+      "; for R/calibration_reject_models.R) ===\n",
+      sep = ""
     )
-  }
-
-  if ("Global_Optimized" %in% names(all_probability_matrices)) {
-    cat("\n=== Ensemble Multivariate Rejection Analysis (standard) ===\n")
+    multivariate_results$with_leftout_ood_aware[[CALIBRATION_MV_BASE_MODEL]] <- list()
     for (type in c("cv", "loso")) {
-      if (!type %in% names(all_probability_matrices[["Global_Optimized"]])) next
-      ens_folds_std <- all_probability_matrices[["Global_Optimized"]][[type]]
-      multivariate_results$standard[[type]] <- run_multivariate_for_ensemble(
-        ens_folds_std, all_probability_matrices_raw, type, "Global_Optimized_MV"
-      )
-    }
-  }
-
-  if (has_leftout_data) {
-    cat("\n=== Ensemble Multivariate Rejection Analysis (with leftout) ===\n")
-    if (exists("all_augmented_matrices") && "Global_Optimized" %in% names(all_augmented_matrices)) {
-      for (type in c("cv", "loso")) {
-        if (!type %in% names(all_augmented_matrices[["Global_Optimized"]])) next
-        ens_folds_aug <- all_augmented_matrices[["Global_Optimized"]][[type]]
-        # Use augmented per-model matrices for disagreement calculation (includes leftout rows)
-        multivariate_results$with_leftout[[type]] <- run_multivariate_for_ensemble(
-          ens_folds_aug, all_augmented_matrices, type, "Global_Optimized_MV_leftout"
-        )
+      if (!type %in% names(all_augmented_matrices[[CALIBRATION_MV_BASE_MODEL]])) next
+      ens_folds <- copy_fold_matrix_list(all_augmented_matrices[[CALIBRATION_MV_BASE_MODEL]][[type]])
+      if (!is.list(ens_folds) || length(ens_folds) < 2L) {
+        multivariate_results$with_leftout_ood_aware[[CALIBRATION_MV_BASE_MODEL]][[type]] <- NULL
+        next
       }
-    } else {
-      cat("  No augmented Global_Optimized matrices available; skipping multivariate-with-leftout.\n")
+      cat(sprintf("  %s (%s): disagreement features on augmented folds...\n", toupper(type), CALIBRATION_MV_BASE_MODEL))
+      ens_folds <- compute_disagreement_features(ens_folds, all_augmented_matrices, type)
+      multivariate_results$with_leftout_ood_aware[[CALIBRATION_MV_BASE_MODEL]][[type]] <- list(
+        fold_matrices = ens_folds,
+        model_label = CALIBRATION_MV_MODEL_LABEL
+      )
     }
   }
 
@@ -2538,10 +1733,6 @@ main_outer_cv <- function(merge_classes = FALSE) {
     performance_summaries = performance_summaries,
     per_class_summaries = per_class_summaries,
     ensemble_weights_used = ensemble_weights,
-    cross_fitted_cutoffs = cross_fitted_cutoffs,
-    cross_fitted_evaluation = cross_fitted_evaluation,
-    augmented_cross_fitted_cutoffs = augmented_cross_fitted_cutoffs,
-    augmented_cross_fitted_evaluation = augmented_cross_fitted_evaluation,
     multivariate_results = multivariate_results
   )
 
@@ -2560,553 +1751,23 @@ main_outer_cv <- function(merge_classes = FALSE) {
   )
   dir.create(analysis_output_dir, recursive = TRUE, showWarnings = FALSE)
 
-  # Standard outputs (known-only)
-  out_standard_dir <- file.path(analysis_output_dir, "standard")
-  dir.create(out_standard_dir, recursive = TRUE, showWarnings = FALSE)
-
-  # Leftout-aware outputs (known + leftout)
-  out_with_leftout_dir <- file.path(analysis_output_dir, "with_leftout")
-  dir.create(out_with_leftout_dir, recursive = TRUE, showWarnings = FALSE)
-
-  # Multivariate ensemble outputs
-  out_mv_standard_dir <- file.path(analysis_output_dir, "ensemble_multivariate", "standard")
-  dir.create(out_mv_standard_dir, recursive = TRUE, showWarnings = FALSE)
-  out_mv_leftout_dir <- file.path(analysis_output_dir, "ensemble_multivariate", "with_leftout")
-  dir.create(out_mv_leftout_dir, recursive = TRUE, showWarnings = FALSE)
-
-  # -------------------------------------------------------------------------
-  # Risk–coverage outputs (clear naming)
-  #
-  # We export two related views:
-  # 1) heldout_curve_raw: per (model, held_out_fold, prob_cutoff) measured on that fold
-  # 2) trainpool_curve: for each held_out_fold, aggregate OTHER folds (cross-fitting pool)
-  # -------------------------------------------------------------------------
-
-  build_trainpool_risk_coverage <- function(rc_unique) {
-    folds <- unique(rc_unique$fold)
-    out <- list()
-    idx <- 1L
-    for (held in folds) {
-      train <- rc_unique[rc_unique$fold != held, , drop = FALSE]
-      if (nrow(train) == 0) next
-      # Compute pool metrics by aggregating counts across folds (not averaging fold metrics).
-      # This matches the intent of a "train pool" curve: what you get on all OTHER folds combined.
-      agg <- train %>%
-        dplyr::group_by(model, prob_cutoff) %>%
-        dplyr::summarise(
-          train_total_samples = sum(total_samples, na.rm = TRUE),
-          train_n_accepted = sum(n_accepted, na.rm = TRUE),
-          train_n_rejected = sum(n_rejected, na.rm = TRUE),
-          # Weighted by accepted sample count
-          train_accuracy = sum(accuracy * n_accepted, na.rm = TRUE) / pmax(1, train_n_accepted),
-          # Kappa can't be pooled exactly without a confusion matrix; provide a weighted summary
-          train_kappa_weighted = sum(kappa * n_accepted, na.rm = TRUE) / pmax(1, train_n_accepted),
-          train_perc_rejected = train_n_rejected / pmax(1, train_total_samples),
-          train_risk = 1 - train_accuracy,
-          train_coverage = 1 - train_perc_rejected,
-          .groups = "drop"
-        )
-      agg$held_out_fold <- held
-      out[[idx]] <- agg
-      idx <- idx + 1L
-    }
-    if (length(out) == 0) return(data.frame())
-    do.call(rbind, out)
-  }
-
-  build_monotonic_frontier_foldwise <- function(heldout_rc) {
-    if (is.null(heldout_rc) || nrow(heldout_rc) == 0) return(data.frame())
-    heldout_rc %>%
-      dplyr::mutate(
-        risk = 1 - accuracy,
-        coverage = 1 - perc_rejected
-      ) %>%
-      dplyr::arrange(model, fold, risk, dplyr::desc(coverage)) %>%
-      dplyr::group_by(model, fold) %>%
-      dplyr::mutate(coverage_mono = cummax(coverage)) %>%
-      dplyr::ungroup()
-  }
-
-  build_pareto_frontier <- function(heldout_rc) {
-    if (is.null(heldout_rc) || nrow(heldout_rc) == 0) return(data.frame())
-    agg <- heldout_rc %>%
-      dplyr::mutate(
-        risk = 1 - accuracy,
-        coverage = 1 - perc_rejected
-      ) %>%
-      dplyr::group_by(model, prob_cutoff) %>%
-      dplyr::summarise(
-        mean_risk = mean(risk, na.rm = TRUE),
-        mean_coverage = mean(coverage, na.rm = TRUE),
-        .groups = "drop"
-      )
-    if (nrow(agg) == 0) return(data.frame())
-
-    out <- list()
-    idx <- 1L
-    for (m in unique(agg$model)) {
-      df <- agg[agg$model == m, , drop = FALSE]
-      keep <- rep(TRUE, nrow(df))
-      for (i in seq_len(nrow(df))) {
-        dominated <- any(
-          df$mean_risk <= df$mean_risk[i] &
-            df$mean_coverage >= df$mean_coverage[i] &
-            (df$mean_risk < df$mean_risk[i] | df$mean_coverage > df$mean_coverage[i]),
-          na.rm = TRUE
-        )
-        keep[i] <- !dominated
-      }
-      out[[idx]] <- df[keep, , drop = FALSE]
-      idx <- idx + 1L
-    }
-    if (length(out) == 0) return(data.frame())
-    do.call(rbind, out)
-  }
-
-  build_trainpool_heldout_gap <- function(heldout_rc, trainpool_rc) {
-    if (is.null(heldout_rc) || nrow(heldout_rc) == 0 ||
-        is.null(trainpool_rc) || nrow(trainpool_rc) == 0) return(data.frame())
-    held <- heldout_rc %>%
-      dplyr::mutate(
-        heldout_risk = 1 - accuracy,
-        heldout_coverage = 1 - perc_rejected
-      ) %>%
-      dplyr::group_by(model, prob_cutoff) %>%
-      dplyr::summarise(
-        heldout_risk = mean(heldout_risk, na.rm = TRUE),
-        heldout_coverage = mean(heldout_coverage, na.rm = TRUE),
-        .groups = "drop"
-      )
-    train <- trainpool_rc %>%
-      dplyr::group_by(model, prob_cutoff) %>%
-      dplyr::summarise(
-        trainpool_risk = mean(train_risk, na.rm = TRUE),
-        trainpool_coverage = mean(train_coverage, na.rm = TRUE),
-        .groups = "drop"
-      )
-    dplyr::left_join(held, train, by = c("model", "prob_cutoff")) %>%
-      dplyr::mutate(
-        risk_gap = heldout_risk - trainpool_risk,
-        coverage_gap = heldout_coverage - trainpool_coverage
-      )
-  }
-
-  export_global_rc_diagnostics <- function(heldout_rc, trainpool_rc, output_dir, type, model_labels) {
-    if (is.null(heldout_rc) || nrow(heldout_rc) == 0) return(invisible(NULL))
-    heldout_model <- heldout_rc[heldout_rc$model %in% model_labels, , drop = FALSE]
-    if (nrow(heldout_model) == 0) return(invisible(NULL))
-    trainpool_model <- trainpool_rc[trainpool_rc$model %in% model_labels, , drop = FALSE]
-
-    frontier_foldwise <- build_monotonic_frontier_foldwise(heldout_model)
-    pareto <- build_pareto_frontier(heldout_model)
-    gap_tbl <- build_trainpool_heldout_gap(heldout_model, trainpool_model)
-
-    write.csv(frontier_foldwise,
-              file.path(output_dir, paste0("risk_coverage_heldout_frontier_foldwise_", type, ".csv")),
-              row.names = FALSE)
-    write.csv(pareto,
-              file.path(output_dir, paste0("risk_coverage_heldout_pareto_", type, ".csv")),
-              row.names = FALSE)
-    write.csv(gap_tbl,
-              file.path(output_dir, paste0("risk_coverage_gap_trainpool_vs_heldout_", type, ".csv")),
-              row.names = FALSE)
-    invisible(NULL)
-  }
-
-  build_global_prediction_decisions <- function(fold_matrices, type, regime, method, model_label,
-                                                confidence_col = "confidence_calibrated") {
-    if (is.null(fold_matrices) || !is.list(fold_matrices) || length(fold_matrices) == 0) {
-      return(data.frame())
-    }
-    meta_cols <- c("y", "inner_fold", "outer_fold", "indices", "study", "sample_indices",
-                   "confidence_calibrated", "confidence_multivariate", "is_leftout",
-                   "n_models_agree", "mean_js_convergence", "top1_prob_variance_across_models")
-  }
-
-  build_global_prediction_decisions <- function(fold_matrices, type, regime, method, model_label,
-                                                confidence_col = "confidence_calibrated") {
-    if (is.null(fold_matrices) || !is.list(fold_matrices) || length(fold_matrices) == 0) {
-      return(data.frame())
-    }
-    meta_cols <- c("y", "inner_fold", "outer_fold", "indices", "study", "sample_indices",
-                   "confidence_calibrated", "confidence_multivariate", "is_leftout",
-                   "n_models_agree", "mean_js_convergence", "top1_prob_variance_across_models")
-    out <- list()
-    idx <- 1L
-    for (fold_name in names(fold_matrices)) {
-      m <- fold_matrices[[fold_name]]
-      if (is.null(m) || nrow(m) == 0) next
-      prob_cols <- colnames(m)[!colnames(m) %in% meta_cols]
-      if (length(prob_cols) == 0) next
-      prob_mat <- as.matrix(m[, prob_cols, drop = FALSE])
-      pred_idx <- max.col(prob_mat, ties.method = "first")
-      pred <- gsub("Class\\. ", "", prob_cols[pred_idx])
-      truth <- gsub("Class\\. ", "", m$y)
-      confidence <- if (confidence_col %in% colnames(m)) {
-        as.numeric(m[[confidence_col]])
-      } else {
-        prob_mat[cbind(seq_len(nrow(prob_mat)), pred_idx)]
-      }
-      out[[idx]] <- data.frame(
-        method = method,
-        model = model_label,
-        regime = regime,
-        split_type = type,
-        fold = as.character(fold_name),
-        sample_indices = if ("sample_indices" %in% colnames(m)) m$sample_indices else NA_integer_,
-        is_leftout = if ("is_leftout" %in% colnames(m)) as.logical(m$is_leftout) else FALSE,
-        truth = truth,
-        pred = pred,
-        pred_class = pred,
-        confidence = confidence,
-        stringsAsFactors = FALSE
-      )
-      idx <- idx + 1L
-    }
-    if (length(out) == 0) return(data.frame())
-    do.call(rbind, out)
-  }
-
-  build_accepted_support_by_class <- function(decisions_df, type, regime, method, model_label, cutoff_step = 0.01) {
-    if (is.null(decisions_df) || nrow(decisions_df) == 0) return(data.frame())
-    cutoffs <- seq(0, 1, by = cutoff_step)
-    out <- list()
-    idx <- 1L
-    for (fold_name in unique(decisions_df$fold)) {
-      fold_df <- decisions_df[decisions_df$fold == fold_name, , drop = FALSE]
-      if (nrow(fold_df) == 0) next
-      classes <- sort(unique(fold_df$truth))
-      for (co in cutoffs) {
-        accepted <- fold_df[fold_df$confidence >= co, , drop = FALSE]
-        acc_counts <- table(factor(accepted$truth, levels = classes))
-        total_counts <- table(factor(fold_df$truth, levels = classes))
-        out[[idx]] <- data.frame(
-          method = method,
-          model = model_label,
-          regime = regime,
-          split_type = type,
-          fold = fold_name,
-          prob_cutoff = co,
-          truth_class = classes,
-          n_total_class = as.integer(total_counts),
-          n_accepted_class = as.integer(acc_counts),
-          accepted_rate_class = as.integer(acc_counts) / pmax(1, as.integer(total_counts)),
-          stringsAsFactors = FALSE
-        )
-        idx <- idx + 1L
-      }
-    }
-    if (length(out) == 0) return(data.frame())
-    do.call(rbind, out)
-  }
-
-  # Save risk–coverage summaries for outer CV (standard / known-only)
-  for (type in c("cv", "loso")) {
-    if (!type %in% names(risk_coverage_results)) next
-    rc_raw <- risk_coverage_results[[type]]
-    if (is.null(rc_raw) || nrow(rc_raw) == 0) next
-
-    # Deduplicate: keep one row per (model, fold, prob_cutoff) to handle any duplicate
-    # fold entries (e.g. from nested structure or multiple sources)
-    rc_unique <- rc_raw %>%
-      dplyr::group_by(model, fold, prob_cutoff) %>%
-      dplyr::slice(1L) %>%
-      dplyr::ungroup()
-    n_dup <- nrow(rc_raw) - nrow(rc_unique)
-    if (n_dup > 0) {
-      warning(sprintf(
-        "Risk-coverage %s: removed %d duplicate (model, fold, prob_cutoff) rows. Check probability matrix structure.",
-        toupper(type), n_dup
-      ))
-    }
-
-    # (1) Held-out fold curves (raw, per fold)
-    heldout_curve_raw_path <- file.path(
-      out_standard_dir,
-      paste0("risk_coverage_heldout_curve_raw_", type, ".csv")
-    )
-    write.csv(rc_unique, heldout_curve_raw_path, row.names = FALSE)
-
-    # (2) Training-pool curves: for each held-out fold, aggregate all other folds
-    trainpool_curve <- build_trainpool_risk_coverage(rc_unique)
-    trainpool_curve_path <- file.path(
-      out_standard_dir,
-      paste0("risk_coverage_trainpool_curve_", type, ".csv")
-    )
-    if (nrow(trainpool_curve) > 0) {
-      write.csv(trainpool_curve, trainpool_curve_path, row.names = FALSE)
-    }
-
-    cat(sprintf("Saved risk–coverage exports for %s:\\n", toupper(type)))
-    cat(sprintf("  heldout_curve_raw:  %s\\n", heldout_curve_raw_path))
-    cat(sprintf("  trainpool_curve:    %s\\n", trainpool_curve_path))
-
-    # Global Ensemble diagnostics for monotonic-cutoff analysis.
-    export_global_rc_diagnostics(
-      rc_unique, trainpool_curve, out_standard_dir, type,
-      model_labels = c("Global_Optimized")
-    )
-
-  }
-
-  # Save cross-fitted cutoffs (standard / known-only) when enabled
-  if (ENABLE_CUTOFF_SELECTION) {
-    cutoff_dir <- file.path(out_standard_dir, "cutoffs")
-    dir.create(cutoff_dir, recursive = TRUE, showWarnings = FALSE)
-
-    for (type in c("cv", "loso")) {
-      if (!type %in% names(cross_fitted_cutoffs) || is.null(cross_fitted_cutoffs[[type]])) next
-
-      # Per-fold cutoffs
-      cutoff_path <- file.path(cutoff_dir, paste0("cutoffs_", type, ".csv"))
-      write.csv(cross_fitted_cutoffs[[type]]$per_fold_cutoffs, cutoff_path, row.names = FALSE)
-      cat(sprintf("Saved cross-fitted cutoffs for %s to: %s\n", toupper(type), cutoff_path))
-
-      # Summary
-      summary_path <- file.path(cutoff_dir, paste0("cutoffs_summary_", type, ".csv"))
-      write.csv(cross_fitted_cutoffs[[type]]$summary_stats, summary_path, row.names = FALSE)
-
-      # Evaluation on held-out folds
-      if (!is.null(cross_fitted_evaluation[[type]])) {
-        eval_path <- file.path(cutoff_dir, paste0("cutoffs_evaluation_", type, ".csv"))
-        write.csv(cross_fitted_evaluation[[type]], eval_path, row.names = FALSE)
-        cat(sprintf("Saved cross-fitted evaluation for %s to: %s\n", toupper(type), eval_path))
-      }
-    }
-  }
-
-  # Save left-out-aware cutoffs and risk-coverage if available
-  if (has_leftout_data) {
-    if (ENABLE_CUTOFF_SELECTION) {
-      aug_cutoff_dir <- file.path(out_with_leftout_dir, "cutoffs")
-      dir.create(aug_cutoff_dir, recursive = TRUE, showWarnings = FALSE)
-    }
-
-    for (type in c("cv", "loso")) {
-      # Augmented risk-coverage (deduplicate like the standard path)
-      if (type %in% names(augmented_risk_coverage_results)) {
-        rc_aug <- augmented_risk_coverage_results[[type]]
-        if (!is.null(rc_aug) && nrow(rc_aug) > 0) {
-          rc_aug_unique <- rc_aug %>%
-            dplyr::group_by(model, fold, prob_cutoff) %>%
-            dplyr::slice(1L) %>%
-            dplyr::ungroup()
-
-          # Also export heldout/trainpool curves with clear naming
-          heldout_curve_raw_path <- file.path(
-            out_with_leftout_dir,
-            paste0("risk_coverage_heldout_curve_raw_", type, ".csv")
-          )
-          write.csv(rc_aug_unique, heldout_curve_raw_path, row.names = FALSE)
-
-          trainpool_curve <- build_trainpool_risk_coverage(rc_aug_unique)
-          trainpool_curve_path <- file.path(
-            out_with_leftout_dir,
-            paste0("risk_coverage_trainpool_curve_", type, ".csv")
-          )
-          if (nrow(trainpool_curve) > 0) {
-            write.csv(trainpool_curve, trainpool_curve_path, row.names = FALSE)
-          }
-
-          # Keep a fully deduplicated raw table for debugging inside the same folder
-          rc_aug_dedup_path <- file.path(
-            out_with_leftout_dir,
-            paste0("risk_coverage_heldout_curve_raw_dedup_", type, ".csv")
-          )
-          write.csv(rc_aug_unique, rc_aug_dedup_path, row.names = FALSE)
-
-          cat(sprintf("Saved leftout-aware risk-coverage exports for %s to: %s\n", toupper(type), out_with_leftout_dir))
-
-          # Global Ensemble diagnostics for monotonic-cutoff analysis (with leftout).
-          export_global_rc_diagnostics(
-            rc_aug_unique, trainpool_curve, out_with_leftout_dir, type,
-            model_labels = c("Global_Optimized")
-          )
-        }
-      }
-
-      # Augmented cutoffs
-      if (ENABLE_CUTOFF_SELECTION &&
-          type %in% names(augmented_cross_fitted_cutoffs) &&
-          !is.null(augmented_cross_fitted_cutoffs[[type]])) {
-        cutoff_path <- file.path(aug_cutoff_dir, paste0("cutoffs_", type, ".csv"))
-        write.csv(augmented_cross_fitted_cutoffs[[type]]$per_fold_cutoffs, cutoff_path, row.names = FALSE)
-        cat(sprintf("Saved augmented cross-fitted cutoffs for %s to: %s\n", toupper(type), cutoff_path))
-
-        summary_path <- file.path(aug_cutoff_dir, paste0("cutoffs_summary_", type, ".csv"))
-        write.csv(augmented_cross_fitted_cutoffs[[type]]$summary_stats, summary_path, row.names = FALSE)
-
-        if (!is.null(augmented_cross_fitted_evaluation[[type]])) {
-          eval_path <- file.path(aug_cutoff_dir, paste0("cutoffs_evaluation_", type, ".csv"))
-          write.csv(augmented_cross_fitted_evaluation[[type]], eval_path, row.names = FALSE)
-          cat(sprintf("Saved augmented cutoff evaluation for %s to: %s\n", toupper(type), eval_path))
-        }
-      }
-    }
-  }
-
-  # Save multivariate ensemble results (standard + with_leftout)
-  save_mv_bundle <- function(bundle, dir_name) {
-    if (is.null(bundle) || length(bundle) == 0) return(invisible(NULL))
-    mv_dir <- file.path(analysis_output_dir, "ensemble_multivariate", dir_name)
-    dir.create(mv_dir, recursive = TRUE, showWarnings = FALSE)
-
-    for (type in c("cv", "loso")) {
-      if (!type %in% names(bundle) || is.null(bundle[[type]])) next
-      mv <- bundle[[type]]
-
-      if (!is.null(mv$risk_coverage) && nrow(mv$risk_coverage) > 0) {
-        # Match the standard naming convention: heldout raw/mean + trainpool curves
-        rc_raw <- mv$risk_coverage
-        rc_unique <- rc_raw %>%
-          dplyr::group_by(model, fold, prob_cutoff) %>%
-          dplyr::slice(1L) %>%
-          dplyr::ungroup()
-
-        heldout_curve_raw_path <- file.path(mv_dir, paste0("risk_coverage_heldout_curve_raw_", type, ".csv"))
-        write.csv(rc_unique, heldout_curve_raw_path, row.names = FALSE)
-
-        trainpool_curve <- build_trainpool_risk_coverage(rc_unique)
-        trainpool_curve_path <- file.path(mv_dir, paste0("risk_coverage_trainpool_curve_", type, ".csv"))
-        if (nrow(trainpool_curve) > 0) {
-          write.csv(trainpool_curve, trainpool_curve_path, row.names = FALSE)
-        }
-
-        export_global_rc_diagnostics(
-          rc_unique, trainpool_curve, mv_dir, type,
-          model_labels = unique(rc_unique$model)
-        )
-      }
-      if (!is.null(mv$global_cutoffs)) {
-        write.csv(mv$global_cutoffs$per_fold_cutoffs,
-                  file.path(mv_dir, paste0("cutoffs_", type, ".csv")), row.names = FALSE)
-        write.csv(mv$global_cutoffs$summary_stats,
-                  file.path(mv_dir, paste0("cutoffs_summary_", type, ".csv")), row.names = FALSE)
-      }
-      if (!is.null(mv$global_evaluation)) {
-        write.csv(mv$global_evaluation,
-                  file.path(mv_dir, paste0("cutoffs_evaluation_", type, ".csv")), row.names = FALSE)
-      }
-      if (!is.null(mv$per_class_risk_coverage) && nrow(mv$per_class_risk_coverage) > 0) {
-        write.csv(mv$per_class_risk_coverage,
-                  file.path(mv_dir, paste0("per_class_risk_coverage_", type, ".csv")), row.names = FALSE)
-      }
-      if (!is.null(mv$per_class_cutoffs)) {
-        write.csv(mv$per_class_cutoffs,
-                  file.path(mv_dir, paste0("per_class_cutoffs_", type, ".csv")), row.names = FALSE)
-      }
-      if (!is.null(mv$per_class_cutoffs_global_only)) {
-        write.csv(
-          mv$per_class_cutoffs_global_only,
-          file.path(mv_dir, paste0("per_class_cutoffs_global_only_", type, ".csv")),
-          row.names = FALSE
-        )
-      }
-
-      # Prediction-level decisions and accepted-class support for this MV bundle.
-      if (!is.null(mv$fold_matrices)) {
-        mv_decisions <- build_global_prediction_decisions(
-          mv$fold_matrices,
-          type = type,
-          regime = dir_name,
-          method = "multivariate",
-          model_label = if (!is.null(mv$model_label)) mv$model_label else "Global_Optimized_MV",
-          confidence_col = "confidence_multivariate"
-        )
-        if (nrow(mv_decisions) > 0) {
-          saveRDS(
-            mv_decisions,
-            file.path(mv_dir, paste0("global_ensemble_prediction_decisions_", dir_name, "_", type, ".rds"))
-          )
-          mv_support <- build_accepted_support_by_class(
-            mv_decisions, type, dir_name, "multivariate", unique(mv_decisions$model)[1]
-          )
-          write.csv(
-            mv_support,
-            file.path(mv_dir, paste0("accepted_support_by_class_", type, ".csv")),
-            row.names = FALSE
-          )
-        }
-      }
-    }
-
-    cat(sprintf("Saved multivariate ensemble outputs to: %s\n", mv_dir))
-    invisible(NULL)
-  }
-
-  if (!is.null(multivariate_results$standard) && length(multivariate_results$standard) > 0) {
-    save_mv_bundle(multivariate_results$standard, "standard")
-  }
-  if (!is.null(multivariate_results$with_leftout) && length(multivariate_results$with_leftout) > 0) {
-    save_mv_bundle(multivariate_results$with_leftout, "with_leftout")
-  }
-
-  # Prediction-level decisions and accepted support (simple Platt Global Ensemble).
-  for (type in c("cv", "loso")) {
-    if ("Global_Optimized" %in% names(all_probability_matrices) &&
-        type %in% names(all_probability_matrices[["Global_Optimized"]])) {
-      std_decisions <- build_global_prediction_decisions(
-        all_probability_matrices[["Global_Optimized"]][[type]],
-        type = type,
-        regime = "standard",
-        method = "platt_simple",
-        model_label = "Global_Optimized",
-        confidence_col = "confidence_calibrated"
-      )
-      if (nrow(std_decisions) > 0) {
-        saveRDS(
-          std_decisions,
-          file.path(out_standard_dir, paste0("global_ensemble_prediction_decisions_standard_", type, ".rds"))
-        )
-        std_support <- build_accepted_support_by_class(
-          std_decisions, type, "standard", "platt_simple", "Global_Optimized"
-        )
-        write.csv(
-          std_support,
-          file.path(out_standard_dir, paste0("accepted_support_by_class_", type, ".csv")),
-          row.names = FALSE
-        )
-      }
-    }
-
-    if (has_leftout_data &&
-        exists("all_augmented_matrices") &&
-        "Global_Optimized" %in% names(all_augmented_matrices) &&
-        type %in% names(all_augmented_matrices[["Global_Optimized"]])) {
-      aug_decisions <- build_global_prediction_decisions(
-        all_augmented_matrices[["Global_Optimized"]][[type]],
-        type = type,
-        regime = "with_leftout",
-        method = "platt_simple",
-        model_label = "Global_Optimized",
-        confidence_col = "confidence_calibrated"
-      )
-      if (nrow(aug_decisions) > 0) {
-        saveRDS(
-          aug_decisions,
-          file.path(out_with_leftout_dir, paste0("global_ensemble_prediction_decisions_with_leftout_", type, ".rds"))
-        )
-        aug_support <- build_accepted_support_by_class(
-          aug_decisions, type, "with_leftout", "platt_simple", "Global_Optimized"
-        )
-        write.csv(
-          aug_support,
-          file.path(out_with_leftout_dir, paste0("accepted_support_by_class_", type, ".csv")),
-          row.names = FALSE
-        )
-      }
-    }
-  }
-
-  # Manifest to make downstream analysis reproducible.
+  # Manifest only; nested calibration reads outer_cv_results.rds (no per-regime RDS sidecars).
   manifest_rows <- list(
     data.frame(key = "timestamp_utc", value = format(Sys.time(), tz = "UTC", usetz = TRUE), stringsAsFactors = FALSE),
     data.frame(key = "merge_suffix", value = merge_suffix, stringsAsFactors = FALSE),
     data.frame(key = "merge_classes", value = as.character(merge_classes), stringsAsFactors = FALSE),
-    data.frame(key = "enable_cutoff_selection", value = as.character(ENABLE_CUTOFF_SELECTION), stringsAsFactors = FALSE),
     data.frame(key = "has_leftout_data", value = as.character(has_leftout_data), stringsAsFactors = FALSE),
-    data.frame(key = "global_model_simple", value = "Global_Optimized", stringsAsFactors = FALSE),
-    data.frame(key = "global_model_multivariate", value = "Global_Optimized_MV / Global_Optimized_MV_leftout", stringsAsFactors = FALSE)
+    data.frame(key = "global_ensemble_model", value = "Global_Product_Optimized (product-of-experts)", stringsAsFactors = FALSE),
+    data.frame(
+      key = "multivariate_results",
+      value = "with_leftout_ood_aware$Global_Product_Optimized: augmented folds + disagreement (R/calibration_reject_models.R)",
+      stringsAsFactors = FALSE
+    ),
+    data.frame(
+      key = "regimes",
+      value = "with_leftout_ood_aware",
+      stringsAsFactors = FALSE
+    )
   )
   write.csv(
     do.call(rbind, manifest_rows),

@@ -413,7 +413,7 @@ def load_ensemble_weights(weights_dir):
     return ensemble_weights
 
 
-def load_cutoffs(cutoffs_path):
+def load_cutoffs(cutoffs_path, required=False):
     """
     Load prediction cutoffs for CV source.
     
@@ -428,7 +428,10 @@ def load_cutoffs(cutoffs_path):
         Dictionary containing cutoffs for each model
     """
     if not os.path.exists(cutoffs_path):
-        print(f"WARNING: Cutoffs file not found at {cutoffs_path}")
+        msg = f"Cutoffs file not found at {cutoffs_path}"
+        if required:
+            raise FileNotFoundError(msg)
+        print(f"WARNING: {msg}")
         return {}
     
     cutoffs_df = pd.read_csv(cutoffs_path)
@@ -440,35 +443,114 @@ def load_cutoffs(cutoffs_path):
     for _, row in cv_cutoffs.iterrows():
         cutoffs[row['model']] = row['prob_cutoff']
     
+    if required and len(cutoffs) == 0:
+        raise ValueError(f"No CV cutoffs found in required file: {cutoffs_path}")
     print(f"Loaded cutoffs for {len(cutoffs)} models")
     return cutoffs
 
 
-def load_risk_coverage(risk_cov_path):
+def load_risk_coverage(risk_cov_path, required=False):
     """
-    Load risk–coverage curves (mean risk / coverage per cutoff and model).
+    Load risk–coverage curve data.
 
     Parameters
     ----------
     risk_cov_path : str
-        Path to the risk_coverage_train_test*.csv file.
+        Path to a risk-coverage CSV file.
 
     Returns
     -------
     pd.DataFrame or None
-        Risk–coverage table with columns including: model, prob_cutoff,
-        mean_risk, mean_coverage.
+        Risk–coverage table.
     """
     if not os.path.exists(risk_cov_path):
-        print(f"WARNING: Risk–coverage file not found at {risk_cov_path}")
+        msg = f"Risk–coverage file not found at {risk_cov_path}"
+        if required:
+            raise FileNotFoundError(msg)
+        print(f"WARNING: {msg}")
         return None
 
     df = pd.read_csv(risk_cov_path)
     if df.empty:
-        print(f"WARNING: Risk–coverage file {risk_cov_path} is empty")
+        msg = f"Risk–coverage file {risk_cov_path} is empty"
+        if required:
+            raise ValueError(msg)
+        print(f"WARNING: {msg}")
         return None
 
     return df
+
+
+def prepare_risk_curve_for_selection(risk_cov_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normalize risk-curve input to the selection schema expected by cutoff
+    selection: model, prob_cutoff, mean_risk, mean_coverage (+ optional mean_kappa).
+
+    Preferred deployable input is the pre-aggregated CSV exported by
+    `R/export_deployable_risk_seen_coverage_curves.R`.
+    """
+    required_cols = {"model", "prob_cutoff"}
+    if risk_cov_df is None or risk_cov_df.empty:
+        return pd.DataFrame()
+    if not required_cols.issubset(risk_cov_df.columns):
+        missing = sorted(required_cols - set(risk_cov_df.columns))
+        raise ValueError(
+            "Outer-CV risk-coverage input is missing required columns: "
+            f"{', '.join(missing)}"
+        )
+
+    # If the deployable aggregated schema is already present, use it directly.
+    if {"mean_risk", "mean_coverage"}.issubset(risk_cov_df.columns):
+        out_cols = ["model", "prob_cutoff", "mean_risk", "mean_coverage"]
+        if "mean_kappa" in risk_cov_df.columns:
+            out_cols.append("mean_kappa")
+        return risk_cov_df[out_cols].copy()
+
+    # Backward-compatible fallback for raw heldout rows.
+    # Hybrid selection metric:
+    #   mean_risk     := 1 - accuracy            (all accepted samples)
+    #   mean_coverage := coverage_known          (seen/known samples only)
+    if {"accuracy", "coverage_known"}.issubset(risk_cov_df.columns):
+        work = risk_cov_df.dropna(subset=["accuracy", "coverage_known"]).copy()
+        if work.empty:
+            raise ValueError(
+                "Outer-CV risk-coverage file has no finite hybrid metrics "
+                "(accuracy / coverage_known)."
+            )
+        work["risk_for_selection"] = 1.0 - work["accuracy"].astype(float)
+        work["coverage_for_selection"] = work["coverage_known"].astype(float)
+    elif {"accuracy", "perc_rejected"}.issubset(risk_cov_df.columns):
+        work = risk_cov_df.dropna(subset=["accuracy", "perc_rejected"]).copy()
+        if work.empty:
+            raise ValueError(
+                "Outer-CV risk-coverage file has no finite fallback metrics "
+                "(accuracy / perc_rejected)."
+            )
+        work["risk_for_selection"] = 1.0 - work["accuracy"].astype(float)
+        # Fallback only when known-coverage column is unavailable.
+        work["coverage_for_selection"] = 1.0 - work["perc_rejected"].astype(float)
+    else:
+        raise ValueError(
+            "Outer-CV risk-coverage file must include hybrid columns "
+            "(accuracy, coverage_known) or fallback overall columns "
+            "(accuracy, perc_rejected)."
+        )
+
+    # Aggregate per model+cutoff over held-out folds to match nested-CV reporting.
+    summary = (
+        work.groupby(["model", "prob_cutoff"], as_index=False)
+        .agg(
+            mean_risk=("risk_for_selection", "mean"),
+            mean_coverage=("coverage_for_selection", "mean"),
+        )
+    )
+    if "kappa" in work.columns:
+        kappa_summary = (
+            work.groupby(["model", "prob_cutoff"], as_index=False)
+            .agg(mean_kappa=("kappa", "mean"))
+        )
+        summary = summary.merge(kappa_summary, on=["model", "prob_cutoff"], how="left")
+    return summary
 
 
 def choose_cutoffs_from_risk(
@@ -478,14 +560,14 @@ def choose_cutoffs_from_risk(
     """
     Derive per-model cutoffs from a risk–coverage table for a desired risk.
 
-    Matches R logic: among cutoffs with mean_risk <= max_accepted_risk, choose
-    the one with highest mean_coverage (then highest mean_kappa if present).
+    Matches existing logic: among cutoffs with mean_risk <= max_accepted_risk,
+    choose the one with highest mean_coverage (then highest mean_kappa if present).
 
     Parameters
     ----------
     risk_cov_df : pd.DataFrame
         Data frame with at least columns: model, prob_cutoff, mean_risk,
-        mean_coverage (e.g. risk_coverage_train_test_*.csv from R).
+        mean_coverage (typically aggregated from outer-CV heldout sweeps).
     max_accepted_risk : float
         Maximum accepted error rate on accepted predictions (0–1, e.g. 0.02 for 2%).
 
@@ -497,6 +579,14 @@ def choose_cutoffs_from_risk(
     cutoffs = {}
     if risk_cov_df is None or risk_cov_df.empty:
         return cutoffs
+
+    def _normalize_model_name(model_name: str) -> str:
+        name = str(model_name)
+        if name.startswith("Global_Optimized"):
+            return "Global_Optimized"
+        if name.startswith("Global_Product_Optimized"):
+            return "Global_Optimized"
+        return name
 
     for model_name, sub in risk_cov_df.groupby("model"):
         sub_ok = sub[sub["mean_risk"] <= max_accepted_risk].copy()
@@ -517,45 +607,144 @@ def choose_cutoffs_from_risk(
                 sub_low = sub_low[sub_low["mean_kappa"] == max_kappa]
             chosen = sub_low.iloc[0]
 
-        cutoffs[model_name] = float(chosen["prob_cutoff"])
+        cutoffs[_normalize_model_name(model_name)] = float(chosen["prob_cutoff"])
 
     return cutoffs
 
 
-def load_platt_params(platt_path):
+def load_multivariate_params(multivariate_path):
     """
-    Load Platt calibration parameters (intercept and slope) per model.
+    Load multivariate calibration parameters for global ensemble confidence.
 
     Parameters
     ----------
-    platt_path : str
-        Path to the Platt parameters CSV file.
+    multivariate_path : str
+        Path to the multivariate parameters CSV file.
 
     Returns
     -------
     dict
-        Mapping from model key to (intercept, slope).
+        Mapping term -> coefficient for Global_Optimized.
     """
-    if not os.path.exists(platt_path):
-        print(f"WARNING: Platt parameters file not found at {platt_path}")
+    if not os.path.exists(multivariate_path):
+        print(f"WARNING: Multivariate parameters file not found at {multivariate_path}")
         return {}
 
-    df = pd.read_csv(platt_path)
+    df = pd.read_csv(multivariate_path)
     if df.empty:
-        print(f"WARNING: Platt parameters file {platt_path} is empty")
+        print(f"WARNING: Multivariate parameters file {multivariate_path} is empty")
         return {}
 
-    params = {}
-    for _, row in df.iterrows():
-        model_key = row.get("model")
-        if model_key is None:
-            continue
-        intercept = float(row.get("intercept", 0.0))
-        slope = float(row.get("slope", 0.0))
-        params[str(model_key)] = (intercept, slope)
+    df = df[df["model"] == "Global_Optimized"].copy()
+    if df.empty:
+        print("WARNING: No Global_Optimized rows found in multivariate params")
+        return {}
 
-    print(f"Loaded Platt parameters for {len(params)} models from {platt_path}")
+    params = {str(row["term"]): float(row["estimate"]) for _, row in df.iterrows()}
+    if "(Intercept)" not in params:
+        print("WARNING: (Intercept) missing in multivariate params; defaulting intercept to 0.0")
+    print(f"Loaded multivariate parameters with {len(params)} terms from {multivariate_path}")
     return params
+
+
+def resolve_calibration_method(calibration_method: str) -> str:
+    """
+    Normalize calibration method aliases.
+    """
+    aliases = {
+        "multivariate": "multivariate",
+        "multivariate_two_head": "multivariate",
+        "univariate": "univariate",
+        "univariate_two_head": "univariate",
+    }
+    if calibration_method not in aliases:
+        raise ValueError(
+            "Unsupported calibration method. Use one of: "
+            "multivariate, univariate (legacy aliases: *_two_head)."
+        )
+    return aliases[calibration_method]
+
+
+def resolve_calibration_setting(calibration_setting: str) -> str:
+    """
+    Normalize calibration setting aliases.
+    """
+    aliases = {
+        "two_head": "two_head",
+        "two_head_postcal": "two_head_postcal",
+        "known_only": "known_only",
+        "known_only_logit": "known_only_logit",
+        "ood_aware": "ood_aware",
+        "ood_aware_logit": "ood_aware_logit",
+    }
+    if calibration_setting not in aliases:
+        raise ValueError(
+            "Unsupported calibration setting. Use one of: "
+            "two_head, two_head_postcal, known_only, known_only_logit, ood_aware, ood_aware_logit."
+        )
+    return aliases[calibration_setting]
+
+
+def resolve_ensemble_method(ensemble_method: str) -> str:
+    """
+    Normalize ensemble method aliases.
+    """
+    aliases = {
+        "product": "product",
+        "product_of_experts": "product",
+        "poe": "product",
+        "weighted": "weighted",
+        "weighted_sum": "weighted",
+        "sum": "weighted",
+    }
+    if ensemble_method not in aliases:
+        raise ValueError(
+            "Unsupported ensemble method. Use one of: "
+            "product, weighted."
+        )
+    return aliases[ensemble_method]
+
+
+def resolve_deployable_risk_curve_path(
+    cutoffs_root: str,
+    suffix: str,
+    calibration_method: str,
+    calibration_setting: str,
+    cutoff_curve_split: str = "cv",
+) -> str:
+    """
+    Resolve method-specific deployable risk/seen-coverage curve path.
+    """
+    method_name = resolve_calibration_method(calibration_method)
+    setting_name = resolve_calibration_setting(calibration_setting)
+    split_name = str(cutoff_curve_split).lower()
+    if split_name not in {"cv", "loso"}:
+        raise ValueError("cutoff_curve_split must be either 'cv' or 'loso'.")
+    method_file_split = os.path.join(
+        str(cutoffs_root),
+        f"cutoffs_{suffix}",
+        f"risk_seen_coverage_curve_outercv_{method_name}_{setting_name}_{suffix}_{split_name}.csv",
+    )
+    if os.path.exists(method_file_split):
+        return method_file_split
+    method_file = os.path.join(
+        str(cutoffs_root),
+        f"cutoffs_{suffix}",
+        f"risk_seen_coverage_curve_outercv_{method_name}_{setting_name}_{suffix}.csv",
+    )
+    if os.path.exists(method_file):
+        return method_file
+
+    # Backward-compatible fallback for earlier exported filenames (univariate).
+    if split_name == "cv" and method_name == "univariate" and setting_name == "two_head":
+        legacy_file = os.path.join(
+            str(cutoffs_root),
+            f"cutoffs_{suffix}",
+            f"risk_seen_coverage_curve_outercv_{suffix}.csv",
+        )
+        return legacy_file
+
+    return method_file
 
 def predict_nn_standard(X, models, sample_names):
     """
@@ -768,7 +957,7 @@ def predict_ensemble_global(individual_predictions, individual_prob_matrices, en
     prob_matrix_df : pd.DataFrame
         DataFrame with full probability matrix (samples x classes)
     """
-    print("Making Global Ensemble predictions...")
+    print("Making Global Ensemble predictions (product-of-experts)...")
     
     weights = ensemble_weights['global'].iloc[0]  # Should be only one row
     print(f"  Using weights: NN={weights['nn_weight']:.3f}, SVM={weights['svm_weight']:.3f}, XGB={weights['xgb_weight']:.3f}")
@@ -798,10 +987,11 @@ def predict_ensemble_global(individual_predictions, individual_prob_matrices, en
     all_classes = sorted(list(all_classes))
     print(f"  Total unique classes: {len(all_classes)}")
     
-    # Initialize ensemble probability matrix
-    ensemble_prob_matrix = np.zeros((len(sample_names), len(all_classes)))
+    # Initialize PoE matrix with multiplicative identity.
+    ensemble_prob_matrix = np.ones((len(sample_names), len(all_classes)), dtype=np.float64)
     
-    # For each model, add weighted probabilities
+    # For each model, multiply p(class)^weight (product-of-experts).
+    eps = 1e-12
     for model_name, prob_matrix in individual_prob_matrices.items():
         if prob_matrix is None:
             continue
@@ -819,25 +1009,22 @@ def predict_ensemble_global(individual_predictions, individual_prob_matrices, en
         # Get the column mapping for this model
         col_mapping = model_col_mappings[model_name]
         
-        # Add weighted probabilities for each class
+        # Multiply weighted expert probabilities for each class
         classes_matched = 0
         for j, class_name in enumerate(all_classes):
             # Look up the original column name in this model's probability matrix
             if class_name in col_mapping:
                 original_col = col_mapping[class_name]
-                ensemble_prob_matrix[:, j] += weight * prob_matrix[original_col].values
+                probs = np.clip(prob_matrix[original_col].values.astype(np.float64), eps, 1.0)
+                ensemble_prob_matrix[:, j] *= np.power(probs, weight)
                 classes_matched += 1
         
         print(f"  {model_name}: matched {classes_matched}/{len(all_classes)} classes for weighting")
     
-    # Normalize probabilities to sum to 1 for each sample
-    for i in range(ensemble_prob_matrix.shape[0]):
-        row_sum = np.sum(ensemble_prob_matrix[i, :])
-        if row_sum > 0:
-            ensemble_prob_matrix[i, :] = ensemble_prob_matrix[i, :] / row_sum
-        else:
-            # If all values are 0, set equal probabilities
-            ensemble_prob_matrix[i, :] = 1.0 / len(all_classes)
+    # Normalize probabilities to sum to 1 for each sample.
+    row_sums = ensemble_prob_matrix.sum(axis=1, keepdims=True)
+    row_sums[row_sums == 0] = 1.0
+    ensemble_prob_matrix = ensemble_prob_matrix / row_sums
     
     # Find best prediction for each sample
     max_prob_indices = np.argmax(ensemble_prob_matrix, axis=1)
@@ -857,6 +1044,79 @@ def predict_ensemble_global(individual_predictions, individual_prob_matrices, en
     prob_matrix_df = pd.DataFrame(ensemble_prob_matrix, columns=all_classes)
     prob_matrix_df.insert(0, 'sample_name', sample_names)
     
+    return results_df, prob_matrix_df
+
+
+def predict_ensemble_weighted_global(individual_predictions, individual_prob_matrices, ensemble_weights, sample_names):
+    """
+    Make predictions using weighted-sum global ensemble.
+    """
+    print("Making Global Ensemble predictions (weighted sum)...")
+
+    weights = ensemble_weights['global'].iloc[0]
+    print(f"  Using weights: NN={weights['nn_weight']:.3f}, SVM={weights['svm_weight']:.3f}, XGB={weights['xgb_weight']:.3f}")
+
+    model_col_mappings = {}
+    for model_name, prob_matrix in individual_prob_matrices.items():
+        if prob_matrix is None:
+            continue
+        col_mapping = {}
+        for col in prob_matrix.columns:
+            if col != 'sample_name':
+                standardized_col = standardize_class_names([col])[0]
+                col_mapping[standardized_col] = col
+        model_col_mappings[model_name] = col_mapping
+        print(f"  {model_name}: mapped {len(col_mapping)} classes")
+
+    all_classes = set()
+    for col_mapping in model_col_mappings.values():
+        all_classes.update(col_mapping.keys())
+    all_classes = sorted(list(all_classes))
+    print(f"  Total unique classes: {len(all_classes)}")
+
+    ensemble_prob_matrix = np.zeros((len(sample_names), len(all_classes)), dtype=np.float64)
+
+    for model_name, prob_matrix in individual_prob_matrices.items():
+        if prob_matrix is None:
+            continue
+
+        if model_name == 'NN' and weights['nn_weight'] > 0:
+            weight = weights['nn_weight']
+        elif model_name == 'SVM' and weights['svm_weight'] > 0:
+            weight = weights['svm_weight']
+        elif model_name == 'XGBOOST' and weights['xgb_weight'] > 0:
+            weight = weights['xgb_weight']
+        else:
+            continue
+
+        col_mapping = model_col_mappings[model_name]
+        classes_matched = 0
+        for j, class_name in enumerate(all_classes):
+            if class_name in col_mapping:
+                original_col = col_mapping[class_name]
+                probs = prob_matrix[original_col].values.astype(np.float64)
+                ensemble_prob_matrix[:, j] += weight * probs
+                classes_matched += 1
+        print(f"  {model_name}: matched {classes_matched}/{len(all_classes)} classes for weighting")
+
+    row_sums = ensemble_prob_matrix.sum(axis=1, keepdims=True)
+    row_sums[row_sums == 0] = 1.0
+    ensemble_prob_matrix = ensemble_prob_matrix / row_sums
+
+    max_prob_indices = np.argmax(ensemble_prob_matrix, axis=1)
+    max_probs = np.max(ensemble_prob_matrix, axis=1)
+    pred_classes = [all_classes[idx] for idx in max_prob_indices]
+
+    results_df = pd.DataFrame({
+        'sample_name': sample_names,
+        'sample_index': range(len(sample_names)),
+        'prediction': pred_classes,
+        'prediction_prob': max_probs,
+        'prediction_passed_cutoff': False
+    })
+
+    prob_matrix_df = pd.DataFrame(ensemble_prob_matrix, columns=all_classes)
+    prob_matrix_df.insert(0, 'sample_name', sample_names)
     return results_df, prob_matrix_df
 
 
@@ -1055,19 +1315,21 @@ def apply_cutoffs(predictions_dict, cutoffs):
     """
     print("Applying probability cutoffs...")
     
-    # Map model names to cutoff keys
-    cutoff_mapping = {
-        'NN': 'neural_net',
-        'SVM': 'svm',
-        'XGBOOST': 'xgboost',
-        'Global_Ensemble': 'Global_Optimized'
-    }
-    
+    # Final deployment path is ensemble-only.
+    cutoff_mapping = {"Global_Ensemble": "Global_Optimized"}
+
     for model_name, df in predictions_dict.items():
+        if model_name != "Global_Ensemble":
+            continue
         cutoff_key = cutoff_mapping.get(model_name, model_name)
 
-        # Use calibrated probability if available, else raw prediction_prob
-        score_col = 'prediction_prob_calibrated' if 'prediction_prob_calibrated' in df.columns else 'prediction_prob'
+        # Enforce multivariate-calibrated confidence only for final predictor.
+        score_col = "prediction_prob_calibrated"
+        if score_col not in df.columns:
+            raise ValueError(
+                "Global_Ensemble requires calibrated confidence "
+                "(prediction_prob_calibrated), but it is missing."
+            )
 
         if cutoff_key in cutoffs:
             cutoff_value = cutoffs[cutoff_key]
@@ -1078,6 +1340,157 @@ def apply_cutoffs(predictions_dict, cutoffs):
             df['prediction_passed_cutoff'] = True  # Default to True if no cutoff
     
     return predictions_dict
+
+
+def _build_two_head_feature_map(global_prob_df, individual_prob_matrices):
+    """
+    Build multivariate rejection features for two-head confidence scoring.
+    """
+    class_cols = [c for c in global_prob_df.columns if c != "sample_name"]
+    if not class_cols:
+        return None
+
+    prob_mat = global_prob_df[class_cols].to_numpy(dtype=np.float64)
+    top1_idx = np.argmax(prob_mat, axis=1)
+    top1_prob = prob_mat[np.arange(prob_mat.shape[0]), top1_idx]
+
+    if prob_mat.shape[1] > 1:
+        part = np.partition(prob_mat, -2, axis=1)
+        top2_prob = part[:, -2]
+    else:
+        top2_prob = np.zeros(prob_mat.shape[0], dtype=np.float64)
+    margin = top1_prob - top2_prob
+
+    clipped = np.clip(prob_mat, 1e-12, 1.0)
+    entropy = -np.sum(clipped * np.log(clipped), axis=1) / np.log(max(prob_mat.shape[1], 2))
+    entropy = np.clip(entropy, 0.0, 1.0)
+
+    per_model_top1_prob = []
+    per_model_top1_class = []
+    for model_name in ("NN", "SVM", "XGBOOST"):
+        df = individual_prob_matrices.get(model_name)
+        if df is None:
+            continue
+
+        mapping = {standardize_class_names([c])[0]: c for c in df.columns if c != "sample_name"}
+        model_class_cols = [c for c in df.columns if c != "sample_name"]
+        model_top1_prob = np.zeros(prob_mat.shape[0], dtype=np.float64)
+        model_top1_cls = np.array([""] * prob_mat.shape[0], dtype=object)
+
+        for i, cls_idx in enumerate(top1_idx):
+            cls_name = class_cols[cls_idx]
+            orig_col = mapping.get(cls_name)
+            if orig_col is not None:
+                model_top1_prob[i] = float(df.iloc[i][orig_col])
+            if model_class_cols:
+                row_vals = df.iloc[i][model_class_cols].to_numpy(dtype=np.float64)
+                top_local_idx = int(np.argmax(row_vals))
+                model_top1_cls[i] = standardize_class_names([model_class_cols[top_local_idx]])[0]
+
+        per_model_top1_prob.append(model_top1_prob)
+        per_model_top1_class.append(model_top1_cls)
+
+    if len(per_model_top1_prob) >= 2:
+        top1_var = np.var(np.column_stack(per_model_top1_prob), axis=1)
+    else:
+        top1_var = np.zeros(prob_mat.shape[0], dtype=np.float64)
+
+    if per_model_top1_class:
+        ensemble_top1_class = np.array([class_cols[i] for i in top1_idx], dtype=object)
+        agree_counts = np.zeros(prob_mat.shape[0], dtype=np.float64)
+        for model_preds in per_model_top1_class:
+            agree_counts += (model_preds == ensemble_top1_class).astype(np.float64)
+        n_models_agree = agree_counts
+    else:
+        n_models_agree = np.zeros(prob_mat.shape[0], dtype=np.float64)
+
+    top1_clipped = np.clip(top1_prob, 1e-6, 1.0 - 1e-6)
+    return {
+        "max_prob": top1_prob,
+        "logit_max_prob": np.log(top1_clipped / (1.0 - top1_clipped)),
+        "margin": margin,
+        "entropy": entropy,
+        "n_models_agree": n_models_agree,
+        "top1_prob_variance_across_models": top1_var,
+    }
+
+
+def _score_logistic_head(feature_map, params):
+    """
+    Score a logistic regression head from saved R GLM coefficients.
+    """
+    if not params:
+        return np.zeros(len(next(iter(feature_map.values()))), dtype=np.float64)
+    linear = np.full(
+        len(next(iter(feature_map.values()))),
+        params.get("(Intercept)", 0.0),
+        dtype=np.float64,
+    )
+    for term, values in feature_map.items():
+        if term in params:
+            linear += float(params[term]) * values
+    return 1.0 / (1.0 + np.exp(-linear))
+
+
+def apply_global_two_head_product_confidence(
+    global_pred_df,
+    global_prob_df,
+    individual_prob_matrices,
+    correctness_params,
+    ood_head_params,
+):
+    """
+    Apply multivariate two-head confidence: P(correct|ID) * P(ID).
+    """
+    feature_map = _build_two_head_feature_map(global_prob_df, individual_prob_matrices)
+    if feature_map is None:
+        return global_pred_df
+
+    p_correct = _score_logistic_head(feature_map, correctness_params)
+    p_id = _score_logistic_head(feature_map, ood_head_params)
+    global_pred_df["prediction_prob_calibrated"] = p_correct * p_id
+    global_pred_df["prediction_prob_correct_head"] = p_correct
+    global_pred_df["prediction_prob_id_head"] = p_id
+    return global_pred_df
+
+
+def apply_global_single_head_confidence(
+    global_pred_df,
+    global_prob_df,
+    individual_prob_matrices,
+    single_head_params,
+):
+    """
+    Apply single-head confidence: P(target | features),
+    where target is either correctness (known_only*) or correctness-and-ID (ood_aware*).
+    """
+    feature_map = _build_two_head_feature_map(global_prob_df, individual_prob_matrices)
+    if feature_map is None:
+        return global_pred_df
+    p_target = _score_logistic_head(feature_map, single_head_params)
+    global_pred_df["prediction_prob_calibrated"] = p_target
+    return global_pred_df
+
+
+def apply_two_head_postcalibration(global_pred_df, postcal_params):
+    """
+    Apply a final logistic recalibration on top of two-head product score.
+    """
+    if not postcal_params:
+        raise ValueError("two_head_postcal requires post-calibration parameters.")
+    if "prediction_prob_calibrated" not in global_pred_df.columns:
+        raise ValueError("two_head_postcal requires prediction_prob_calibrated from two_head score.")
+
+    eps = 1e-6
+    raw_score = np.clip(global_pred_df["prediction_prob_calibrated"].to_numpy(dtype=np.float64), eps, 1 - eps)
+    logit_score = np.log(raw_score / (1.0 - raw_score))
+    intercept = float(postcal_params.get("(Intercept)", 0.0))
+    slope = float(postcal_params.get("logit_score", 1.0))
+    linear = intercept + slope * logit_score
+    calibrated = 1.0 / (1.0 + np.exp(-linear))
+    global_pred_df["prediction_prob_two_head_raw"] = raw_score
+    global_pred_df["prediction_prob_calibrated"] = calibrated
+    return global_pred_df
 
 
 def save_predictions(predictions_dict, prob_matrices_dict, output_dir, input_filename_prefix, merge_suffix=""):
@@ -1116,7 +1529,20 @@ def save_predictions(predictions_dict, prob_matrices_dict, output_dir, input_fil
         print(f"Saved {model_name} probability matrix to {filename}")
 
 
-def run_predictions(X, sample_names, models, ensemble_weights, cutoffs, platt_params=None, merge_classes=False):
+def run_predictions(
+    X,
+    sample_names,
+    models,
+    ensemble_weights,
+    cutoffs,
+    multivariate_params=None,
+    ood_head_params=None,
+    postcal_params=None,
+    calibration_method="multivariate",
+    calibration_setting="two_head",
+    ensemble_method="product",
+    merge_classes=False,
+):
     """
     Run prediction pipeline for a single version (merged or unmerged).
     
@@ -1132,6 +1558,28 @@ def run_predictions(X, sample_names, models, ensemble_weights, cutoffs, platt_pa
         Dictionary containing ensemble weights
     cutoffs : dict
         Dictionary containing cutoffs for each model
+    multivariate_params : dict
+        Coefficients for the correctness head, P(correct | ID, features)
+    ood_head_params : dict
+        Coefficients for the OOD head, P(ID | features)
+    postcal_params : dict
+        Coefficients for optional post-calibration on two-head product score
+    calibration_method : str
+        Confidence model family. Supported:
+        - multivariate (default)
+        - univariate
+    calibration_setting : str
+        Calibration target setting. Supported:
+        - two_head
+        - two_head_postcal
+        - known_only
+        - known_only_logit
+        - ood_aware
+        - ood_aware_logit
+    ensemble_method : str
+        Ensemble aggregation method. Supported:
+        - product (product-of-experts)
+        - weighted (weighted sum)
     merge_classes : bool
         Whether to merge classes in probability matrices
         
@@ -1146,7 +1594,7 @@ def run_predictions(X, sample_names, models, ensemble_weights, cutoffs, platt_pa
     print(f"Running predictions ({'MERGED' if merge_classes else 'UNMERGED'} classes)")
     print(f"{'='*60}")
     
-    # Make predictions with all models
+    # Build individual model probabilities only as ensemble experts.
     predictions = {}
     prob_matrices = {}
     
@@ -1160,42 +1608,79 @@ def run_predictions(X, sample_names, models, ensemble_weights, cutoffs, platt_pa
     if 'XGBOOST' in models:
         predictions['XGBOOST'], prob_matrices['XGBOOST'] = predict_ovr_models(X, models, 'XGBOOST', sample_names)
     
-    # Apply class merging to individual model probability matrices if requested
+    # Apply class merging to expert probability matrices if requested.
     if merge_classes:
         for model_name in prob_matrices.keys():
             prob_matrices[model_name] = merge_probability_classes(prob_matrices[model_name].copy())
     
-    # Ensemble predictions (reuse individual predictions and prob matrices to avoid redundant computation)
+    ensemble_method = resolve_ensemble_method(ensemble_method)
+
+    # Ensemble predictions
     if 'global' in ensemble_weights:
-        predictions['Global_Ensemble'], prob_matrices['Global_Ensemble'] = predict_ensemble_global(
-            predictions, prob_matrices, ensemble_weights, sample_names
-        )
+        if ensemble_method == "product":
+            predictions['Global_Ensemble'], prob_matrices['Global_Ensemble'] = predict_ensemble_global(
+                predictions, prob_matrices, ensemble_weights, sample_names
+            )
+        else:
+            predictions['Global_Ensemble'], prob_matrices['Global_Ensemble'] = predict_ensemble_weighted_global(
+                predictions, prob_matrices, ensemble_weights, sample_names
+            )
+    else:
+        raise ValueError("Global ensemble weights are required for prediction.")
 
     # Apply class merging to ensemble probability matrices if requested
     if merge_classes and 'Global_Ensemble' in prob_matrices:
         prob_matrices['Global_Ensemble'] = merge_probability_classes(prob_matrices['Global_Ensemble'].copy())
     
-    # Apply Platt calibration to prediction probabilities if parameters are available
-    if platt_params:
-        print("Applying Platt calibration to prediction probabilities...")
-        platt_mapping = {
-            'NN': 'neural_net',
-            'SVM': 'svm',
-            'XGBOOST': 'xgboost',
-            'Global_Ensemble': 'Global_Optimized'
-        }
-        for model_name, df in predictions.items():
-            cutoff_key = platt_mapping.get(model_name, model_name)
-            if cutoff_key in platt_params:
-                intercept, slope = platt_params[cutoff_key]
-                # Sigmoid of linear function: calibrated probability of being correct
-                z = intercept + slope * df['prediction_prob'].values
-                df['prediction_prob_calibrated'] = 1.0 / (1.0 + np.exp(-z))
+    calibration_method = resolve_calibration_method(calibration_method)
+    calibration_setting = resolve_calibration_setting(calibration_setting)
+
+    # Apply selected calibration to global ensemble only.
+    if not multivariate_params:
+        raise ValueError(
+            "Calibration parameters are required for final "
+            "ensemble predictions."
+        )
+    if calibration_setting in {"two_head", "two_head_postcal"}:
+        if not ood_head_params:
+            raise ValueError(
+                f"OOD-head parameters are required for {calibration_setting} ensemble predictions."
+            )
+        print(
+            f"Applying {calibration_method}/{calibration_setting} confidence to "
+            f"{ensemble_method} global ensemble..."
+        )
+        predictions["Global_Ensemble"] = apply_global_two_head_product_confidence(
+            predictions["Global_Ensemble"],
+            prob_matrices["Global_Ensemble"],
+            prob_matrices,
+            multivariate_params,
+            ood_head_params,
+        )
+        if calibration_setting == "two_head_postcal":
+            predictions["Global_Ensemble"] = apply_two_head_postcalibration(
+                predictions["Global_Ensemble"],
+                postcal_params,
+            )
+    else:
+        print(
+            f"Applying {calibration_method}/{calibration_setting} confidence to "
+            f"{ensemble_method} global ensemble..."
+        )
+        predictions["Global_Ensemble"] = apply_global_single_head_confidence(
+            predictions["Global_Ensemble"],
+            prob_matrices["Global_Ensemble"],
+            prob_matrices,
+            multivariate_params,
+        )
 
     # Apply cutoffs to predictions (uses calibrated prob if present)
     predictions = apply_cutoffs(predictions, cutoffs)
-    
-    return predictions, prob_matrices
+
+    # Final deployment output is ensemble-only.
+    ensemble_only_predictions = {"Global_Ensemble": predictions["Global_Ensemble"]}
+    ensemble_only_prob_matrices = {"Global_Ensemble": prob_matrices["Global_Ensemble"]}
+    return ensemble_only_predictions, ensemble_only_prob_matrices
 
 
 def main():
@@ -1211,8 +1696,30 @@ def main():
         type=float,
         default=None,
         help="Maximum accepted error rate (percentage) on accepted predictions; "
-             "if set, cutoffs will be derived from risk–coverage curves instead "
-             "of using the fixed train/test cutoffs (e.g. 5 for 5%%)."
+             "if set, cutoffs will be derived from deployable risk/seen-coverage "
+             "curve CSVs in cutoffs_* (e.g. 5 for 5%%)."
+    )
+    parser.add_argument(
+        "--cutoff_curve_split",
+        default="cv",
+        choices=["cv", "loso"],
+        help="Which outer-CV split to use for deployable cutoffs: cv (default) or loso."
+    )
+    parser.add_argument(
+        "--calibration_method",
+        default="multivariate",
+        help="Calibration method for confidence scoring. Supported: "
+             "multivariate (default), univariate."
+    )
+    parser.add_argument(
+        "--calibration_setting",
+        default="two_head",
+        help="Calibration setting. Supported: two_head (default), two_head_postcal, known_only, known_only_logit, ood_aware, ood_aware_logit."
+    )
+    parser.add_argument(
+        "--ensemble_method",
+        default="product",
+        help="Ensemble method. Supported: product (default), weighted."
     )
     parser.add_argument("--merged_only", action="store_true", help="Only run merged predictions")
     parser.add_argument("--unmerged_only", action="store_true", help="Only run unmerged predictions")
@@ -1231,7 +1738,7 @@ def main():
     if args.cutoffs_file is None:
         # Base directory for cutoffs (will append _merged or _unmerged)
         args.cutoffs_file = base_path / "data" / "out" / "final_train_test"
-    
+
     # Set up pipeline cache directory
     if args.pipelines_dir is None:
         pipelines_dir = train_test.get_pipeline_cache_dir()
@@ -1253,12 +1760,19 @@ def main():
     print(f"Weights base directory: {args.weights_dir}")
     print(f"Cutoffs base directory: {args.cutoffs_file}")
     print(f"Pipelines directory: {pipelines_dir}")
+    print(f"Calibration method: {resolve_calibration_method(args.calibration_method)}")
+    print(f"Calibration setting: {resolve_calibration_setting(args.calibration_setting)}")
+    print(f"Ensemble method: {resolve_ensemble_method(args.ensemble_method)}")
     if args.max_accepted_risk_pct is not None:
         print(f"Maximum accepted risk (on accepted predictions): {args.max_accepted_risk_pct:.2f}%")
+        print(f"Cutoff curve split source: {args.cutoff_curve_split}")
     
     # Determine which versions to run
     run_merged = not args.unmerged_only
     run_unmerged = not args.merged_only
+    calibration_method = resolve_calibration_method(args.calibration_method)
+    calibration_setting = resolve_calibration_setting(args.calibration_setting)
+    ensemble_method = resolve_ensemble_method(args.ensemble_method)
     
     if args.merged_only and args.unmerged_only:
         print("ERROR: Cannot specify both --merged_only and --unmerged_only")
@@ -1282,36 +1796,128 @@ def main():
         print(f"\nLoading unmerged ensemble weights from: {weights_dir_unmerged}")
         ensemble_weights_unmerged = load_ensemble_weights(weights_dir_unmerged)
         
-        # Load unmerged cutoffs (matches R: cutoffs_unmerged_maxprob)
-        # Structure: final_train_test/cutoffs_unmerged_maxprob/train_test_cutoffs_unmerged_maxprob.csv
-        cutoffs_file_unmerged = os.path.join(str(args.cutoffs_file), "cutoffs_unmerged_maxprob", "train_test_cutoffs_unmerged_maxprob.csv")
-        print(f"\nLoading unmerged cutoffs from: {cutoffs_file_unmerged}")
-        cutoffs_unmerged = load_cutoffs(cutoffs_file_unmerged)
+        # Deployable risk/seen-coverage curve exported from outer-CV sweeps.
+        risk_cov_file_unmerged = resolve_deployable_risk_curve_path(
+            args.cutoffs_file,
+            "unmerged_maxprob",
+            calibration_method,
+            calibration_setting,
+            cutoff_curve_split=args.cutoff_curve_split,
+        )
 
-        # Optionally override cutoffs using risk–coverage and desired risk
+        # Use cutoff only when user requests risk-based selection.
+        cutoffs_unmerged = {}
         if args.max_accepted_risk_pct is not None:
-            risk_cov_file_unmerged = os.path.join(
-                str(args.cutoffs_file),
-                "cutoffs_unmerged_maxprob",
-                "risk_coverage_train_test_unmerged_maxprob.csv"
-            )
-            print(f"\nLoading unmerged risk–coverage from: {risk_cov_file_unmerged}")
-            risk_cov_unmerged = load_risk_coverage(risk_cov_file_unmerged)
+            print(f"\nLoading unmerged deployable risk/seen-coverage curve from: {risk_cov_file_unmerged}")
+            risk_cov_unmerged = load_risk_coverage(risk_cov_file_unmerged, required=True)
             if risk_cov_unmerged is not None:
                 max_risk = args.max_accepted_risk_pct / 100.0
-                rc_cutoffs = choose_cutoffs_from_risk(risk_cov_unmerged, max_risk)
+                risk_cov_unmerged_summary = prepare_risk_curve_for_selection(risk_cov_unmerged)
+                rc_cutoffs = choose_cutoffs_from_risk(risk_cov_unmerged_summary, max_risk)
                 if rc_cutoffs:
-                    print("Using risk-based cutoffs (unmerged) derived from train/test curves")
+                    print("Using risk-based cutoffs (unmerged) derived from deployable risk/seen-coverage curve")
                     cutoffs_unmerged = rc_cutoffs
+                else:
+                    raise ValueError(
+                        "Could not derive unmerged risk-based cutoffs from "
+                        f"{risk_cov_file_unmerged}"
+                    )
+        else:
+            print("\nNo --max_accepted_risk_pct provided: not applying unmerged cutoff.")
 
-        # Load unmerged Platt parameters (matches R: platt_params_unmerged_maxprob)
-        platt_file_unmerged = os.path.join(str(args.cutoffs_file), "platt_params_unmerged_maxprob", "platt_params_unmerged_maxprob.csv")
-        print(f"\nLoading unmerged Platt parameters from: {platt_file_unmerged}")
-        platt_params_unmerged = load_platt_params(platt_file_unmerged)
+        if calibration_method == "multivariate":
+            params_subdir_unmerged = "multivariate_params_unmerged_maxprob"
+            if calibration_setting in {"two_head", "two_head_postcal"}:
+                correctness_file_unmerged = "multivariate_params_unmerged_maxprob.csv"
+                ood_file_unmerged = "ood_head_params_unmerged_maxprob.csv"
+                postcal_file_unmerged = "two_head_postcal_params_unmerged_maxprob.csv"
+            elif calibration_setting == "known_only":
+                correctness_file_unmerged = "multivariate_params_known_only_unmerged_maxprob.csv"
+                ood_file_unmerged = None
+                postcal_file_unmerged = None
+            elif calibration_setting == "known_only_logit":
+                correctness_file_unmerged = "multivariate_params_known_only_logit_unmerged_maxprob.csv"
+                ood_file_unmerged = None
+                postcal_file_unmerged = None
+            elif calibration_setting == "ood_aware":
+                correctness_file_unmerged = "multivariate_params_ood_aware_unmerged_maxprob.csv"
+                ood_file_unmerged = None
+                postcal_file_unmerged = None
+            elif calibration_setting == "ood_aware_logit":
+                correctness_file_unmerged = "multivariate_params_ood_aware_logit_unmerged_maxprob.csv"
+                ood_file_unmerged = None
+                postcal_file_unmerged = None
+            else:
+                raise ValueError(f"Unsupported calibration setting for multivariate: {calibration_setting}")
+        else:
+            params_subdir_unmerged = "univariate_params_unmerged_maxprob"
+            if calibration_setting in {"two_head", "two_head_postcal"}:
+                correctness_file_unmerged = "univariate_params_unmerged_maxprob.csv"
+                ood_file_unmerged = "ood_head_params_univariate_unmerged_maxprob.csv"
+                postcal_file_unmerged = "two_head_postcal_params_unmerged_maxprob.csv"
+            elif calibration_setting == "known_only":
+                correctness_file_unmerged = "univariate_params_known_only_unmerged_maxprob.csv"
+                ood_file_unmerged = None
+                postcal_file_unmerged = None
+            elif calibration_setting == "known_only_logit":
+                correctness_file_unmerged = "univariate_params_known_only_logit_unmerged_maxprob.csv"
+                ood_file_unmerged = None
+                postcal_file_unmerged = None
+            elif calibration_setting == "ood_aware":
+                correctness_file_unmerged = "univariate_params_ood_aware_unmerged_maxprob.csv"
+                ood_file_unmerged = None
+                postcal_file_unmerged = None
+            elif calibration_setting == "ood_aware_logit":
+                correctness_file_unmerged = "univariate_params_ood_aware_logit_unmerged_maxprob.csv"
+                ood_file_unmerged = None
+                postcal_file_unmerged = None
+            else:
+                raise ValueError(f"Unsupported calibration setting for univariate: {calibration_setting}")
+
+        # Load selected correctness-head parameters for global ensemble.
+        multivariate_file_unmerged = os.path.join(
+            str(args.cutoffs_file),
+            params_subdir_unmerged,
+            correctness_file_unmerged,
+        )
+        print(f"\nLoading unmerged correctness-head parameters from: {multivariate_file_unmerged}")
+        multivariate_params_unmerged = load_multivariate_params(multivariate_file_unmerged)
+
+        # Load selected OOD head parameters only for two-head calibration.
+        ood_head_params_unmerged = {}
+        if ood_file_unmerged is not None:
+            ood_head_file_unmerged = os.path.join(
+                str(args.cutoffs_file),
+                params_subdir_unmerged,
+                ood_file_unmerged,
+            )
+            print(f"Loading unmerged OOD head parameters from: {ood_head_file_unmerged}")
+            ood_head_params_unmerged = load_multivariate_params(ood_head_file_unmerged)
+
+        postcal_params_unmerged = {}
+        if postcal_file_unmerged is not None and calibration_setting == "two_head_postcal":
+            postcal_file_path_unmerged = os.path.join(
+                str(args.cutoffs_file),
+                params_subdir_unmerged,
+                postcal_file_unmerged,
+            )
+            print(f"Loading unmerged two-head postcal parameters from: {postcal_file_path_unmerged}")
+            postcal_params_unmerged = load_multivariate_params(postcal_file_path_unmerged)
         
         # Run predictions
         predictions_unmerged, prob_matrices_unmerged = run_predictions(
-            X, sample_names, models, ensemble_weights_unmerged, cutoffs_unmerged, platt_params_unmerged, merge_classes=False
+            X,
+            sample_names,
+            models,
+            ensemble_weights_unmerged,
+            cutoffs_unmerged,
+            multivariate_params_unmerged,
+            ood_head_params_unmerged,
+            postcal_params_unmerged,
+            calibration_method=calibration_method,
+            calibration_setting=calibration_setting,
+            ensemble_method=ensemble_method,
+            merge_classes=False,
         )
         
         # Save unmerged predictions
@@ -1329,36 +1935,128 @@ def main():
         print(f"\nLoading merged ensemble weights (summed) from: {weights_dir_merged}")
         ensemble_weights_merged = load_ensemble_weights(weights_dir_merged)
         
-        # Load merged cutoffs (summed method)
-        # Structure: final_train_test/cutoffs_merged_summed/train_test_cutoffs_merged_summed.csv
-        cutoffs_file_merged = os.path.join(str(args.cutoffs_file), "cutoffs_merged_summed", "train_test_cutoffs_merged_summed.csv")
-        print(f"\nLoading merged cutoffs (summed) from: {cutoffs_file_merged}")
-        cutoffs_merged = load_cutoffs(cutoffs_file_merged)
+        # Deployable risk/seen-coverage curve exported from outer-CV sweeps.
+        risk_cov_file_merged = resolve_deployable_risk_curve_path(
+            args.cutoffs_file,
+            "merged_summed",
+            calibration_method,
+            calibration_setting,
+            cutoff_curve_split=args.cutoff_curve_split,
+        )
 
-        # Optionally override cutoffs using risk–coverage and desired risk
+        # Use cutoff only when user requests risk-based selection.
+        cutoffs_merged = {}
         if args.max_accepted_risk_pct is not None:
-            risk_cov_file_merged = os.path.join(
-                str(args.cutoffs_file),
-                "cutoffs_merged_summed",
-                "risk_coverage_train_test_merged_summed.csv"
-            )
-            print(f"\nLoading merged risk–coverage (summed) from: {risk_cov_file_merged}")
-            risk_cov_merged = load_risk_coverage(risk_cov_file_merged)
+            print(f"\nLoading merged deployable risk/seen-coverage curve (summed) from: {risk_cov_file_merged}")
+            risk_cov_merged = load_risk_coverage(risk_cov_file_merged, required=True)
             if risk_cov_merged is not None:
                 max_risk = args.max_accepted_risk_pct / 100.0
-                rc_cutoffs = choose_cutoffs_from_risk(risk_cov_merged, max_risk)
+                risk_cov_merged_summary = prepare_risk_curve_for_selection(risk_cov_merged)
+                rc_cutoffs = choose_cutoffs_from_risk(risk_cov_merged_summary, max_risk)
                 if rc_cutoffs:
-                    print("Using risk-based cutoffs (merged) derived from train/test curves")
+                    print("Using risk-based cutoffs (merged) derived from deployable risk/seen-coverage curve")
                     cutoffs_merged = rc_cutoffs
+                else:
+                    raise ValueError(
+                        "Could not derive merged risk-based cutoffs from "
+                        f"{risk_cov_file_merged}"
+                    )
+        else:
+            print("\nNo --max_accepted_risk_pct provided: not applying merged cutoff.")
 
-        # Load merged Platt parameters (summed method)
-        platt_file_merged = os.path.join(str(args.cutoffs_file), "platt_params_merged_summed", "platt_params_merged_summed.csv")
-        print(f"\nLoading merged Platt parameters (summed) from: {platt_file_merged}")
-        platt_params_merged = load_platt_params(platt_file_merged)
+        if calibration_method == "multivariate":
+            params_subdir_merged = "multivariate_params_merged_summed"
+            if calibration_setting in {"two_head", "two_head_postcal"}:
+                correctness_file_merged = "multivariate_params_merged_summed.csv"
+                ood_file_merged = "ood_head_params_merged_summed.csv"
+                postcal_file_merged = "two_head_postcal_params_merged_summed.csv"
+            elif calibration_setting == "known_only":
+                correctness_file_merged = "multivariate_params_known_only_merged_summed.csv"
+                ood_file_merged = None
+                postcal_file_merged = None
+            elif calibration_setting == "known_only_logit":
+                correctness_file_merged = "multivariate_params_known_only_logit_merged_summed.csv"
+                ood_file_merged = None
+                postcal_file_merged = None
+            elif calibration_setting == "ood_aware":
+                correctness_file_merged = "multivariate_params_ood_aware_merged_summed.csv"
+                ood_file_merged = None
+                postcal_file_merged = None
+            elif calibration_setting == "ood_aware_logit":
+                correctness_file_merged = "multivariate_params_ood_aware_logit_merged_summed.csv"
+                ood_file_merged = None
+                postcal_file_merged = None
+            else:
+                raise ValueError(f"Unsupported calibration setting for multivariate: {calibration_setting}")
+        else:
+            params_subdir_merged = "univariate_params_merged_summed"
+            if calibration_setting in {"two_head", "two_head_postcal"}:
+                correctness_file_merged = "univariate_params_merged_summed.csv"
+                ood_file_merged = "ood_head_params_univariate_merged_summed.csv"
+                postcal_file_merged = "two_head_postcal_params_merged_summed.csv"
+            elif calibration_setting == "known_only":
+                correctness_file_merged = "univariate_params_known_only_merged_summed.csv"
+                ood_file_merged = None
+                postcal_file_merged = None
+            elif calibration_setting == "known_only_logit":
+                correctness_file_merged = "univariate_params_known_only_logit_merged_summed.csv"
+                ood_file_merged = None
+                postcal_file_merged = None
+            elif calibration_setting == "ood_aware":
+                correctness_file_merged = "univariate_params_ood_aware_merged_summed.csv"
+                ood_file_merged = None
+                postcal_file_merged = None
+            elif calibration_setting == "ood_aware_logit":
+                correctness_file_merged = "univariate_params_ood_aware_logit_merged_summed.csv"
+                ood_file_merged = None
+                postcal_file_merged = None
+            else:
+                raise ValueError(f"Unsupported calibration setting for univariate: {calibration_setting}")
+
+        # Load selected correctness-head parameters for global ensemble.
+        multivariate_file_merged = os.path.join(
+            str(args.cutoffs_file),
+            params_subdir_merged,
+            correctness_file_merged,
+        )
+        print(f"\nLoading merged correctness-head parameters (summed) from: {multivariate_file_merged}")
+        multivariate_params_merged = load_multivariate_params(multivariate_file_merged)
+
+        # Load selected OOD head parameters only for two-head calibration.
+        ood_head_params_merged = {}
+        if ood_file_merged is not None:
+            ood_head_file_merged = os.path.join(
+                str(args.cutoffs_file),
+                params_subdir_merged,
+                ood_file_merged,
+            )
+            print(f"Loading merged OOD head parameters (summed) from: {ood_head_file_merged}")
+            ood_head_params_merged = load_multivariate_params(ood_head_file_merged)
+
+        postcal_params_merged = {}
+        if postcal_file_merged is not None and calibration_setting == "two_head_postcal":
+            postcal_file_path_merged = os.path.join(
+                str(args.cutoffs_file),
+                params_subdir_merged,
+                postcal_file_merged,
+            )
+            print(f"Loading merged two-head postcal parameters (summed) from: {postcal_file_path_merged}")
+            postcal_params_merged = load_multivariate_params(postcal_file_path_merged)
         
         # Run predictions
         predictions_merged, prob_matrices_merged = run_predictions(
-            X, sample_names, models, ensemble_weights_merged, cutoffs_merged, platt_params_merged, merge_classes=True
+            X,
+            sample_names,
+            models,
+            ensemble_weights_merged,
+            cutoffs_merged,
+            multivariate_params_merged,
+            ood_head_params_merged,
+            postcal_params_merged,
+            calibration_method=calibration_method,
+            calibration_setting=calibration_setting,
+            ensemble_method=ensemble_method,
+            merge_classes=True,
         )
         
         # Save merged predictions

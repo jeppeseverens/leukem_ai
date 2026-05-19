@@ -52,6 +52,18 @@ def main():
         help='Also predict on left-out class samples (rare/excluded subtypes) per fold. '
              'Saves a separate CSV for use in left-out-aware rejection analysis.'
     )
+    parser.add_argument(
+        '--knn_cache_dir',
+        type=str,
+        default=None,
+        help='Optional cache directory for fold-level preprocessing and KNN features.'
+    )
+    parser.add_argument(
+        '--knn_n_genes',
+        type=int,
+        default=500,
+        help='Number of eta2-selected genes for KNN reject features (default: 500).'
+    )
 
     args = parser.parse_args()
     
@@ -59,6 +71,8 @@ def main():
     print(f"Best parameters from: {args.best_params_path}", flush=True)
     print(f"Feature selection method: {args.fs_method}", flush=True)
     print(f"Include left-out predictions: {args.include_leftout}", flush=True)
+    print(f"KNN cache dir: {args.knn_cache_dir or '(default)'}", flush=True)
+    print(f"KNN feature n_genes: {args.knn_n_genes}", flush=True)
     
     time = datetime.datetime.now().strftime("%Y%m%d_%H%M")
 
@@ -140,13 +154,21 @@ def main():
         print("Calling run_outer_cv (CV fold type)...", flush=True)
         df = train_test.run_outer_cv(
             X, y, study_labels, model, pipe, best_params,
-            multi_type=args.multi_type, model_type=args.model_type
+            multi_type=args.multi_type,
+            model_type=args.model_type,
+            fs_method=fs_method_lower,
+            cache_dir=args.knn_cache_dir,
+            knn_n_genes=args.knn_n_genes,
         )
     elif args.fold_type == "loso":
         print("Calling run_outer_cv_loso (loso fold type)...", flush=True)
         df = train_test.run_outer_cv_loso(
             X, y, study_labels, model, pipe, best_params,
-            multi_type=args.multi_type, model_type=args.model_type
+            multi_type=args.multi_type,
+            model_type=args.model_type,
+            fs_method=fs_method_lower,
+            cache_dir=args.knn_cache_dir,
+            knn_n_genes=args.knn_n_genes,
         )
     else:
         raise ValueError(f"Fold type {args.fold_type} not supported.")

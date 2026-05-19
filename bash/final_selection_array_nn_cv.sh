@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -J final_selection_nn_cv
-#SBATCH --array=0-59              # Adjust based on parameter combinations
+#SBATCH --array=0-79              # 80 hyperparameter combinations (0-indexed)
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1         # 1 core per hyperparameter combination
 #SBATCH --time=8:00:00           

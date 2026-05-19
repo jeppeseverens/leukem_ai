@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -J run_inner_nn_array_cv
-#SBATCH --array=0-59              # 96 hyperparameter combinations (0-indexed)
+#SBATCH --array=0-79              # 80 hyperparameter combinations (0-indexed)
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1         # 1 core per hyperparameter combination
 #SBATCH --time=16:00:00           
@@ -20,7 +20,7 @@ source venv/bin/activate
 export TF_CPP_MIN_LOG_LEVEL=2
 
 echo "Starting inner CV experiment (CV fold type) on SLURM_ARRAY_TASK_ID=$SLURM_ARRAY_TASK_ID"
-echo "Processing hyperparameter combination $SLURM_ARRAY_TASK_ID out of 60"
+echo "Processing hyperparameter combination $SLURM_ARRAY_TASK_ID out of 80"
 echo "=================================="
 
 # Define your arguments for each array job

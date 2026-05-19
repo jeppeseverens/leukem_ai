@@ -3,6 +3,9 @@ import numpy as np
 import os
 import json
 import gc
+import hashlib
+import pickle
+import re
 
 from sklearn.metrics import (
     accuracy_score,
@@ -13,6 +16,7 @@ from sklearn.metrics import (
 from sklearn.preprocessing import LabelEncoder
 from sklearn.model_selection import StratifiedKFold
 from sklearn.base import clone
+from sklearn.neighbors import NearestNeighbors
 
 from joblib import Parallel, delayed
 import itertools
@@ -21,6 +25,435 @@ from collections import Counter
 
 # Project-wide seed for CV shuffling (StratifiedKFold, left-out assignment).
 CV_RANDOM_STATE = 1
+
+# Default KNN settings for rejection feature generation.
+KNN_REJECTION_K_VALUES = (10, 20)
+KNN_REJECTION_FEATURE_N_GENES = 500
+KNN_DISTANCE_COLUMNS = (
+    "knn10_mean_d", "knn10_min_d", "knn10_q90_d",
+    "knn20_mean_d", "knn20_min_d", "knn20_q90_d",
+)
+
+
+def _stable_hash_array(arr):
+    """Build a stable hash for numpy-compatible content."""
+    arr_np = np.asarray(arr)
+    return hashlib.sha256(arr_np.tobytes()).hexdigest()
+
+
+def _get_reject_cache_dir():
+    """Directory for fold-level reject feature/preprocess caches."""
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    cache_dir = os.path.join(project_root, "data", "out", "reject_cache")
+    os.makedirs(cache_dir, exist_ok=True)
+    return cache_dir
+
+
+def _build_preprocess_cache_key(split_tag, n_genes, train_indices, test_indices, y_train, study_train, fs_method):
+    payload = {
+        "split_tag": str(split_tag),
+        "n_genes": int(n_genes),
+        "train_idx_hash": _stable_hash_array(train_indices),
+        "test_idx_hash": _stable_hash_array(test_indices),
+        "y_train_hash": _stable_hash_array(y_train),
+        "study_train_hash": _stable_hash_array(study_train),
+        "fs_method": str(fs_method),
+    }
+    encoded = json.dumps(payload, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _load_preprocess_cache(cache_dir, cache_key):
+    cache_path = os.path.join(cache_dir, f"preprocess_{cache_key}.pkl")
+    if not os.path.exists(cache_path):
+        return None
+    with open(cache_path, "rb") as f:
+        return pickle.load(f)
+
+
+def _save_preprocess_cache(cache_dir, cache_key, payload):
+    cache_path = os.path.join(cache_dir, f"preprocess_{cache_key}.pkl")
+    with open(cache_path, "wb") as f:
+        pickle.dump(payload, f)
+
+
+def _compute_knn_distance_features(X_train_ref, X_eval_ref, k_values=KNN_REJECTION_K_VALUES):
+    """
+    Compute KNN distance summaries for each k in k_values.
+    Returns dict of feature_name -> np.ndarray.
+    """
+    out = {}
+    if X_train_ref is None or X_eval_ref is None:
+        return out
+
+    X_train_ref = np.asarray(X_train_ref, dtype=np.float32)
+    X_eval_ref = np.asarray(X_eval_ref, dtype=np.float32)
+    if X_train_ref.size == 0 or X_eval_ref.size == 0:
+        return out
+
+    for k in k_values:
+        k_eff = int(min(max(1, k), X_train_ref.shape[0]))
+        nn = NearestNeighbors(n_neighbors=k_eff, metric="euclidean")
+        nn.fit(X_train_ref)
+        distances, _ = nn.kneighbors(X_eval_ref, return_distance=True)
+        out[f"knn{k}_mean_d"] = distances.mean(axis=1).astype(np.float32)
+        out[f"knn{k}_min_d"] = distances.min(axis=1).astype(np.float32)
+        out[f"knn{k}_q90_d"] = np.quantile(distances, 0.9, axis=1).astype(np.float32)
+    return out
+
+
+def _load_or_compute_knn_features(cache_dir, cache_key, X_train_ref, X_eval_ref):
+    cache_path = os.path.join(cache_dir, f"knn_{cache_key}.pkl")
+    if os.path.exists(cache_path):
+        with open(cache_path, "rb") as f:
+            return pickle.load(f)
+    features = _compute_knn_distance_features(X_train_ref, X_eval_ref)
+    with open(cache_path, "wb") as f:
+        pickle.dump(features, f)
+    return features
+
+
+def _parse_index_vector(value):
+    """
+    Parse index vectors stored as JSON/Python-like strings in CSV cells.
+    Supports forms like:
+      "[1, 2, 3]"
+      "[1 2 3]"
+      "1,2,3"
+    """
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return np.array([], dtype=np.int64)
+    if isinstance(value, (list, tuple, np.ndarray)):
+        return np.asarray(value, dtype=np.int64)
+    txt = str(value).strip()
+    if txt == "":
+        return np.array([], dtype=np.int64)
+
+    # Try literal parsing first for strict JSON/Python list style.
+    try:
+        parsed = ast.literal_eval(txt)
+        if isinstance(parsed, (list, tuple, np.ndarray)):
+            return np.asarray(parsed, dtype=np.int64)
+    except Exception:
+        pass
+
+    # Fallback regex parser for space/comma-delimited numeric vectors.
+    nums = re.findall(r"-?\d+", txt)
+    if not nums:
+        return np.array([], dtype=np.int64)
+    return np.asarray([int(n) for n in nums], dtype=np.int64)
+
+
+def backfill_knn_columns_in_outer_results(
+    outer_results_df,
+    X,
+    y,
+    study_labels,
+    pipe,
+    fold_type="CV",
+    fs_method="eta2",
+    knn_n_genes=KNN_REJECTION_FEATURE_N_GENES,
+    cache_dir=None,
+    strict=True,
+):
+    """
+    Compute KNN distance feature vectors for existing outer-CV results and append
+    them as columns, without rerunning model training/prediction.
+    """
+    if outer_results_df is None or len(outer_results_df) == 0:
+        return outer_results_df
+
+    result = outer_results_df.copy()
+    fold_type_l = str(fold_type).lower()
+    local_cache_dir = cache_dir or _get_reject_cache_dir()
+
+    split_features = {}
+    if fold_type_l == "cv":
+        outer_cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=CV_RANDOM_STATE)
+        combined = build_hybrid_stratify_labels(y, study_labels, 5)
+        split_iter = list(outer_cv.split(X, combined))
+        for outer_fold, (train_idx, test_idx) in enumerate(split_iter):
+            proc, _, _ = pre_process_data(
+                [int(knn_n_genes)],
+                X,
+                y,
+                train_idx,
+                test_idx,
+                study_labels,
+                pipe,
+                cache_dir=local_cache_dir,
+                split_tag=f"outer_cv_{outer_fold}",
+                fs_method=fs_method,
+            )
+            X_train_knn, X_test_knn = proc[int(knn_n_genes)]
+            knn_key_payload = json.dumps(
+                {
+                    "mode": "cv_backfill",
+                    "outer_fold": int(outer_fold),
+                    "fs_method": str(fs_method),
+                    "n_genes": int(knn_n_genes),
+                    "train_hash": _stable_hash_array(train_idx),
+                    "test_hash": _stable_hash_array(test_idx),
+                    "k_values": list(KNN_REJECTION_K_VALUES),
+                },
+                sort_keys=True,
+            ).encode("utf-8")
+            knn_key = hashlib.sha256(knn_key_payload).hexdigest()
+            split_features[str(outer_fold)] = {
+                "sample_indices": np.asarray(test_idx, dtype=np.int64),
+                "features": _load_or_compute_knn_features(local_cache_dir, knn_key, X_train_knn, X_test_knn),
+            }
+    elif fold_type_l == "loso":
+        for test_study_name in np.unique(study_labels):
+            test_mask = study_labels == test_study_name
+            train_mask = ~test_mask
+            X_train = X[train_mask]
+            X_test = X[test_mask]
+            y_train = y[train_mask]
+            study_labels_train = study_labels[train_mask]
+            test_idx = np.where(test_mask)[0]
+
+            proc = pre_process_data_loso(
+                [int(knn_n_genes)],
+                X_train,
+                X_test,
+                study_labels_train,
+                y_train,
+                pipe,
+                cache_dir=local_cache_dir,
+                split_tag=f"outer_loso_{test_study_name}",
+                fs_method=fs_method,
+            )
+            X_train_knn, X_test_knn = proc[int(knn_n_genes)]
+            knn_key_payload = json.dumps(
+                {
+                    "mode": "loso_backfill",
+                    "outer_fold": str(test_study_name),
+                    "fs_method": str(fs_method),
+                    "n_genes": int(knn_n_genes),
+                    "train_hash": _stable_hash_array(np.where(train_mask)[0]),
+                    "test_hash": _stable_hash_array(test_idx),
+                    "k_values": list(KNN_REJECTION_K_VALUES),
+                },
+                sort_keys=True,
+            ).encode("utf-8")
+            knn_key = hashlib.sha256(knn_key_payload).hexdigest()
+            split_features[str(test_study_name)] = {
+                "sample_indices": np.asarray(test_idx, dtype=np.int64),
+                "features": _load_or_compute_knn_features(local_cache_dir, knn_key, X_train_knn, X_test_knn),
+            }
+    else:
+        raise ValueError(f"Unsupported fold_type '{fold_type}'. Use 'CV' or 'loso'.")
+
+    for col in KNN_DISTANCE_COLUMNS:
+        if col not in result.columns:
+            result[col] = None
+
+    for row_idx in result.index:
+        fold_key = str(result.at[row_idx, "outer_fold"])
+        if fold_key not in split_features:
+            if strict:
+                raise ValueError(f"Missing fold '{fold_key}' in computed KNN feature bundles.")
+            continue
+        fold_bundle = split_features[fold_key]
+        row_indices = _parse_index_vector(result.at[row_idx, "sample_indices"])
+        if len(row_indices) == 0:
+            if strict:
+                raise ValueError(f"Empty sample_indices vector at row {row_idx}.")
+            continue
+        fold_indices = fold_bundle["sample_indices"]
+        # Align fold features to the exact row sample order.
+        index_to_pos = {int(v): i for i, v in enumerate(fold_indices.tolist())}
+        pos = [index_to_pos.get(int(v), None) for v in row_indices.tolist()]
+        if any(p is None for p in pos):
+            if strict:
+                missing = [int(v) for v, p in zip(row_indices.tolist(), pos) if p is None]
+                raise ValueError(
+                    f"Row {row_idx} has sample_indices not found in fold '{fold_key}': {missing[:10]}"
+                )
+            continue
+        pos = np.asarray(pos, dtype=np.int64)
+        feats = fold_bundle["features"]
+        for col in KNN_DISTANCE_COLUMNS:
+            vec = feats.get(col)
+            if vec is None:
+                if strict:
+                    raise ValueError(f"Missing KNN feature '{col}' for fold '{fold_key}'.")
+                continue
+            result.at[row_idx, col] = json.dumps(np.asarray(vec, dtype=np.float32)[pos].tolist())
+
+    if strict:
+        for col in KNN_DISTANCE_COLUMNS:
+            missing_mask = result[col].isna() | (result[col].astype(str).str.len() == 0)
+            if missing_mask.any():
+                n_missing = int(missing_mask.sum())
+                raise ValueError(f"KNN backfill incomplete: '{col}' missing on {n_missing} rows.")
+
+    return result
+
+
+def backfill_knn_columns_in_outer_leftout_results(
+    leftout_results_df,
+    X,
+    y,
+    study_labels,
+    X_leftout,
+    y_leftout,
+    study_leftout,
+    leftout_global_idx,
+    pipe,
+    fold_type="CV",
+    fs_method="eta2",
+    knn_n_genes=KNN_REJECTION_FEATURE_N_GENES,
+    cache_dir=None,
+    strict=True,
+):
+    """
+    Compute KNN distance feature vectors for existing outer-CV left-out result rows
+    and append them as columns, without rerunning model training/prediction.
+    """
+    if leftout_results_df is None or len(leftout_results_df) == 0:
+        return leftout_results_df
+
+    result = leftout_results_df.copy()
+    fold_type_l = str(fold_type).lower()
+    local_cache_dir = cache_dir or _get_reject_cache_dir()
+
+    split_features = {}
+    if fold_type_l == "cv":
+        leftout_fold_assignments = assign_leftout_to_cv_folds(
+            y_leftout, study_leftout, n_folds=5, random_state=CV_RANDOM_STATE
+        )
+        outer_cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=CV_RANDOM_STATE)
+        combined = build_hybrid_stratify_labels(y, study_labels, 5)
+        split_iter = list(outer_cv.split(X, combined))
+        for outer_fold, (train_idx, test_idx) in enumerate(split_iter):
+            fold_mask = leftout_fold_assignments == outer_fold
+            if not np.any(fold_mask):
+                continue
+            proc, _, _, fitted = pre_process_data(
+                [int(knn_n_genes)],
+                X,
+                y,
+                train_idx,
+                test_idx,
+                study_labels,
+                pipe,
+                return_pipelines=True,
+                cache_dir=local_cache_dir,
+                split_tag=f"outer_cv_{outer_fold}",
+                fs_method=fs_method,
+            )
+            X_train_knn = proc[int(knn_n_genes)][0]
+            X_leftout_fold_proc = fitted[int(knn_n_genes)].transform(X_leftout[fold_mask]).astype(np.float32)
+            leftout_idx_fold = np.asarray(leftout_global_idx[fold_mask], dtype=np.int64)
+            knn_key_payload = json.dumps(
+                {
+                    "mode": "cv_backfill_leftout",
+                    "outer_fold": int(outer_fold),
+                    "fs_method": str(fs_method),
+                    "n_genes": int(knn_n_genes),
+                    "train_hash": _stable_hash_array(train_idx),
+                    "leftout_hash": _stable_hash_array(leftout_idx_fold),
+                    "k_values": list(KNN_REJECTION_K_VALUES),
+                },
+                sort_keys=True,
+            ).encode("utf-8")
+            knn_key = hashlib.sha256(knn_key_payload).hexdigest()
+            split_features[str(outer_fold)] = {
+                "sample_indices": leftout_idx_fold,
+                "features": _load_or_compute_knn_features(local_cache_dir, knn_key, X_train_knn, X_leftout_fold_proc),
+            }
+    elif fold_type_l == "loso":
+        for test_study_name in np.unique(study_labels):
+            leftout_study_mask = study_leftout == test_study_name
+            if not np.any(leftout_study_mask):
+                continue
+            test_mask = study_labels == test_study_name
+            train_mask = ~test_mask
+            X_train = X[train_mask]
+            y_train = y[train_mask]
+            study_labels_train = study_labels[train_mask]
+            proc, fitted = pre_process_data_loso(
+                [int(knn_n_genes)],
+                X_train,
+                X[test_mask],
+                study_labels_train,
+                y_train,
+                pipe,
+                return_pipelines=True,
+                cache_dir=local_cache_dir,
+                split_tag=f"outer_loso_{test_study_name}",
+                fs_method=fs_method,
+            )
+            X_train_knn = proc[int(knn_n_genes)][0]
+            X_leftout_fold_proc = fitted[int(knn_n_genes)].transform(X_leftout[leftout_study_mask]).astype(np.float32)
+            leftout_idx_fold = np.asarray(leftout_global_idx[leftout_study_mask], dtype=np.int64)
+            knn_key_payload = json.dumps(
+                {
+                    "mode": "loso_backfill_leftout",
+                    "outer_fold": str(test_study_name),
+                    "fs_method": str(fs_method),
+                    "n_genes": int(knn_n_genes),
+                    "train_hash": _stable_hash_array(np.where(train_mask)[0]),
+                    "leftout_hash": _stable_hash_array(leftout_idx_fold),
+                    "k_values": list(KNN_REJECTION_K_VALUES),
+                },
+                sort_keys=True,
+            ).encode("utf-8")
+            knn_key = hashlib.sha256(knn_key_payload).hexdigest()
+            split_features[str(test_study_name)] = {
+                "sample_indices": leftout_idx_fold,
+                "features": _load_or_compute_knn_features(local_cache_dir, knn_key, X_train_knn, X_leftout_fold_proc),
+            }
+    else:
+        raise ValueError(f"Unsupported fold_type '{fold_type}'. Use 'CV' or 'loso'.")
+
+    for col in KNN_DISTANCE_COLUMNS:
+        if col not in result.columns:
+            result[col] = None
+
+    for row_idx in result.index:
+        fold_key = str(result.at[row_idx, "outer_fold"])
+        if fold_key not in split_features:
+            if strict:
+                raise ValueError(f"Missing leftout fold '{fold_key}' in computed KNN feature bundles.")
+            continue
+        fold_bundle = split_features[fold_key]
+        row_indices = _parse_index_vector(result.at[row_idx, "sample_indices"])
+        if len(row_indices) == 0:
+            if strict:
+                raise ValueError(f"Empty sample_indices vector at leftout row {row_idx}.")
+            continue
+        fold_indices = fold_bundle["sample_indices"]
+        index_to_pos = {int(v): i for i, v in enumerate(fold_indices.tolist())}
+        pos = [index_to_pos.get(int(v), None) for v in row_indices.tolist()]
+        if any(p is None for p in pos):
+            if strict:
+                missing = [int(v) for v, p in zip(row_indices.tolist(), pos) if p is None]
+                raise ValueError(
+                    f"Leftout row {row_idx} has sample_indices not found in fold '{fold_key}': {missing[:10]}"
+                )
+            continue
+        pos = np.asarray(pos, dtype=np.int64)
+        feats = fold_bundle["features"]
+        for col in KNN_DISTANCE_COLUMNS:
+            vec = feats.get(col)
+            if vec is None:
+                if strict:
+                    raise ValueError(f"Missing KNN feature '{col}' for fold '{fold_key}'.")
+                continue
+            result.at[row_idx, col] = json.dumps(np.asarray(vec, dtype=np.float32)[pos].tolist())
+
+    # Strict post-check: all rows must have all KNN columns filled.
+    if strict:
+        for col in KNN_DISTANCE_COLUMNS:
+            missing_mask = result[col].isna() | (result[col].astype(str).str.len() == 0)
+            if missing_mask.any():
+                n_missing = int(missing_mask.sum())
+                raise ValueError(f"Leftout KNN backfill incomplete: '{col}' missing on {n_missing} rows.")
+
+    return result
 
 ###################################################################################
 # Helper functions                                                                #
@@ -569,8 +1002,16 @@ def evaluate_outer_fold(
     model,
     best_params_fold,
     multi_type="standard",
-    model_type="any"
+    model_type="any",
+    knn_features=None,
 ):
+    def _knn_json(feature_name):
+        if not knn_features:
+            return None
+        vals = knn_features.get(feature_name)
+        if vals is None:
+            return None
+        return json.dumps(np.asarray(vals, dtype=np.float32).tolist())
 
     def standard_eval():
         # Select preprocessed data
@@ -623,7 +1064,13 @@ def evaluate_outer_fold(
             "y_val": y_test,  # All test labels (including unseen classes)
             "preds": preds,   # All predictions
             "preds_prob": json.dumps(preds_prob),  # All prediction probabilities
-            "sample_indices": test_idx  # All sample indices
+            "sample_indices": test_idx,  # All sample indices
+            "knn10_mean_d": _knn_json("knn10_mean_d"),
+            "knn10_min_d": _knn_json("knn10_min_d"),
+            "knn10_q90_d": _knn_json("knn10_q90_d"),
+            "knn20_mean_d": _knn_json("knn20_mean_d"),
+            "knn20_min_d": _knn_json("knn20_min_d"),
+            "knn20_q90_d": _knn_json("knn20_q90_d"),
         }
 
     def ovr_eval():
@@ -685,7 +1132,13 @@ def evaluate_outer_fold(
                     "y_val": y_test_bin,
                     "preds": preds,
                     "preds_prob": json.dumps(preds_prob),
-                    "sample_indices": test_idx
+                    "sample_indices": test_idx,
+                    "knn10_mean_d": _knn_json("knn10_mean_d"),
+                    "knn10_min_d": _knn_json("knn10_min_d"),
+                    "knn10_q90_d": _knn_json("knn10_q90_d"),
+                    "knn20_mean_d": _knn_json("knn20_mean_d"),
+                    "knn20_min_d": _knn_json("knn20_min_d"),
+                    "knn20_q90_d": _knn_json("knn20_q90_d"),
                 }
             )
         return results
@@ -762,7 +1215,13 @@ def evaluate_outer_fold(
                     "y_val": y_test,
                     "preds": preds,
                     "preds_prob": json.dumps(preds_prob),
-                    "sample_indices": test_idx
+                    "sample_indices": test_idx,
+                    "knn10_mean_d": _knn_json("knn10_mean_d"),
+                    "knn10_min_d": _knn_json("knn10_min_d"),
+                    "knn10_q90_d": _knn_json("knn10_q90_d"),
+                    "knn20_mean_d": _knn_json("knn20_mean_d"),
+                    "knn20_min_d": _knn_json("knn20_min_d"),
+                    "knn20_q90_d": _knn_json("knn20_q90_d"),
                 }
             )
         return results
@@ -793,6 +1252,9 @@ def pre_process_data(
     study_labels_outer,
     pipe,
     return_pipelines=False,
+    cache_dir=None,
+    split_tag=None,
+    fs_method="unknown",
 ):
     """
     Preprocesses training and validation sets for different n_genes.
@@ -814,10 +1276,28 @@ def pre_process_data(
 
     processed_X = {}
     fitted_pipelines = {}
+    local_cache_dir = cache_dir or _get_reject_cache_dir()
     for n_genes_i in n_genes_list:
-        pipe_clone = clone(pipe)
+        cache_key = _build_preprocess_cache_key(
+            split_tag=split_tag or "cv",
+            n_genes=n_genes_i,
+            train_indices=train_idx,
+            test_indices=val_idx,
+            y_train=y_train,
+            study_train=study_labels_train,
+            fs_method=fs_method,
+        )
+        cached = _load_preprocess_cache(local_cache_dir, cache_key)
+        if cached is not None:
+            X_train_proc = cached["X_train_proc"]
+            X_val_proc = cached["X_eval_proc"]
+            if return_pipelines and "pipeline" in cached:
+                fitted_pipelines[n_genes_i] = cached["pipeline"]
+            processed_X[n_genes_i] = [X_train_proc, X_val_proc]
+            continue
 
-        # Pass y_train so FeatureSelectionEta (eta2) receives subtype labels; ignored by MAD selector
+        pipe_clone = clone(pipe)
+        # Pass y_train so FeatureSelectionEta (eta2) receives subtype labels; ignored by MAD selector.
         X_train_proc = pipe_clone.fit_transform(
             X_train,
             y_train,
@@ -826,9 +1306,15 @@ def pre_process_data(
         ).astype(np.float32)
         X_val_proc = pipe_clone.transform(X_val).astype(np.float32)
 
-        processed_X[n_genes_i] = [X_train_proc, X_val_proc]
+        payload = {
+            "X_train_proc": X_train_proc,
+            "X_eval_proc": X_val_proc,
+        }
         if return_pipelines:
+            payload["pipeline"] = pipe_clone
             fitted_pipelines[n_genes_i] = pipe_clone
+        _save_preprocess_cache(local_cache_dir, cache_key, payload)
+        processed_X[n_genes_i] = [X_train_proc, X_val_proc]
 
     if return_pipelines:
         return processed_X, y_train, y_val, fitted_pipelines
@@ -1183,7 +1669,10 @@ def run_outer_cv(
     pipe,
     best_params,
     multi_type="standard",
-    model_type = "any"
+    model_type = "any",
+    fs_method="unknown",
+    cache_dir=None,
+    knn_n_genes=KNN_REJECTION_FEATURE_N_GENES,
 ):
 
     
@@ -1210,8 +1699,8 @@ def run_outer_cv(
     if not n_genes_list:
         raise ValueError("No valid n_genes values found in best_params")
     
-    # Remove duplicates and sort
-    n_genes_list = sorted(list(set(n_genes_list)))
+    # Remove duplicates and sort. Ensure KNN reference space is available.
+    n_genes_list = sorted(list(set(n_genes_list + [int(knn_n_genes)])))
     # Keep outer CV fold assignments reproducible and aligned with inner-CV setup.
     outer_cv = StratifiedKFold(
         n_splits=5, shuffle=True, random_state=CV_RANDOM_STATE
@@ -1235,8 +1724,35 @@ def run_outer_cv(
             train_idx,
             test_idx,
             study_labels,
-            pipe
+            pipe,
+            cache_dir=cache_dir,
+            split_tag=f"outer_cv_{outer_fold}",
+            fs_method=fs_method,
         )
+
+        knn_features = None
+        if int(knn_n_genes) in processed_X:
+            X_train_knn, X_test_knn = processed_X[int(knn_n_genes)]
+            knn_cache_dir = cache_dir or _get_reject_cache_dir()
+            knn_key_payload = json.dumps(
+                {
+                    "mode": "cv",
+                    "outer_fold": int(outer_fold),
+                    "fs_method": str(fs_method),
+                    "n_genes": int(knn_n_genes),
+                    "train_hash": _stable_hash_array(train_idx),
+                    "test_hash": _stable_hash_array(test_idx),
+                    "k_values": list(KNN_REJECTION_K_VALUES),
+                },
+                sort_keys=True,
+            ).encode("utf-8")
+            knn_key = hashlib.sha256(knn_key_payload).hexdigest()
+            knn_features = _load_or_compute_knn_features(
+                knn_cache_dir,
+                knn_key,
+                X_train_knn,
+                X_test_knn,
+            )
         
         # Filter best_params to get only rows for current outer fold
         best_params_fold = best_params[best_params['outer_fold'] == outer_fold]
@@ -1250,7 +1766,8 @@ def run_outer_cv(
                     model,
                     best_params_fold,
                     multi_type=multi_type,  # standard, OvR, OvO
-                    model_type = model_type
+                    model_type = model_type,
+                    knn_features=knn_features,
                 
             )
         # Flatten inner_results list if needed and append to all_results
@@ -1283,6 +1800,9 @@ def pre_process_data_loso(
     y_train_inner,       # Subtype labels for X_train (required for FeatureSelectionEta)
     pipe,
     return_pipelines=False,
+    cache_dir=None,
+    split_tag=None,
+    fs_method="unknown",
 ):
     """
     Preprocesses training and test/validation sets for different n_genes.
@@ -1293,24 +1813,47 @@ def pre_process_data_loso(
     """
     processed_X = {}
     fitted_pipelines = {}
+    local_cache_dir = cache_dir or _get_reject_cache_dir()
     for n_genes_i in n_genes_list:
-        # Clone the pipeline for this specific n_genes setting
-        pipe_inner = clone(pipe)
+        cache_key = _build_preprocess_cache_key(
+            split_tag=split_tag or "loso",
+            n_genes=n_genes_i,
+            train_indices=np.arange(X_train.shape[0]),
+            test_indices=np.arange(X_test.shape[0]),
+            y_train=y_train_inner,
+            study_train=study_labels_inner,
+            fs_method=fs_method,
+        )
+        cached = _load_preprocess_cache(local_cache_dir, cache_key)
+        if cached is not None:
+            X_train_proc = cached["X_train_proc"]
+            X_test_proc = cached["X_eval_proc"]
+            if return_pipelines and "pipeline" in cached:
+                fitted_pipelines[n_genes_i] = cached["pipeline"]
+            processed_X[n_genes_i] = [X_train_proc, X_test_proc]
+            continue
 
-        # Pass y_train_inner so FeatureSelectionEta (eta2) receives subtype labels
+        # Clone the pipeline for this specific n_genes setting.
+        pipe_inner = clone(pipe)
+        # Pass y_train_inner so FeatureSelectionEta (eta2) receives subtype labels.
         X_train_proc = pipe_inner.fit_transform(
             X_train,
             y_train_inner,
             feature_selection__study_per_patient=study_labels_inner,
             feature_selection__n_genes=n_genes_i,
-        )
+        ).astype(np.float32)
+        # Transform validation/test data using the fitted pipeline.
+        X_test_proc = pipe_inner.transform(X_test).astype(np.float32)
 
-        # Transform the inner validation data (1 study) using the fitted pipeline
-        X_test_proc = pipe_inner.transform(X_test)
-
-        processed_X[n_genes_i] = [X_train_proc, X_test_proc]
+        payload = {
+            "X_train_proc": X_train_proc,
+            "X_eval_proc": X_test_proc,
+        }
         if return_pipelines:
+            payload["pipeline"] = pipe_inner
             fitted_pipelines[n_genes_i] = pipe_inner
+        _save_preprocess_cache(local_cache_dir, cache_key, payload)
+        processed_X[n_genes_i] = [X_train_proc, X_test_proc]
 
     if return_pipelines:
         return processed_X, fitted_pipelines
@@ -1540,7 +2083,10 @@ def run_outer_cv_loso(
     pipe,
     best_params,
     multi_type="standard",
-    model_type = "any"
+    model_type = "any",
+    fs_method="unknown",
+    cache_dir=None,
+    knn_n_genes=KNN_REJECTION_FEATURE_N_GENES,
 ):
     # Import ast module for parsing string representations
     import ast
@@ -1568,8 +2114,8 @@ def run_outer_cv_loso(
     if not n_genes_list:
         raise ValueError("No valid n_genes values found in best_params")
     
-    # Remove duplicates and sort
-    n_genes_list = sorted(list(set(n_genes_list)))
+    # Remove duplicates and sort. Ensure KNN reference space is available.
+    n_genes_list = sorted(list(set(n_genes_list + [int(knn_n_genes)])))
 
     # Empty list to append results to
     all_results = []
@@ -1597,8 +2143,35 @@ def run_outer_cv_loso(
             X_test,
             study_labels_train,
             y_train,
-            pipe
+            pipe,
+            cache_dir=cache_dir,
+            split_tag=f"outer_loso_{test_study_name}",
+            fs_method=fs_method,
         )
+
+        knn_features = None
+        if int(knn_n_genes) in processed_X:
+            X_train_knn, X_test_knn = processed_X[int(knn_n_genes)]
+            knn_cache_dir = cache_dir or _get_reject_cache_dir()
+            knn_key_payload = json.dumps(
+                {
+                    "mode": "loso",
+                    "outer_fold": str(test_study_name),
+                    "fs_method": str(fs_method),
+                    "n_genes": int(knn_n_genes),
+                    "train_hash": _stable_hash_array(np.where(train_mask)[0]),
+                    "test_hash": _stable_hash_array(test_idx),
+                    "k_values": list(KNN_REJECTION_K_VALUES),
+                },
+                sort_keys=True,
+            ).encode("utf-8")
+            knn_key = hashlib.sha256(knn_key_payload).hexdigest()
+            knn_features = _load_or_compute_knn_features(
+                knn_cache_dir,
+                knn_key,
+                X_train_knn,
+                X_test_knn,
+            )
         
         # Filter best_params to get all rows for current outer fold (test study)
         best_params_fold = best_params[best_params['outer_fold'] == test_study_name]
@@ -1612,7 +2185,8 @@ def run_outer_cv_loso(
             model,
             best_params_fold,
             multi_type=multi_type,  # standard, OvR, OvO
-            model_type = model_type
+            model_type = model_type,
+            knn_features=knn_features,
         )
 
         # Flatten results list if needed and append to all_results
@@ -2081,9 +2655,12 @@ def train_final_model_standard(X, y, study_labels, model, pipe, best_params, mod
     """
     print("Training final standard multiclass model...")
     
-    # Get the best parameters (should be one row for standard classification)
+    # Final deployment is strict: standard multiclass must have exactly one param row.
     if len(best_params) != 1:
-        print(f"Warning: Expected 1 parameter set for standard classification, got {len(best_params)}. Using first one.")
+        raise ValueError(
+            "Expected exactly 1 best-parameter row for standard final training, "
+            f"got {len(best_params)}."
+        )
     
     params = best_params.iloc[0]["params"]
     params = ast.literal_eval(params) if isinstance(params, str) else params
@@ -2187,8 +2764,10 @@ def train_final_model_ovr(X, y, study_labels, model, pipe, best_params, model_ty
         # Find best parameters for this class
         class_params = best_params[best_params["class"] == class_val]
         if len(class_params) == 0:
-            print(f"    Warning: No parameters found for class {class_val}, skipping...")
-            continue
+            raise ValueError(
+                f"Missing best parameters for OvR class '{class_val}'. "
+                "Final deployment requires one trained model per class."
+            )
         
         params = class_params.iloc[0]["params"]
         params = ast.literal_eval(params) if isinstance(params, str) else params

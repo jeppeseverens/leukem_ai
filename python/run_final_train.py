@@ -69,6 +69,21 @@ def main():
     )
 
     args = parser.parse_args()
+
+    # Final deployment is strict: NN uses standard multiclass, SVM/XGBOOST use OvR.
+    required_multi_type = {
+        "NN": "standard",
+        "SVM": "OvR",
+        "XGBOOST": "OvR",
+    }
+    if args.model_type not in required_multi_type:
+        raise ValueError(f"Unsupported model_type '{args.model_type}'.")
+    expected_multi = required_multi_type[args.model_type]
+    if args.multi_type != expected_multi:
+        raise ValueError(
+            f"Invalid multi_type '{args.multi_type}' for {args.model_type}. "
+            f"Expected '{expected_multi}' for final deployment."
+        )
     
     print(f"Training final {args.model_type} model with {args.multi_type} strategy using {args.fold_type} best parameters")
     print(f"Best parameters from: {args.best_params_path}")
@@ -135,9 +150,17 @@ def main():
     ])
     print("Pipeline set up")
 
-    # Load best parameters
+    # Load best parameters (required input; no fallback).
     print(f"Loading best parameters from {args.best_params_path}")
+    if not os.path.exists(args.best_params_path):
+        raise FileNotFoundError(
+            f"Best-parameters file not found: {args.best_params_path}"
+        )
     best_params = pd.read_csv(args.best_params_path)
+    if best_params.empty:
+        raise ValueError(
+            f"Best-parameters file is empty: {args.best_params_path}"
+        )
     print(f"Loaded {len(best_params)} best parameter sets")
 
     # Set up pipeline cache directory

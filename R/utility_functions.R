@@ -110,6 +110,16 @@ parse_numeric_string <- function(input_string, strict = FALSE) {
   numeric_values[!is.na(numeric_values)]
 }
 
+KNN_DISTANCE_COLUMNS <- c(
+  "knn10_mean_d", "knn10_min_d", "knn10_q90_d",
+  "knn20_mean_d", "knn20_min_d", "knn20_q90_d"
+)
+
+REJECT_OPTION_EXTRA_FEATURE_COLUMNS <- c(
+  "trust_ratio_knn10",
+  "conformal_set_size_90"
+)
+
 #' Read CSV files and optionally process for One-vs-One classification
 #' @param file_path Path to the CSV file
 #' @return Data frame with processed data
@@ -685,8 +695,16 @@ align_probability_matrices <- function(prob_matrices, outer_fold_name, inner_fol
     xgb_samples <- xgb_matrix$indices
     nn_samples <- nn_matrix$indices
 
-    # Find common samples
-    common_samples <- Reduce(intersect, list(svm_samples, xgb_samples, nn_samples))
+    # Diagnose index consistency before alignment.
+    svm_unique <- unique(svm_samples)
+    xgb_unique <- unique(xgb_samples)
+    nn_unique <- unique(nn_samples)
+    common_samples <- Reduce(intersect, list(svm_unique, xgb_unique, nn_unique))
+    union_samples <- Reduce(union, list(svm_unique, xgb_unique, nn_unique))
+
+    svm_dup_n <- sum(duplicated(svm_samples))
+    xgb_dup_n <- sum(duplicated(xgb_samples))
+    nn_dup_n <- sum(duplicated(nn_samples))
 
     if (length(common_samples) == 0) {
       fold_desc <- if (!is.null(inner_fold_name)) paste(outer_fold_name, inner_fold_name, sep = "_") else outer_fold_name
@@ -709,13 +727,39 @@ align_probability_matrices <- function(prob_matrices, outer_fold_name, inner_fol
     xgb_matrix <- xgb_matrix[order(xgb_matrix$indices), ]
     nn_matrix <- nn_matrix[order(nn_matrix$indices), ]
 
-    # Log if samples were dropped
+    # Log if samples were dropped, and explain whether this is due to
+    # duplicates, set mismatch across models, or both.
     max_orig <- max(n_svm_orig, n_xgb_orig, n_nn_orig)
     n_dropped <- max_orig - length(common_samples)
     if (n_dropped > 0) {
       fold_desc <- if (!is.null(inner_fold_name)) paste(outer_fold_name, inner_fold_name, sep = "_") else outer_fold_name
       cat(sprintf("    Aligned samples for fold %s: dropped %d samples to match across models (SVM: %d, XGB: %d, NN: %d -> common: %d)\n",
                   fold_desc, n_dropped, n_svm_orig, n_xgb_orig, n_nn_orig, length(common_samples)))
+
+      non_common_svm <- setdiff(svm_unique, common_samples)
+      non_common_xgb <- setdiff(xgb_unique, common_samples)
+      non_common_nn <- setdiff(nn_unique, common_samples)
+      cat(sprintf(
+        "      Index diagnostics for fold %s: unique(SVM/XGB/NN)=(%d/%d/%d), duplicates(SVM/XGB/NN)=(%d/%d/%d), non-common unique indices (SVM/XGB/NN)=(%d/%d/%d), union=%d\n",
+        fold_desc,
+        length(svm_unique), length(xgb_unique), length(nn_unique),
+        svm_dup_n, xgb_dup_n, nn_dup_n,
+        length(non_common_svm), length(non_common_xgb), length(non_common_nn),
+        length(union_samples)
+      ))
+
+      if (length(non_common_svm) > 0) {
+        cat(sprintf("      Example SVM-only/non-common indices: %s\n",
+                    paste(head(sort(non_common_svm), 10), collapse = ", ")))
+      }
+      if (length(non_common_xgb) > 0) {
+        cat(sprintf("      Example XGB-only/non-common indices: %s\n",
+                    paste(head(sort(non_common_xgb), 10), collapse = ", ")))
+      }
+      if (length(non_common_nn) > 0) {
+        cat(sprintf("      Example NN-only/non-common indices: %s\n",
+                    paste(head(sort(non_common_nn), 10), collapse = ", ")))
+      }
     }
   } else {
     # If no indices column, check row counts match
@@ -731,13 +775,19 @@ align_probability_matrices <- function(prob_matrices, outer_fold_name, inner_fol
   truth_xgb <- make.names(xgb_matrix$y)
   truth_nn <- make.names(nn_matrix$y)
 
-  # Store non_prob columns
-  non_prob_cols <- svm_matrix[, colnames(svm_matrix) %in% c("y", "inner_fold", "outer_fold", "indices", "study"), drop = FALSE]
+  # Sample-level metadata columns we want to preserve through alignment.
+  # is_leftout is included so left-out-aware pipelines can distinguish
+  # known vs left-out rows after alignment.
+  # Keep all sample-level metadata out of probability columns.
+  # `sample_indices` is critical in left-out-aware paths and must never be
+  # interpreted as a class probability feature.
+  meta_col_names <- c("y", "inner_fold", "outer_fold", "indices", "sample_indices", "study", "is_leftout")
 
-  # Remove non-probability columns from matrices
-  svm_matrix <- svm_matrix[, !colnames(svm_matrix) %in% c("y", "inner_fold", "outer_fold", "indices", "study"), drop = FALSE]
-  xgb_matrix <- xgb_matrix[, !colnames(xgb_matrix) %in% c("y", "inner_fold", "outer_fold", "indices", "study"), drop = FALSE]
-  nn_matrix <- nn_matrix[, !colnames(nn_matrix) %in% c("y", "inner_fold", "outer_fold", "indices", "study"), drop = FALSE]
+  non_prob_cols <- svm_matrix[, colnames(svm_matrix) %in% meta_col_names, drop = FALSE]
+
+  svm_matrix <- svm_matrix[, !colnames(svm_matrix) %in% meta_col_names, drop = FALSE]
+  xgb_matrix <- xgb_matrix[, !colnames(xgb_matrix) %in% meta_col_names, drop = FALSE]
+  nn_matrix <- nn_matrix[, !colnames(nn_matrix) %in% meta_col_names, drop = FALSE]
 
   # Get all unique class names across all models
   all_classes <- unique(c(
@@ -915,6 +965,42 @@ evaluate_single_cutoff <- function(cutoff, max_probs, truth, preds, model_name, 
   )
 }
 
+#' Compute correctness for rejection analysis with collapsed-classifier exceptions.
+#' For left-out samples in collapsed-classifier runs, a prediction of "other.KMT2A"
+#' is treated as correct when the true fusion is KMT2A but not MLLT3.
+#' @param prob_matrix Probability matrix with metadata columns.
+#' @param truth Character vector of true labels (cleaned).
+#' @param preds Character vector of predicted labels (cleaned).
+#' @param prob_cols Character vector of probability column names used for prediction.
+#' @return Integer vector (0/1) indicating correctness.
+compute_rejection_correctness <- function(prob_matrix, truth, preds, prob_cols) {
+  correct <- as.integer(truth == preds)
+
+  # Collapsed runs expose merged class columns. Use this to scope the override so
+  # unmerged analyses are not affected.
+  is_collapsed_classifier <- "MDS.r" %in% prob_cols && "other.KMT2A" %in% prob_cols
+  if (!is_collapsed_classifier || !"is_leftout" %in% colnames(prob_matrix)) {
+    return(correct)
+  }
+
+  is_leftout <- as.logical(prob_matrix$is_leftout)
+  if (length(is_leftout) != length(correct)) {
+    is_leftout <- rep(FALSE, length(correct))
+  }
+
+  pred_norm <- gsub("[^a-z0-9]", "", tolower(preds))
+  truth_norm <- gsub("[^a-z0-9]", "", tolower(truth))
+
+  # Special case: non-MLLT3 KMT2A left-out samples predicted as Other KMT2A.
+  special_correct <- is_leftout &
+    grepl("kmt2a", truth_norm) &
+    !grepl("mllt3", truth_norm) &
+    pred_norm == "otherkmt2a"
+
+  correct[special_correct] <- 1L
+  correct
+}
+
 #' Vectorized cutoff analysis - much faster than per-cutoff evaluation
 #' Uses sorted probabilities and cumulative calculations
 #' @param prob_matrix Probability matrix with class probabilities and true labels
@@ -926,9 +1012,13 @@ evaluate_single_cutoff <- function(cutoff, max_probs, truth, preds, model_name, 
 evaluate_single_matrix_with_rejection_vectorized <- function(prob_matrix, fold_name, model_name, type, cutoff_step = 0.01) {
   # Non-probability columns to exclude (sample_indices would otherwise be used as "prob" and break rejection)
   meta_cols <- c("y", "inner_fold", "outer_fold", "indices", "study", "sample_indices",
-                 "confidence_calibrated", "confidence_multivariate",
-                 "is_leftout", "n_models_agree", "mean_js_convergence",
-                 "top1_prob_variance_across_models")
+                 "confidence_multivariate",
+                 "confidence_id", "confidence_correct", "confidence_two_head",
+                 "confidence_seen_new_cohort", "confidence_unseen", "confidence_three_head",
+                 "confidence_two_head_postcal",
+                 "confidence_two_head_min_gate", "confidence_two_head_id_veto",
+                 "is_leftout", "n_models_agree",
+                 "top1_prob_variance_across_models", KNN_DISTANCE_COLUMNS, REJECT_OPTION_EXTRA_FEATURE_COLUMNS)
   prob_matrix_clean <- prob_matrix[, !colnames(prob_matrix) %in% meta_cols, drop = FALSE]
 
   # Extract true labels
@@ -943,9 +1033,9 @@ evaluate_single_matrix_with_rejection_vectorized <- function(prob_matrix, fold_n
   preds <- colnames(prob_matrix_clean)[pred_indices]
   preds <- gsub("Class. ", "", preds)
 
-  # Use Platt-calibrated confidence if present, else max probability
-  if ("confidence_calibrated" %in% colnames(prob_matrix)) {
-    confidence_vals <- prob_matrix$confidence_calibrated
+  # Use multivariate confidence when present, else max predicted class probability
+  if ("confidence_multivariate" %in% colnames(prob_matrix)) {
+    confidence_vals <- prob_matrix$confidence_multivariate
   } else {
     confidence_vals <- prob_mat[cbind(seq_len(nrow(prob_mat)), pred_indices)]
   }
@@ -955,8 +1045,13 @@ evaluate_single_matrix_with_rejection_vectorized <- function(prob_matrix, fold_n
   truth <- factor(truth, levels = all_classes)
   preds <- factor(preds, levels = all_classes)
 
-  # Pre-compute correctness
-  correct <- as.integer(truth == preds)
+  # Pre-compute correctness (includes collapsed left-out KMT2A override).
+  correct <- compute_rejection_correctness(
+    prob_matrix = prob_matrix,
+    truth = as.character(truth),
+    preds = as.character(preds),
+    prob_cols = colnames(prob_matrix_clean)
+  )
   total_samples <- length(truth)
 
   # Sort by confidence for efficient cumulative processing
@@ -1580,7 +1675,7 @@ perform_ovr_ensemble_analysis_unified <- function(results, weights, type = "cv",
 }
 
 # =============================================================================
-# Platt scaling for rejection confidence (out-of-sample per inner fold)
+# Nested fold pooling helpers (legacy single-head Platt was removed; no confidence_calibrated column)
 # =============================================================================
 
 #' Extract max probability and correctness per row from a probability matrix
@@ -1588,48 +1683,31 @@ perform_ovr_ensemble_analysis_unified <- function(results, weights, type = "cv",
 #' @return List with max_prob numeric vector and correct integer vector (0/1)
 get_max_prob_and_correct_from_matrix <- function(prob_matrix) {
   meta_cols <- c("y", "inner_fold", "outer_fold", "indices", "study", "sample_indices",
-                 "confidence_calibrated", "confidence_multivariate",
-                 "is_leftout", "n_models_agree", "mean_js_convergence",
-                 "top1_prob_variance_across_models")
+                 "confidence_multivariate",
+                 "confidence_id", "confidence_correct", "confidence_two_head",
+                 "confidence_seen_new_cohort", "confidence_unseen", "confidence_three_head",
+                 "confidence_two_head_postcal",
+                 "confidence_two_head_min_gate", "confidence_two_head_id_veto",
+                 "is_leftout", "n_models_agree",
+                 "top1_prob_variance_across_models", KNN_DISTANCE_COLUMNS, REJECT_OPTION_EXTRA_FEATURE_COLUMNS)
   prob_cols <- colnames(prob_matrix)[!colnames(prob_matrix) %in% meta_cols]
   prob_mat <- as.matrix(prob_matrix[, prob_cols, drop = FALSE])
   pred_indices <- max.col(prob_mat, ties.method = "first")
   max_prob <- prob_mat[cbind(seq_len(nrow(prob_mat)), pred_indices)]
   truth <- gsub("Class\\. ", "", prob_matrix$y)
   preds <- gsub("Class\\. ", "", prob_cols[pred_indices])
-  correct <- as.integer(truth == preds)
+  correct <- compute_rejection_correctness(
+    prob_matrix = prob_matrix,
+    truth = as.character(truth),
+    preds = as.character(preds),
+    prob_cols = prob_cols
+  )
   list(max_prob = max_prob, correct = correct)
 }
 
-#' Fit Platt (logistic) calibration on pooled (max_prob, correct) and apply to target
-#' @param pool_matrices List of probability matrices to pool for fitting
-#' @param target_matrix Single matrix to calibrate (apply fitted Platt to)
-#' @return Target matrix with confidence_calibrated column added, or target unchanged on failure
-apply_platt_to_target_from_pool <- function(pool_matrices, target_matrix) {
-  # Pool max_prob and correct from all matrices in pool_matrices
-  pool_max <- numeric(0)
-  pool_correct <- integer(0)
-  for (m in pool_matrices) {
-    if (is.null(m) || nrow(m) == 0) next
-    out <- get_max_prob_and_correct_from_matrix(m)
-    pool_max <- c(pool_max, out$max_prob)
-    pool_correct <- c(pool_correct, out$correct)
-  }
-  if (length(pool_max) < 10L || length(unique(pool_correct)) < 2L) {
-    return(target_matrix)
-  }
-  fit <- tryCatch(
-    stats::glm(pool_correct ~ pool_max, family = stats::binomial),
-    error = function(e) NULL
-  )
-  if (is.null(fit)) return(target_matrix)
-  out_target <- get_max_prob_and_correct_from_matrix(target_matrix)
-  calibrated <- tryCatch(
-    as.numeric(stats::predict(fit, newdata = data.frame(pool_max = out_target$max_prob), type = "response")),
-    error = function(e) NULL
-  )
-  if (is.null(calibrated)) return(target_matrix)
-  target_matrix$confidence_calibrated <- calibrated
+#' Legacy hook: nested single-head Platt previously wrote `confidence_calibrated` (removed).
+#' @return target_matrix unchanged
+apply_platt_to_target_from_pool <- function(pool_matrices, target_matrix, use_logit = FALSE, eps = 1e-6) {
   target_matrix
 }
 
@@ -1640,9 +1718,13 @@ apply_platt_to_target_from_pool <- function(pool_matrices, target_matrix) {
 #' @return Data frame with one row per sample: max_prob, margin, entropy, top1_prob_variance_across_models, pred_class, correct
 get_rejection_features_from_matrix <- function(prob_matrix) {
   meta_cols <- c("y", "inner_fold", "outer_fold", "indices", "study",
-                 "sample_indices", "confidence_calibrated", "confidence_multivariate",
-                 "is_leftout", "n_models_agree", "mean_js_convergence",
-                 "top1_prob_variance_across_models")
+                 "sample_indices", "confidence_multivariate",
+                 "confidence_id", "confidence_correct", "confidence_two_head",
+                 "confidence_seen_new_cohort", "confidence_unseen", "confidence_three_head",
+                 "confidence_two_head_postcal",
+                 "confidence_two_head_min_gate", "confidence_two_head_id_veto",
+                 "is_leftout", "n_models_agree",
+                 "top1_prob_variance_across_models", KNN_DISTANCE_COLUMNS, REJECT_OPTION_EXTRA_FEATURE_COLUMNS)
   prob_cols <- colnames(prob_matrix)[!colnames(prob_matrix) %in% meta_cols]
   prob_mat <- as.matrix(prob_matrix[, prob_cols, drop = FALSE])
   n <- nrow(prob_mat)
@@ -1678,27 +1760,57 @@ get_rejection_features_from_matrix <- function(prob_matrix) {
 
   # Correctness
   truth <- gsub("Class\\. ", "", prob_matrix$y)
-  correct <- as.integer(truth == pred_class)
+  correct <- compute_rejection_correctness(
+    prob_matrix = prob_matrix,
+    truth = as.character(truth),
+    preds = as.character(pred_class),
+    prob_cols = prob_cols
+  )
 
   data.frame(
     max_prob = max_prob,
     margin = margin,
     entropy = entropy,
     top1_prob_variance_across_models = top1_prob_variance_across_models,
+    trust_ratio_knn10 = if ("trust_ratio_knn10" %in% colnames(prob_matrix)) as.numeric(prob_matrix$trust_ratio_knn10) else NA_real_,
+    conformal_set_size_90 = if ("conformal_set_size_90" %in% colnames(prob_matrix)) as.numeric(prob_matrix$conformal_set_size_90) else NA_real_,
+    knn10_mean_d = if ("knn10_mean_d" %in% colnames(prob_matrix)) as.numeric(prob_matrix$knn10_mean_d) else NA_real_,
+    knn10_min_d = if ("knn10_min_d" %in% colnames(prob_matrix)) as.numeric(prob_matrix$knn10_min_d) else NA_real_,
+    knn10_q90_d = if ("knn10_q90_d" %in% colnames(prob_matrix)) as.numeric(prob_matrix$knn10_q90_d) else NA_real_,
+    knn20_mean_d = if ("knn20_mean_d" %in% colnames(prob_matrix)) as.numeric(prob_matrix$knn20_mean_d) else NA_real_,
+    knn20_min_d = if ("knn20_min_d" %in% colnames(prob_matrix)) as.numeric(prob_matrix$knn20_min_d) else NA_real_,
+    knn20_q90_d = if ("knn20_q90_d" %in% colnames(prob_matrix)) as.numeric(prob_matrix$knn20_q90_d) else NA_real_,
     pred_class = pred_class,
     correct = correct,
     stringsAsFactors = FALSE
   )
 }
 
+# Deep-copy fold data.frames. Multivariate / two-head calibrators assign
+# confidence_* columns in place; without copying, successive regimes that share
+# the same underlying list (e.g. outer CV augmented folds) alias and overwrite
+# each other's outputs.
+copy_fold_matrix_list <- function(fold_list) {
+  if (!is.list(fold_list)) return(fold_list)
+  nms <- names(fold_list)
+  out <- lapply(fold_list, function(m) {
+    if (inherits(m, "data.frame")) as.data.frame(m) else m
+  })
+  names(out) <- nms
+  out
+}
+
 
 #' Fit multivariate Platt calibration on pool and apply to target (ensemble only).
 #' Uses max_prob + margin + entropy + n_models_agree + top1_prob_variance_across_models as features.
-#' Falls back to univariate if multivariate fit fails.
+#' Strict mode: all required predictors must be present and finite.
 #' @param pool_matrices List of probability matrices to pool for fitting
 #' @param target_matrix Single matrix to calibrate
 #' @return Target matrix with confidence_multivariate column added
-apply_multivariate_platt_to_target_from_pool <- function(pool_matrices, target_matrix) {
+apply_multivariate_platt_to_target_from_pool <- function(pool_matrices, target_matrix,
+                                                          use_logit_max_prob = FALSE,
+                                                          knn_k = NULL,
+                                                          eps = 1e-6) {
   # Pool features from all pool matrices
   pool_features <- list()
   for (m in pool_matrices) {
@@ -1711,62 +1823,419 @@ apply_multivariate_platt_to_target_from_pool <- function(pool_matrices, target_m
     pool_features[[length(pool_features) + 1]] <- feats
   }
 
-  if (length(pool_features) == 0) return(target_matrix)
+  if (length(pool_features) == 0) {
+    stop("Multivariate calibration failed: empty pooled feature set.")
+  }
   pool_df <- do.call(rbind, pool_features)
 
   if (nrow(pool_df) < 10L || length(unique(pool_df$correct)) < 2L) {
-    return(target_matrix)
+    stop("Multivariate calibration failed: pooled data has <10 rows or no class variation in correctness.")
   }
 
-  # Build formula from whichever engineered features are available and finite.
-  candidate_terms <- c("max_prob", "margin", "entropy", "n_models_agree", "top1_prob_variance_across_models")
-  usable_terms <- candidate_terms[sapply(candidate_terms, function(v) {
-    v %in% colnames(pool_df) && any(is.finite(pool_df[[v]]))
-  })]
-  formula <- stats::as.formula(paste("correct ~", paste(usable_terms, collapse = " + ")))
-
-  fit <- tryCatch(
-    stats::glm(formula, data = pool_df, family = stats::binomial),
-    error = function(e) NULL
-  )
-
-  # Fallback to simpler model if multivariate fails
-  if (is.null(fit)) {
-    fit <- tryCatch(
-      stats::glm(correct ~ max_prob, data = pool_df, family = stats::binomial),
-      error = function(e) NULL
+  if (use_logit_max_prob) {
+    pool_df$logit_max_prob <- qlogis(pmin(1 - eps, pmax(eps, pool_df$max_prob)))
+  }
+  required_terms <- c("max_prob", "margin", "entropy", "n_models_agree", "top1_prob_variance_across_models")
+  if (!is.null(knn_k)) {
+    required_terms <- c(
+      required_terms,
+      sprintf("knn%d_mean_d", knn_k),
+      sprintf("knn%d_min_d", knn_k),
+      sprintf("knn%d_q90_d", knn_k)
     )
   }
-  if (is.null(fit)) return(target_matrix)
+  if (use_logit_max_prob) {
+    required_terms[required_terms == "max_prob"] <- "logit_max_prob"
+  }
+  missing_terms <- required_terms[!required_terms %in% colnames(pool_df)]
+  if (length(missing_terms) > 0) {
+    stop(sprintf("Multivariate calibration failed: missing pooled predictors: %s", paste(missing_terms, collapse = ", ")))
+  }
+  nonfinite_terms <- required_terms[!sapply(required_terms, function(v) all(is.finite(pool_df[[v]])))]
+  if (length(nonfinite_terms) > 0) {
+    stop(sprintf("Multivariate calibration failed: non-finite pooled predictor values in: %s", paste(nonfinite_terms, collapse = ", ")))
+  }
+  formula <- stats::as.formula(paste("correct ~", paste(required_terms, collapse = " + ")))
 
-  # Extract features for target
+  fit <- tryCatch({
+    stats::glm(formula, data = pool_df, family = stats::binomial)
+  }, error = function(e) {
+    stop(sprintf("Multivariate calibration failed during GLM fit: %s", conditionMessage(e)))
+  })
+
+  # Extract and validate target features.
   target_feats <- get_rejection_features_from_matrix(target_matrix)
+  if ("n_models_agree" %in% colnames(target_matrix)) {
+    target_feats$n_models_agree <- target_matrix$n_models_agree
+  }
+  if (use_logit_max_prob) {
+    target_feats$logit_max_prob <- qlogis(pmin(1 - eps, pmax(eps, target_feats$max_prob)))
+  }
+  target_missing <- required_terms[!required_terms %in% colnames(target_feats)]
+  if (length(target_missing) > 0) {
+    stop(sprintf("Multivariate calibration failed: missing target predictors: %s", paste(target_missing, collapse = ", ")))
+  }
+  target_nonfinite <- required_terms[!sapply(required_terms, function(v) all(is.finite(target_feats[[v]])))]
+  if (length(target_nonfinite) > 0) {
+    stop(sprintf("Multivariate calibration failed: non-finite target predictor values in: %s", paste(target_nonfinite, collapse = ", ")))
+  }
 
-  calibrated <- tryCatch(
-    as.numeric(stats::predict(fit, newdata = target_feats, type = "response")),
-    error = function(e) NULL
-  )
-  if (is.null(calibrated)) return(target_matrix)
+  calibrated <- tryCatch({
+    as.numeric(stats::predict(fit, newdata = target_feats, type = "response"))
+  }, error = function(e) {
+    stop(sprintf("Multivariate calibration failed during prediction: %s", conditionMessage(e)))
+  })
 
   target_matrix$confidence_multivariate <- calibrated
   target_matrix
 }
 
 
-#' Add Platt-calibrated confidence to each inner-fold matrix using other folds as pool
-#' @param inner_fold_matrices Named list of probability matrices (one per inner fold)
-#' @return List of matrices with confidence_calibrated column added where possible
-apply_platt_to_inner_fold_matrices <- function(inner_fold_matrices) {
-  n_folds <- length(inner_fold_matrices)
-  if (n_folds < 2L) return(inner_fold_matrices)
-  fold_names <- names(inner_fold_matrices)
+#' Fit a two-head calibrator (OOD head + correctness head) on a leave-one-fold-out
+#' pool and apply it to the target matrix.
+#'
+#' Two complementary logistic models are fit on the pooled rows:
+#'   * correctness head — P(correct | features), fit on in-distribution rows only
+#'     (is_leftout == FALSE). This is the same quantity as the existing
+#'     multivariate Platt calibrator.
+#'   * OOD head — P(is_id | features), fit on the full pool (known + leftout),
+#'     optionally with inverse-class-frequency weights to counter the leftout
+#'     minority. Captures "does this sample look in-distribution at all?"
+#'
+#' The target matrix gains three columns:
+#'   * confidence_id         — P(is_id)
+#'   * confidence_correct    — P(correct | ID)
+#'   * confidence_two_head   — product (default scalar accept score)
+#' When `confidence_col` differs from `confidence_two_head`, that slot is set to the same product
+#' (e.g. multivariate bundles overwrite `confidence_multivariate`).
+#'
+#' @param pool_matrices List of probability matrices (must carry is_leftout)
+#' @param target_matrix Single matrix to calibrate
+#' @param use_multivariate If TRUE (default), both heads are fit with the full
+#'   feature set (max_prob, margin, entropy, n_models_agree,
+#'   top1_prob_variance). If FALSE, univariate with max_prob only — mirrors the
+#'   simple Platt path for symmetry.
+#' @param class_balanced_ood If TRUE (default), the OOD head is fit with inverse
+#'   class-frequency weights to counter left-out scarcity.
+#' @param confidence_col Which slot to overwrite with the scalar score (typically
+#'   "confidence_multivariate"). Use "confidence_two_head" only when it must alias the product.
+#' @return Target matrix with new columns.
+apply_two_head_calibration_to_target_from_pool <- function(pool_matrices, target_matrix,
+                                                             use_multivariate = TRUE,
+                                                             knn_k = NULL,
+                                                             class_balanced_ood = TRUE,
+                                                             confidence_col = "confidence_multivariate") {
+  # 1. Build pooled feature frame with both labels (correct and is_id).
+  pool_features <- list()
+  for (m in pool_matrices) {
+    if (is.null(m) || nrow(m) == 0) next
+    feats <- get_rejection_features_from_matrix(m)
+    if ("n_models_agree" %in% colnames(m)) feats$n_models_agree <- m$n_models_agree
+    feats$is_id <- if ("is_leftout" %in% colnames(m)) {
+      as.integer(!as.logical(m$is_leftout))
+    } else {
+      rep(1L, nrow(m))
+    }
+    pool_features[[length(pool_features) + 1]] <- feats
+  }
+  if (length(pool_features) == 0) {
+    stop("Two-head calibration failed: empty pooled feature set.")
+  }
+  pool_df <- do.call(rbind, pool_features)
+
+  # 2. Pick feature set and validate strictly.
+  required_terms <- if (use_multivariate) {
+    c("max_prob", "margin", "entropy", "n_models_agree", "top1_prob_variance_across_models")
+  } else {
+    c("max_prob")
+  }
+  if (!is.null(knn_k)) {
+    required_terms <- c(
+      required_terms,
+      sprintf("knn%d_mean_d", knn_k),
+      sprintf("knn%d_min_d", knn_k),
+      sprintf("knn%d_q90_d", knn_k)
+    )
+  }
+  missing_terms <- required_terms[!required_terms %in% colnames(pool_df)]
+  if (length(missing_terms) > 0) {
+    stop(sprintf("Two-head calibration failed: missing pooled predictors: %s", paste(missing_terms, collapse = ", ")))
+  }
+  nonfinite_terms <- required_terms[!sapply(required_terms, function(v) all(is.finite(pool_df[[v]])))]
+  if (length(nonfinite_terms) > 0) {
+    stop(sprintf("Two-head calibration failed: non-finite pooled predictor values in: %s", paste(nonfinite_terms, collapse = ", ")))
+  }
+  rhs <- paste(required_terms, collapse = " + ")
+
+  # 3. Correctness head — same target as standard multivariate Platt, fit on
+  #    known-only rows so ID calibration isn't distorted by OOD.
+  correct_pool <- pool_df[pool_df$is_id == 1L, , drop = FALSE]
+  if (nrow(correct_pool) < 10L || length(unique(correct_pool$correct)) < 2L) {
+    stop("Two-head calibration failed: correctness head pool has <10 rows or no class variation.")
+  }
+  fit_correct <- tryCatch({
+    stats::glm(stats::as.formula(paste("correct ~", rhs)),
+               data = correct_pool,
+               family = stats::binomial(),
+               control = stats::glm.control(maxit = 200, epsilon = 1e-8))
+  }, error = function(e) {
+    stop(sprintf("Two-head calibration failed during correctness-head fit: %s", conditionMessage(e)))
+  })
+  if (!isTRUE(fit_correct$converged)) {
+    stop(
+      sprintf(
+        "Two-head calibration failed: correctness-head GLM did not converge (rows=%d, positives=%d, negatives=%d).",
+        nrow(correct_pool),
+        sum(correct_pool$correct == 1, na.rm = TRUE),
+        sum(correct_pool$correct == 0, na.rm = TRUE)
+      )
+    )
+  }
+
+  # 4. OOD head — fit on full pool; needs both classes present.
+  if (length(unique(pool_df$is_id)) < 2L) {
+    stop("Two-head calibration failed: OOD head pool has no ID/OOD class variation.")
+  }
+  weights_vec <- NULL
+  if (class_balanced_ood) {
+    # Inverse class-frequency weights, rescaled so the total equals n. Each
+    # class then contributes equal total weight to the loss regardless of
+    # sample count.
+    freq <- table(pool_df$is_id)
+    per_row <- 1 / as.numeric(freq[as.character(pool_df$is_id)])
+    weights_vec <- per_row * nrow(pool_df) / sum(per_row)
+  }
+  # Fractional weights are not valid "trial counts" for family=binomial (R warns:
+  # non-integer successes). quasibinomial() fits the same mean / coefficients.
+  ood_family <- if (is.null(weights_vec)) stats::binomial() else stats::quasibinomial()
+  fit_ood <- tryCatch(
+    if (is.null(weights_vec)) {
+      stats::glm(stats::as.formula(paste("is_id ~", rhs)),
+                 data = pool_df,
+                 family = ood_family,
+                 control = stats::glm.control(maxit = 200, epsilon = 1e-8))
+    } else {
+      stats::glm(stats::as.formula(paste("is_id ~", rhs)),
+                 data = pool_df,
+                 family = ood_family,
+                 weights = weights_vec,
+                 control = stats::glm.control(maxit = 200, epsilon = 1e-8))
+    },
+    error = function(e) stop(sprintf("Two-head calibration failed during OOD-head fit: %s", conditionMessage(e)))
+  )
+  if (!isTRUE(fit_ood$converged)) {
+    stop(
+      sprintf(
+        "Two-head calibration failed: OOD-head GLM did not converge (rows=%d, ID=%d, OOD=%d).",
+        nrow(pool_df),
+        sum(pool_df$is_id == 1, na.rm = TRUE),
+        sum(pool_df$is_id == 0, na.rm = TRUE)
+      )
+    )
+  }
+
+  # 5. Score target.
+  target_feats <- get_rejection_features_from_matrix(target_matrix)
+  if ("n_models_agree" %in% colnames(target_matrix)) {
+    target_feats$n_models_agree <- target_matrix$n_models_agree
+  }
+  target_missing <- required_terms[!required_terms %in% colnames(target_feats)]
+  if (length(target_missing) > 0) {
+    stop(sprintf("Two-head calibration failed: missing target predictors: %s", paste(target_missing, collapse = ", ")))
+  }
+  target_nonfinite <- required_terms[!sapply(required_terms, function(v) all(is.finite(target_feats[[v]])))]
+  if (length(target_nonfinite) > 0) {
+    stop(sprintf("Two-head calibration failed: non-finite target predictor values in: %s", paste(target_nonfinite, collapse = ", ")))
+  }
+  p_correct <- tryCatch({
+    as.numeric(stats::predict(fit_correct, newdata = target_feats, type = "response"))
+  }, error = function(e) {
+    stop(sprintf("Two-head calibration failed during correctness-head prediction: %s", conditionMessage(e)))
+  })
+  p_id <- tryCatch({
+    as.numeric(stats::predict(fit_ood, newdata = target_feats, type = "response"))
+  }, error = function(e) {
+    stop(sprintf("Two-head calibration failed during OOD-head prediction: %s", conditionMessage(e)))
+  })
+
+  target_matrix$confidence_correct <- p_correct
+  target_matrix$confidence_id <- p_id
+  target_matrix$confidence_two_head <- p_correct * p_id
+  if (confidence_col != "confidence_two_head") {
+    target_matrix[[confidence_col]] <- target_matrix$confidence_two_head
+  }
+  target_matrix
+}
+
+
+#' Fit a three-head calibrator on pooled folds and apply to target.
+#'
+#' Heads:
+#' - correctness: P(correct)
+#' - seen_new_cohort proxy: P(known-but-uncertain) on ID rows (proxy target: incorrect among ID)
+#' - unseen: P(unseen class / OOD) using is_leftout as supervision
+#'
+#' The default scalar score written to `confidence_col` is:
+#'   confidence_three_head = p_correct * (1 - p_unseen)
+apply_three_head_calibration_to_target_from_pool <- function(pool_matrices, target_matrix,
+                                                             use_multivariate = TRUE,
+                                                             knn_k = NULL,
+                                                             confidence_col = "confidence_multivariate") {
+  pool_features <- list()
+  for (m in pool_matrices) {
+    if (is.null(m) || nrow(m) == 0) next
+    feats <- get_rejection_features_from_matrix(m)
+    if ("n_models_agree" %in% colnames(m)) feats$n_models_agree <- m$n_models_agree
+    feats$is_id <- if ("is_leftout" %in% colnames(m)) {
+      as.integer(!as.logical(m$is_leftout))
+    } else {
+      rep(1L, nrow(m))
+    }
+    feats$seen_new_proxy <- as.integer(feats$is_id == 1L & feats$correct == 0L)
+    feats$unseen_target <- as.integer(feats$is_id == 0L)
+    pool_features[[length(pool_features) + 1]] <- feats
+  }
+  if (length(pool_features) == 0) {
+    stop("Three-head calibration failed: empty pooled feature set.")
+  }
+  pool_df <- do.call(rbind, pool_features)
+
+  required_terms <- if (use_multivariate) {
+    c("max_prob", "margin", "entropy", "n_models_agree", "top1_prob_variance_across_models")
+  } else {
+    c("max_prob")
+  }
+  if (!is.null(knn_k)) {
+    required_terms <- c(
+      required_terms,
+      sprintf("knn%d_mean_d", knn_k),
+      sprintf("knn%d_min_d", knn_k),
+      sprintf("knn%d_q90_d", knn_k)
+    )
+  }
+  rhs <- paste(required_terms, collapse = " + ")
+
+  correct_pool <- pool_df[pool_df$is_id == 1L, , drop = FALSE]
+  if (nrow(correct_pool) < 10L || length(unique(correct_pool$correct)) < 2L) {
+    stop("Three-head calibration failed: correctness head pool insufficient.")
+  }
+  fit_correct <- stats::glm(stats::as.formula(paste("correct ~", rhs)),
+                            data = correct_pool,
+                            family = stats::binomial(),
+                            control = stats::glm.control(maxit = 200, epsilon = 1e-8))
+
+  # Proxy head for known-but-shifted/uncertain behavior.
+  if (nrow(correct_pool) < 10L || length(unique(correct_pool$seen_new_proxy)) < 2L) {
+    # Fall back to a weak constant head when separation is impossible.
+    fit_seen <- NULL
+    seen_const <- mean(correct_pool$seen_new_proxy, na.rm = TRUE)
+  } else {
+    fit_seen <- stats::glm(stats::as.formula(paste("seen_new_proxy ~", rhs)),
+                           data = correct_pool,
+                           family = stats::binomial(),
+                           control = stats::glm.control(maxit = 200, epsilon = 1e-8))
+    seen_const <- NULL
+  }
+
+  if (length(unique(pool_df$unseen_target)) < 2L) {
+    stop("Three-head calibration failed: unseen head has no class variation.")
+  }
+  fit_unseen <- stats::glm(stats::as.formula(paste("unseen_target ~", rhs)),
+                           data = pool_df,
+                           family = stats::binomial(),
+                           control = stats::glm.control(maxit = 200, epsilon = 1e-8))
+
+  target_feats <- get_rejection_features_from_matrix(target_matrix)
+  if ("n_models_agree" %in% colnames(target_matrix)) {
+    target_feats$n_models_agree <- target_matrix$n_models_agree
+  }
+
+  p_correct <- as.numeric(stats::predict(fit_correct, newdata = target_feats, type = "response"))
+  p_unseen <- as.numeric(stats::predict(fit_unseen, newdata = target_feats, type = "response"))
+  p_seen <- if (is.null(fit_seen)) {
+    rep(seen_const, nrow(target_feats))
+  } else {
+    as.numeric(stats::predict(fit_seen, newdata = target_feats, type = "response"))
+  }
+
+  clamp01 <- function(x) pmax(0, pmin(1, as.numeric(x)))
+  p_correct <- clamp01(p_correct)
+  p_unseen <- clamp01(p_unseen)
+  p_seen <- clamp01(p_seen)
+
+  target_matrix$confidence_correct <- p_correct
+  target_matrix$confidence_seen_new_cohort <- p_seen
+  target_matrix$confidence_unseen <- p_unseen
+  target_matrix$confidence_three_head <- p_correct * (1 - p_unseen)
+  if (confidence_col != "confidence_three_head") {
+    target_matrix[[confidence_col]] <- target_matrix$confidence_three_head
+  }
+  target_matrix
+}
+
+
+#' Leave-one-outer-fold-out Platt / two-head calibration on augmented (known + left-out) matrices.
+#' For each held-out fold, fits only on other folds (and for `known_only`, only non-left-out rows
+#' in those folds). Matches outer CV `with_leftout` / `with_leftout_ood_aware` / `with_leftout_two_head`
+#' univariate paths.
+#' @param calibration_mode known_only | ood_aware | two_head
+apply_platt_to_augmented_fold_matrices <- function(fold_matrices,
+                                                    calibration_mode = c("known_only", "known_only_logit",
+                                                                         "ood_aware", "ood_aware_logit",
+                                                                         "two_head", "three_head")) {
+  calibration_mode <- match.arg(calibration_mode)
+  if (!is.list(fold_matrices) || length(fold_matrices) < 2L) return(fold_matrices)
+  fold_matrices <- copy_fold_matrix_list(fold_matrices)
+  fold_names <- names(fold_matrices)
   result <- list()
+
   for (k in seq_along(fold_names)) {
-    target <- inner_fold_matrices[[fold_names[k]]]
-    others <- inner_fold_matrices[setdiff(fold_names, fold_names[k])]
-    result[[fold_names[k]]] <- apply_platt_to_target_from_pool(others, target)
+    target <- fold_matrices[[fold_names[k]]]
+    others <- fold_matrices[setdiff(fold_names, fold_names[k])]
+
+    result[[fold_names[k]]] <- switch(calibration_mode,
+      known_only = {
+        pool <- lapply(others, function(m) {
+          if ("is_leftout" %in% colnames(m)) {
+            m[!as.logical(m$is_leftout), , drop = FALSE]
+          } else {
+            m
+          }
+        })
+        apply_platt_to_target_from_pool(pool, target)
+      },
+      known_only_logit = {
+        pool <- lapply(others, function(m) {
+          if ("is_leftout" %in% colnames(m)) {
+            m[!as.logical(m$is_leftout), , drop = FALSE]
+          } else {
+            m
+          }
+        })
+        apply_platt_to_target_from_pool(pool, target, use_logit = TRUE)
+      },
+      ood_aware = apply_platt_to_target_from_pool(others, target),
+      ood_aware_logit = apply_platt_to_target_from_pool(others, target, use_logit = TRUE),
+      two_head = apply_two_head_calibration_to_target_from_pool(
+        others, target,
+        use_multivariate = FALSE,
+        confidence_col = "confidence_two_head"
+      ),
+      three_head = apply_three_head_calibration_to_target_from_pool(
+        others, target,
+        use_multivariate = FALSE,
+        confidence_col = "confidence_three_head"
+      )
+    )
   }
   result
+}
+
+
+#' Inner-fold list helper (legacy nested Platt no longer writes columns).
+#' @return Same list, unchanged
+apply_platt_to_inner_fold_matrices <- function(inner_fold_matrices) {
+  inner_fold_matrices
 }
 
 #' Resample rows (with replacement) of each matrix in nested probability/ensemble structure.
@@ -1809,7 +2278,7 @@ resample_rejection_matrices <- function(probability_matrices, ensemble_matrices,
   list(probability_matrices = out_prob, ensemble_matrices = out_ens)
 }
 
-#' Add confidence_calibrated to all probability and ensemble matrices (in place) when has_inner_folds
+#' Legacy no-op batch hook (nested single-head Platt removed).
 apply_platt_to_all_rejection_matrices <- function(probability_matrices, ensemble_matrices, type, has_inner_folds) {
   if (!has_inner_folds) return(invisible(NULL))
   # Individual models: probability_matrices[[model]][[type]][[outer_fold]] = list(inner_fold -> matrix)
@@ -2004,7 +2473,7 @@ evaluate_all_matrices_with_rejection_unified <- function(probability_matrices, e
 ##' @param non_prob_cols Vector of column names that are not probability columns (e.g., "y", "outer_fold", etc.).
 ##' @param merge_prob_method "max" = max probability per row among merged classes; "sum" = sum probabilities (then renormalized).
 ##' @return Modified probability matrix with merged classes.
-merge_probability_matrix_classes <- function(prob_matrix, non_prob_cols = c("y", "inner_fold", "outer_fold", "indices", "study", "sample_indices", "confidence_calibrated", "confidence_multivariate", "is_leftout", "n_models_agree", "mean_js_convergence", "top1_prob_variance_across_models"), merge_prob_method = c("max", "sum")) {
+merge_probability_matrix_classes <- function(prob_matrix, non_prob_cols = c("y", "inner_fold", "outer_fold", "indices", "study", "sample_indices", "confidence_multivariate", "confidence_id", "confidence_correct", "confidence_two_head", "confidence_seen_new_cohort", "confidence_unseen", "confidence_three_head", "confidence_two_head_postcal", "confidence_two_head_min_gate", "confidence_two_head_id_veto", "is_leftout", "n_models_agree", "top1_prob_variance_across_models", KNN_DISTANCE_COLUMNS, REJECT_OPTION_EXTRA_FEATURE_COLUMNS), merge_prob_method = c("max", "sum")) {
   merge_prob_method <- match.arg(merge_prob_method)
   method_label <- if (merge_prob_method == "max") "max prob" else "summed"
   # Get all column names
@@ -2120,7 +2589,7 @@ merge_true_labels <- function(true_labels) {
 #' @param non_prob_cols Vector of column names that are not probability columns
 #' @param merge_prob_method "max" or "sum" for merging probabilities (see merge_probability_matrix_classes).
 #' @return Modified probability matrix with merged classes and updated true labels
-merge_classes_in_matrix <- function(prob_matrix, non_prob_cols = c("y", "inner_fold", "outer_fold", "indices", "study", "sample_indices", "confidence_calibrated", "confidence_multivariate", "is_leftout", "n_models_agree", "mean_js_convergence", "top1_prob_variance_across_models"), merge_prob_method = c("max", "sum")) {
+merge_classes_in_matrix <- function(prob_matrix, non_prob_cols = c("y", "inner_fold", "outer_fold", "indices", "study", "sample_indices", "confidence_multivariate", "confidence_id", "confidence_correct", "confidence_two_head", "confidence_seen_new_cohort", "confidence_unseen", "confidence_three_head", "confidence_two_head_postcal", "confidence_two_head_min_gate", "confidence_two_head_id_veto", "is_leftout", "n_models_agree", "top1_prob_variance_across_models", KNN_DISTANCE_COLUMNS, REJECT_OPTION_EXTRA_FEATURE_COLUMNS), merge_prob_method = c("max", "sum")) {
   merge_prob_method <- match.arg(merge_prob_method)
   # Merge probability matrix classes
   merged_matrix <- merge_probability_matrix_classes(prob_matrix, non_prob_cols, merge_prob_method)

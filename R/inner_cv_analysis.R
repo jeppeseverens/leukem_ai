@@ -4,6 +4,22 @@ source("utility_functions.R")
 main_inner_cv <- function(merge_classes = FALSE, merge_prob_method = c("max", "sum")) {
   merge_prob_method <- match.arg(merge_prob_method)
 
+  #' Map filtered-dataset 0-based indices to full-dataset 1-based indices.
+  map_filtered_local_to_global_indices <- function(sample_indices_zero_based, filter_vec) {
+    local_one_based <- sample_indices_zero_based + 1L
+    if (length(local_one_based) == 0) return(integer(0))
+    if (any(local_one_based < 1L | local_one_based > length(filter_vec))) {
+      stop(
+        sprintf(
+          "Found sample_indices outside filtered index range [0, %d]. Example values: %s",
+          length(filter_vec) - 1L,
+          paste(head(sample_indices_zero_based, 15), collapse = ", ")
+        )
+      )
+    }
+    as.integer(filter_vec[local_one_based])
+  }
+
   #' Generate probability data frames for One-vs-Rest classification
   #' @param cv_results_df Cross-validation results data frame
   #' @param best_params_df Best parameters data frame
@@ -84,7 +100,8 @@ main_inner_cv <- function(merge_classes = FALSE, merge_prob_method = c("max", "s
         probability_matrix$inner_fold <- inner_fold_id
         # Add outer fold name
         probability_matrix$outer_fold <- outer_fold_id
-        probability_matrix$indices <- parse_numeric_string(inner_fold_data$sample_indices[1]) + 1
+        local_idx <- parse_numeric_string(inner_fold_data$sample_indices[1])
+        probability_matrix$indices <- map_filtered_local_to_global_indices(local_idx, filter)
         probability_matrix$study <- study_names[probability_matrix$indices]
 
         # Apply class merging if requested (before filtering)
@@ -236,7 +253,7 @@ main_inner_cv <- function(merge_classes = FALSE, merge_prob_method = c("max", "s
         probability_matrix <- data.frame(probability_matrix)
         probability_matrix$inner_fold <- inner_fold_id # this is the left out fold for the inner cv
         probability_matrix$outer_fold <- outer_fold_id # outer left out fold, more an id of the cv run
-        probability_matrix$indices <- parse_numeric_string(inner_fold_data$sample_indices) + 1
+        probability_matrix$indices <- map_filtered_local_to_global_indices(sample_indices, filter)
         probability_matrix$study <- study_names[probability_matrix$indices]
 
         # Apply class merging if requested (before filtering)
@@ -956,24 +973,24 @@ main_inner_cv <- function(merge_classes = FALSE, merge_prob_method = c("max", "s
     svm = list(
       classification_type = "OvR",
       file_paths = list(
-        cv = "../data/out/inner_cv/SVM_array/cv_10feb26_eta2/",
-        loso = "../data/out/inner_cv/SVM_array/loso_10feb26_eta2/"
+        cv = "../data/out/inner_cv/SVM_array/cv_march26/",
+        loso = "../data/out/inner_cv/SVM_array/loso_march26/"
       ),
       output_dir = "../data/out/inner_cv/inner_cv_best_params/SVM_10feb26"
     ),
     xgboost = list(
       classification_type = "OvR",
       file_paths = list(
-        cv = "../data/out/inner_cv/XGBOOST_array/cv_10feb26_eta2/",
-        loso = "../data/out/inner_cv/XGBOOST_array/loso_10feb26_eta2/"
+        cv = "../data/out/inner_cv/XGBOOST_array/cv_march26/",
+        loso = "../data/out/inner_cv/XGBOOST_array/loso_march26/"
       ),
       output_dir = "../data/out/inner_cv/inner_cv_best_params/XGBOOST_10feb26"
     ),
     neural_net = list(
       classification_type = "standard",
       file_paths = list(
-        cv = "../data/out/inner_cv/NN_array/cv_10feb26_eta2/",
-        loso = "../data/out/inner_cv/NN_array/loso_10feb26_eta2/"
+        cv = "../data/out/inner_cv/NN_array/cv_march26/",
+        loso = "../data/out/inner_cv/NN_array/loso_march26/"
       ),
       output_dir = "../data/out/inner_cv/inner_cv_best_params/NN_10feb26"
     )

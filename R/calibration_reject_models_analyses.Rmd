@@ -1,0 +1,236 @@
+---
+title: "Nested target-risk calibration (OOD-aware)"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(readr)
+  library(ggplot2)
+})
+```
+
+OOD-aware single-head rejector (`with_leftout_ood_aware`): inner CV **scores every recipe at 3%, 5%, and 10%** requested operating risk (threshold logic per anchor), **`rank_inner_scores` produces a rank at each anchor**, then the **winning RHS minimizes the sum of those three ranks** (ties: lower worst rank, then better rank at 5%, 3%, 10%, then `rhs_key`). **Outer** evaluation and primary tables still use **5%** as the requested accepted risk for thresholding on the pool and target fold. The calibration curve CSV sweeps requested risks **1–10%** (0.5% steps) **holding that fused winner’s RHS** (threshold refit only).
+
+Outputs from `Rscript R/calibration_reject_models.R`:
+
+- `nested_target_risk_per_fold.csv` — one row per outer target fold with outer metrics for the fused inner winner (`inner_winner_optional_features`, ranks `inner_winner_inner_rank_p03` / `_p05` / `_p10`, `inner_winner_fusion_rank_sum`). **Outer requested accepted risk = 5%** for primary reporting.
+- `nested_target_risk_summary_four_settings.csv` — aggregated by label set and CV/LOSO at **5%** (`modal_inner_winner_recipe` = most frequent exact winning recipe across folds).
+- `nested_target_risk_feature_heatmap_long.csv` — feature selection frequency by setting (**5%**).
+- `nested_target_risk_inner_scores_ranked.csv` — full inner CV grid per outer fold with `inner_rank` (**5%**).
+- `nested_target_risk_calibration_curve.csv` — mean realized outer-fold **accepted risk** and **seen-class coverage** vs requested targets **1%, 1.5%, …, 10%** (step **0.5%**), using the **fused inner-winning RHS** (same recipe across that sweep; only the outer threshold is refit per requested risk).
+
+**Run the canonical script first** (from repo root):
+
+`Rscript R/calibration_reject_models.R`
+
+```{r paths}
+repo_root <- if (file.exists("R/outer_cv_analysis.R")) "." else ".."
+out_dir <- file.path(repo_root, "data/out/outer_cv/calibration_feature_utility_selection_safe")
+
+summary_path <- file.path(out_dir, "nested_target_risk_summary_four_settings.csv")
+per_fold_path <- file.path(out_dir, "nested_target_risk_per_fold.csv")
+heatmap_path <- file.path(out_dir, "nested_target_risk_feature_heatmap_long.csv")
+inner_scores_path <- file.path(out_dir, "nested_target_risk_inner_scores_ranked.csv")
+calibration_curve_path <- file.path(out_dir, "nested_target_risk_calibration_curve.csv")
+
+if (!file.exists(summary_path)) {
+  stop(
+    "Summary CSV not found. Run:\n  Rscript R/calibration_reject_models.R\n",
+    "Expected: ", summary_path
+  )
+}
+
+summary_df <- readr::read_csv(summary_path, show_col_types = FALSE)
+per_fold_df <- if (file.exists(per_fold_path)) {
+  readr::read_csv(per_fold_path, show_col_types = FALSE)
+} else {
+  data.frame()
+}
+heatmap_df <- if (file.exists(heatmap_path)) {
+  readr::read_csv(heatmap_path, show_col_types = FALSE)
+} else {
+  data.frame()
+}
+inner_scores_df <- if (file.exists(inner_scores_path)) {
+  readr::read_csv(inner_scores_path, show_col_types = FALSE)
+} else {
+  data.frame()
+}
+calibration_curve_df <- if (file.exists(calibration_curve_path)) {
+  readr::read_csv(calibration_curve_path, show_col_types = FALSE)
+} else {
+  data.frame()
+}
+```
+
+The summary table and heatmap below use outputs at **5%** requested accepted risk only.
+
+## Summary by setting
+
+```{r summary_table}
+summary_display <- summary_df %>%
+  mutate(
+    split_type = toupper(as.character(split_type)),
+    label_display = dplyr::recode(
+      as.character(label_set),
+      full_subtypes = "Full subtypes",
+      collapsed_classes = "Collapsed (merged)"
+    )
+  ) %>%
+  select(
+    label_display, split_type, setting_col,
+    scenario_key, scenario_name, modal_inner_winner_recipe,
+    n_outer_folds,
+    mean_outer_coverage_seen, sd_outer_coverage_seen,
+    mean_outer_risk_all_accepted, sd_outer_risk_all_accepted
+  ) %>%
+  arrange(label_display, split_type)
+
+View(summary_display)
+```
+
+## Outer-fold detail
+
+```{r per_fold}
+if (nrow(per_fold_df) == 0) {
+  data.frame(note = "No per-fold CSV")
+} else {
+  per_fold_df %>%
+    mutate(split_type = toupper(as.character(split_type))) %>%
+    arrange(label_set, split_type, target_fold) %>%
+    select(
+      label_set, split_type, target_fold,
+      scenario_key, scenario_name,
+      outer_coverage_seen, outer_coverage_seen_median,
+      outer_risk_all_accepted, outer_risk_all_accepted_median,
+      inner_winner_optional_features
+    )
+}
+```
+
+## Inner grid: top candidates (inner_rank <= 15)
+
+Full grid is in `nested_target_risk_inner_scores_ranked.csv`. Below: first outer target fold in each **(label_set, split_type)** group, top 15 inner ranks.
+
+```{r inner_top}
+if (nrow(inner_scores_df) == 0) {
+  knitr::kable(data.frame(note = "No inner_scores_ranked CSV; run calibration_reject_models.R"))
+} else {
+  inner_scores_df %>%
+    group_by(label_set, split_type) %>%
+    mutate(tf_chr = as.character(target_fold)) %>%
+    filter(tf_chr == min(tf_chr)) %>%
+    ungroup() %>%
+    filter(inner_rank <= 15L) %>%
+    arrange(label_set, split_type, inner_rank) %>%
+    dplyr::select(dplyr::any_of(c(
+      "label_set", "split_type", "target_fold", "scenario_key", "inner_rank",
+      "inner_selection_tier", "recipe_optional_count", "dist_to_target",
+      "mean_coverage", "sd_coverage", "mean_risk", "sd_risk",
+      "rhs_key"
+    ))) %>%
+    knitr::kable()
+}
+```
+
+## Feature selection frequency heatmap
+
+Rows: optional features (excluding baseline `max_prob`). Columns: **CV/LOSO | label set**. Cell: fraction of outer folds where the inner-winning recipe included the feature.
+
+```{r heatmap, fig.width = 11, fig.height = 8}
+if (nrow(heatmap_df) == 0) {
+  data.frame(note = "No heatmap CSV; run calibration_reject_models.R")
+} else {
+  col_levels <- sort(unique(as.character(heatmap_df$setting_col)))
+  if (length(col_levels) == 0L) {
+    data.frame(note = "Empty heatmap levels")
+  } else {
+    h <- heatmap_df %>%
+      tidyr::complete(feature, setting_col = col_levels, fill = list(frac_outer_folds_selected = 0)) %>%
+      mutate(
+        setting_col = factor(setting_col, levels = col_levels),
+        feature = factor(feature, levels = sort(unique(as.character(feature))))
+      )
+
+    ggplot(h, aes(x = setting_col, y = feature, fill = frac_outer_folds_selected)) +
+      geom_tile(color = "white", linewidth = 0.3) +
+      scale_fill_gradient(limits = c(0, 1), low = "white", high = "#2171b5", name = "Fold fraction") +
+      theme_bw() +
+      theme(
+        axis.text.x = element_text(angle = 55, hjust = 1, size = 7),
+        panel.grid = element_blank()
+      ) +
+      labs(
+        title = "Optional features in inner-winning recipe (OOD-aware)",
+        subtitle = "Cell = share of outer folds selecting feature",
+        x = NULL,
+        y = NULL
+      )
+  }
+}
+```
+
+## Requested vs realized risk and coverage (1–10% targets, 0.5% steps)
+
+Same spirit as the deployable operating-point curves in `analyse_results.Rmd`. **Inner RHS is the fused winner** (best sum of ranks across inner grids at 3%, 5%, 10%); x-axis requested risks run **from 1% to 10% in 0.5% steps**; for each point the outer threshold is chosen from pool LOSO-OOF at that risk; ribbons use fold-wise SE (95% normal approximation). Source: `nested_target_risk_calibration_curve.csv`.
+
+```{r calibration_curves, fig.width = 10, fig.height = 9}
+if (nrow(calibration_curve_df) == 0L) {
+  knitr::kable(data.frame(note = "No nested_target_risk_calibration_curve.csv — rerun Rscript R/calibration_reject_models.R"))
+} else {
+  curve_plot_df <- calibration_curve_df %>%
+    mutate(
+      split_type_fac = factor(toupper(split_type), levels = c("CV", "LOSO")),
+      label_display = dplyr::recode(
+        as.character(label_set),
+        full_subtypes = "Full subtypes",
+        collapsed_classes = "Collapsed (merged)"
+      )
+    )
+
+  p_nested_requested_vs_realized_risk <- ggplot(
+    curve_plot_df,
+    aes(x = requested_target_risk_pct, y = realized_risk_pct)
+  ) +
+    geom_ribbon(
+      aes(ymin = realized_risk_ci95_lo_pct, ymax = realized_risk_ci95_hi_pct),
+      alpha = 0.14
+    ) +
+    geom_line(linewidth = 1) +
+    geom_point(size = 1.8) +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "grey40") +
+    facet_grid(label_display ~ split_type_fac) +
+    labs(
+      title = "Nested OOD-aware selection: requested vs realized accepted risk",
+      subtitle = "Ribbons = 95% CI across outer folds; dashed line is y = x",
+      x = "Requested risk target (%)",
+      y = "Realized accepted risk (%)"
+    ) +
+    theme_bw()
+  print(p_nested_requested_vs_realized_risk)
+
+  p_nested_requested_vs_coverage <- ggplot(
+    curve_plot_df,
+    aes(x = requested_target_risk_pct, y = realized_coverage_seen_pct)
+  ) +
+    geom_ribbon(
+      aes(ymin = realized_coverage_seen_ci95_lo_pct, ymax = realized_coverage_seen_ci95_hi_pct),
+      alpha = 0.14
+    ) +
+    geom_line(linewidth = 1) +
+    geom_point(size = 1.8) +
+    facet_grid(label_display ~ split_type_fac) +
+    labs(
+      title = "Nested OOD-aware selection: requested risk vs realized seen-class coverage",
+      subtitle = "Ribbons = 95% CI across outer folds",
+      x = "Requested risk target (%)",
+      y = "Realized seen-class coverage (%)"
+    ) +
+    theme_bw()
+  print(p_nested_requested_vs_coverage)
+}
+```

@@ -38,12 +38,12 @@ run_outer_cv() {
 }
 
 # SVM experiments
-#run_outer_cv "SVM" "OvR" "CV" "data/out/inner_cv/inner_cv_best_params/SVM_10feb26/SVM_best_param_cv.csv"
-#run_outer_cv "SVM" "OvR" "loso" "data/out/inner_cv/inner_cv_best_params/SVM_10feb26/SVM_best_param_loso.csv"
+run_outer_cv "SVM" "OvR" "CV" "data/out/inner_cv/inner_cv_best_params/SVM_10feb26/SVM_best_param_cv.csv"
+run_outer_cv "SVM" "OvR" "loso" "data/out/inner_cv/inner_cv_best_params/SVM_10feb26/SVM_best_param_loso.csv"
 
 # XGBOOST experiments
-#run_outer_cv "XGBOOST" "OvR" "CV" "data/out/inner_cv/inner_cv_best_params/XGBOOST_10feb26/XGBOOST_best_param_cv.csv"
-#run_outer_cv "XGBOOST" "OvR" "loso" "data/out/inner_cv/inner_cv_best_params/XGBOOST_10feb26/XGBOOST_best_param_loso.csv"
+run_outer_cv "XGBOOST" "OvR" "CV" "data/out/inner_cv/inner_cv_best_params/XGBOOST_10feb26/XGBOOST_best_param_cv.csv"
+run_outer_cv "XGBOOST" "OvR" "loso" "data/out/inner_cv/inner_cv_best_params/XGBOOST_10feb26/XGBOOST_best_param_loso.csv"
 
 # NN experiments
 run_outer_cv "NN" "standard" "CV" "data/out/inner_cv/inner_cv_best_params/NN_10feb26/NEURAL_NET_best_param_cv.csv"
