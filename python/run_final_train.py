@@ -35,7 +35,7 @@ def main():
         },
         'fold_type': {
             'type': str,
-            'default': 'CV',
+            'default': 'loso',
             'help': 'Type of cross-validation fold to use (CV, loso)'
         },
         'best_params_path': {
@@ -107,7 +107,7 @@ def main():
 
     has_leftout = False
     if args.include_leftout:
-        X_leftout, y_leftout, _, leftout_global_idx = (
+        X_leftout, y_leftout, study_leftout, leftout_global_idx = (
             train_test.get_leftout_samples(X_all, y_all, study_all, min_n=10)
         )
         has_leftout = len(leftout_global_idx) > 0
@@ -279,13 +279,53 @@ def main():
     print(f"  Saved label mapping: {label_mapping_path}")
 
     if has_leftout:
+        fold_type_l = args.fold_type.lower()
+        if fold_type_l == "loso":
+            # Partition left-out samples by cohort for LOSO calibration LOFO.
+            leftout_fold_assignments = train_test.assign_leftout_to_loso_folds(study_leftout)
+            assignment_name = "leftout_fold_assignment_loso.csv"
+        elif fold_type_l == "cv":
+            leftout_fold_assignments = train_test.assign_leftout_to_cv_folds(
+                y_leftout, study_leftout, n_folds=5
+            )
+            assignment_name = "leftout_fold_assignment_cv.csv"
+        else:
+            raise ValueError(f"Unsupported fold_type '{args.fold_type}'. Use 'CV' or 'loso'.")
+        assignment_path = (
+            Path(__file__).resolve().parent.parent
+            / "data"
+            / "out"
+            / "final_train_test"
+            / assignment_name
+        )
+        train_test.export_leftout_fold_assignment_csv(
+            leftout_global_idx,
+            leftout_fold_assignments,
+            str(assignment_path),
+        )
+
         print("Predicting on left-out samples (final full-data model)...", flush=True)
+        # KNN reject features: reference = all included training samples.
+        knn_pipe = Pipeline([
+            ('DEseq2', transformers.DESeq2RatioNormalizer()),
+            ('feature_selection', feature_selector),
+            ('scaler', StandardScaler())
+        ])
+        leftout_knn_features = train_test.compute_knn_features_full_reference(
+            X,
+            y,
+            study_labels,
+            X_leftout,
+            knn_pipe,
+            fs_method=fs_method,
+        )
         leftout_df = train_test.predict_leftout_final(
             trained_models,
             X_leftout,
             y_leftout,
             leftout_global_idx,
             multi_type=args.multi_type,
+            knn_features=leftout_knn_features,
         )
         leftout_df = train_test.restore_labels(leftout_df, label_mapping)
         fs_suffix = "_fs_eta" if fs_method == "eta2" else ""

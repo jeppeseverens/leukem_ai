@@ -544,8 +544,8 @@ main_inner_cv <- function(merge_classes = FALSE, merge_prob_method = c("max", "s
     performance_results
   }
 
-  #' Perform global ensemble optimization using overall kappa (parallelized)
-  #' Uses the unified function from utility_functions.R
+  #' Perform global ensemble optimization (product-of-experts) using overall kappa.
+  #' Weight grid search matches outer CV application: p ∝ Π_m p_m^{w_m}.
   perform_global_ensemble_analysis <- function(results, weights, type = "cv") {
     perform_global_ensemble_analysis_unified(results, weights, type, has_inner_folds = TRUE)
   }
@@ -612,14 +612,10 @@ main_inner_cv <- function(merge_classes = FALSE, merge_prob_method = c("max", "s
         prob_mat_NN <- as.matrix(aligned_matrices$neural_net)
         non_prob_cols <- aligned_matrices$non_prob_cols
 
-        # Calculate weighted ensemble probabilities using best global weights (matrix operations)
-        optimized_matrix <- prob_mat_SVM * best_weights$SVM +
-          prob_mat_XGB * best_weights$XGB +
-          prob_mat_NN * best_weights$NN
-
-        # Normalize probabilities to sum to 1 for each sample
-        row_sums <- rowSums(optimized_matrix)
-        optimized_matrix <- optimized_matrix / row_sums
+        # Product-of-experts (same rule as outer_cv_analysis.r)
+        optimized_matrix <- product_of_experts_probs(
+          prob_mat_SVM, prob_mat_XGB, prob_mat_NN, best_weights
+        )
 
         # Convert to data frame and add true labels
         optimized_matrix <- data.frame(optimized_matrix)
@@ -973,24 +969,24 @@ main_inner_cv <- function(merge_classes = FALSE, merge_prob_method = c("max", "s
     svm = list(
       classification_type = "OvR",
       file_paths = list(
-        cv = "../data/out/inner_cv/SVM_array/cv_march26/",
-        loso = "../data/out/inner_cv/SVM_array/loso_march26/"
+        cv = "../data/out/inner_cv/SVM_array/cv_10feb26_eta2/",
+        loso = "../data/out/inner_cv/SVM_array/loso_10feb26_eta2/"
       ),
       output_dir = "../data/out/inner_cv/inner_cv_best_params/SVM_10feb26"
     ),
     xgboost = list(
       classification_type = "OvR",
       file_paths = list(
-        cv = "../data/out/inner_cv/XGBOOST_array/cv_march26/",
-        loso = "../data/out/inner_cv/XGBOOST_array/loso_march26/"
+        cv = "../data/out/inner_cv/XGBOOST_array/cv_10feb26_eta2/",
+        loso = "../data/out/inner_cv/XGBOOST_array/loso_10feb26_eta2/"
       ),
       output_dir = "../data/out/inner_cv/inner_cv_best_params/XGBOOST_10feb26"
     ),
     neural_net = list(
       classification_type = "standard",
       file_paths = list(
-        cv = "../data/out/inner_cv/NN_array/cv_march26/",
-        loso = "../data/out/inner_cv/NN_array/loso_march26/"
+        cv = "../data/out/inner_cv/NN_array/cv_10feb26_eta2/",
+        loso = "../data/out/inner_cv/NN_array/loso_10feb26_eta2/"
       ),
       output_dir = "../data/out/inner_cv/inner_cv_best_params/NN_10feb26"
     )

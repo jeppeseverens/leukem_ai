@@ -419,7 +419,8 @@ generate_outer_standard_probability_matrices <- function(outer_cv_results, label
   return(result)
 }
 
-#' Apply global product-of-experts ensemble weights from inner CV to outer CV probability matrices
+#' Apply global product-of-experts ensemble weights from inner CV to outer CV probability matrices.
+#' Inner CV selects weights with the same PoE rule (inner_cv_analysis.R + evaluate_batch_weights_global).
 #' @param outer_prob_matrices Outer CV probability matrices for all models
 #' @param ensemble_weights_data Ensemble weights from inner CV analysis
 #' @param type Type of analysis ("cv" or "loso")
@@ -586,7 +587,7 @@ apply_ensemble_weights_to_outer_cv <- function(outer_prob_matrices, ensemble_wei
       if (!all(is.finite(svm_k))) {
         stop(
           sprintf(
-            "Ensemble fold %s (%s): non-finite KNN column '%s' on SVM matrix. Regenerate or backfill outer CSV KNN for all models.",
+            "Ensemble fold %s (%s): non-finite KNN column '%s' on SVM matrix. Re-run run_outer_cv.py (--include_leftout) for all models.",
             fold_name, type, kcol
           )
         )
@@ -1214,7 +1215,7 @@ augment_fold_matrices_with_leftout <- function(known_fold_matrices, leftout_fold
         if (!all(is.finite(kv))) {
           stop(
             sprintf(
-              "Per-model augment fold %s: KNN column '%s' has missing or non-finite values after binding known + leftout. Backfill KNN on both regular and *_leftout_* outer CSVs for this model.",
+              "Per-model augment fold %s: KNN column '%s' has missing or non-finite values after binding known + leftout. Re-run run_outer_cv.py --include_leftout for this model.",
               fold_name, kcol
             )
           )
@@ -1318,7 +1319,7 @@ build_augmented_ensemble <- function(known_ensemble_matrices, leftout_per_model,
       if (!all(c(kcol %in% colnames(svm_lo), kcol %in% colnames(xgb_lo), kcol %in% colnames(nn_lo)))) {
         stop(
           sprintf(
-            "Augmented ensemble fold %s: missing KNN column '%s' on at least one model's leftout matrix. Run KNN backfill on all *_leftout_* outer CSVs for SVM, XGBOOST, and NN.",
+            "Augmented ensemble fold %s: missing KNN column '%s' on at least one model's leftout matrix. Re-run run_outer_cv.py --include_leftout for SVM, XGBOOST, and NN.",
             fold_name, kcol
           )
         )
@@ -1366,7 +1367,7 @@ build_augmented_ensemble <- function(known_ensemble_matrices, leftout_per_model,
         if (!all(is.finite(kv))) {
           stop(
             sprintf(
-              "Augmented ensemble fold %s: after binding known + leftout ensemble rows, KNN column '%s' is not finite on all rows. Known ensemble must include KNN (from backfilled per-model outer CSVs) before augmentation; leftout ensemble rows must include matching KNN.",
+              "Augmented ensemble fold %s: after binding known + leftout ensemble rows, KNN column '%s' is not finite on all rows. Known ensemble must include KNN (from run_outer_cv.py outputs) before augmentation; leftout ensemble rows must include matching KNN.",
               fold_name, kcol
             )
           )

@@ -89,8 +89,8 @@ def main():
     # Get the current date and time in string format
     time = datetime.datetime.now().strftime("%Y%m%d_%H%M")
 
-    # Create the output directory if it doesn't exist
-    output_dir = f"out/{args.model_type}_array/{args.run_name}"
+    # Align with R/inner_cv_analysis.R MODEL_CONFIGS file_paths
+    output_dir = f"data/out/inner_cv/{args.model_type}_array/{args.run_name}"
     os.makedirs(output_dir, exist_ok=True)
     print(f"Output dir is {output_dir}")
 

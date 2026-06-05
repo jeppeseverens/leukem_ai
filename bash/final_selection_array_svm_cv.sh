@@ -1,11 +1,11 @@
 #!/bin/bash
-#SBATCH -J final_selection_svm_cv
+#SBATCH -J final_selection_svm_loso
 #SBATCH --array=0-119              # 120 hyperparameter combinations (0-indexed)
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1         # 1 core per hyperparameter combination
 #SBATCH --time=8:00:00           
-#SBATCH --error=job_output/final_cv/job_array_final_cv.%A_%a.err
-#SBATCH --output=job_output/final_cv/job_array_final_cv.%A_%a.out
+#SBATCH --error=job_output/final_loso/job_array_final_loso.%A_%a.err
+#SBATCH --output=job_output/final_loso/job_array_final_loso.%A_%a.out
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --mail-user=j.f.severens@lumc.nl
 #SBATCH --mem=8G                  
@@ -13,13 +13,13 @@
 cd /exports/me-lcco-aml-hpc/Jeppe2/leukem_ai
 
 # Create job_output directory if it doesn't exist
-mkdir -p job_output/final_cv
+mkdir -p job_output/final_loso
 
 source venv/bin/activate
 
 export TF_CPP_MIN_LOG_LEVEL=2
 
-echo "Starting final hyperparameter selection (CV fold type) on SLURM_ARRAY_TASK_ID=$SLURM_ARRAY_TASK_ID"
+echo "Starting final hyperparameter selection (LOSO) on SLURM_ARRAY_TASK_ID=$SLURM_ARRAY_TASK_ID"
 echo "Processing hyperparameter combination $SLURM_ARRAY_TASK_ID"
 echo "=================================="
 
@@ -28,14 +28,14 @@ MODEL_TYPE="SVM"
 # Feature selection: "mad" (intersecting MVGs) or "eta2" (eta2_subtype - eta2_study)
 FS_METHOD="eta2"
 
-# Run CV fold type for final selection
+# Run LOSO for final selection
 python python/run_final_selection_array.py \
     --model_type "$MODEL_TYPE" \
     --param_index $SLURM_ARRAY_TASK_ID \
     --k_folds 5 \
     --n_max_param 120 \
-    --fold_type "CV" \
-    --run_name "final_cv_svm_28jan26_eta2" \
+    --fold_type "loso" \
+    --run_name "final_loso_svm" \
     --fs_method "$FS_METHOD"
 
 deactivate

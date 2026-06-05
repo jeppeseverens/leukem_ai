@@ -1,6 +1,62 @@
 # Source shared utility functions
 source("utility_functions.R")
 
+# KNN + derived reject features (mirrors outer_cv_analysis.r).
+add_optional_knn_columns <- function(probability_matrix, source_row, num_samples) {
+  for (knn_col in KNN_DISTANCE_COLUMNS) {
+    if (!knn_col %in% colnames(source_row)) next
+    parsed <- parse_numeric_string(source_row[[knn_col]][1])
+    if (length(parsed) == num_samples) {
+      probability_matrix[[knn_col]] <- parsed
+    }
+  }
+  probability_matrix
+}
+
+add_roi_reject_features <- function(df, alpha = 0.10, eps = 1e-8) {
+  if (is.null(df) || nrow(df) == 0) return(df)
+  meta_cols <- c(
+    "y", "inner_fold", "outer_fold", "indices", "sample_indices", "study", "is_leftout",
+    "n_models_agree", "top1_prob_variance_across_models",
+    KNN_DISTANCE_COLUMNS, REJECT_OPTION_EXTRA_FEATURE_COLUMNS
+  )
+  prob_cols <- colnames(df)[!colnames(df) %in% meta_cols]
+  if (length(prob_cols) == 0) {
+    df$trust_ratio_knn10 <- NA_real_
+    df$conformal_set_size_90 <- NA_real_
+    return(df)
+  }
+  prob_df <- df[, prob_cols, drop = FALSE]
+  prob_df[] <- lapply(prob_df, function(x) {
+    v <- suppressWarnings(as.numeric(x))
+    v[!is.finite(v)] <- 0
+    v
+  })
+  prob_mat <- as.matrix(prob_df)
+  mode(prob_mat) <- "numeric"
+  prob_mat <- pmax(prob_mat, 0)
+  rs <- rowSums(prob_mat)
+  rs[!is.finite(rs) | rs <= 0] <- 1
+  prob_mat <- prob_mat / rs
+
+  if (all(c("knn10_min_d", "knn10_q90_d") %in% colnames(df))) {
+    knn_min <- as.numeric(df$knn10_min_d)
+    knn_q90 <- as.numeric(df$knn10_q90_d)
+    df$trust_ratio_knn10 <- knn_min / pmax(knn_q90, eps)
+  } else {
+    df$trust_ratio_knn10 <- NA_real_
+  }
+
+  p_sorted <- t(apply(prob_mat, 1, sort, decreasing = TRUE))
+  cum_sorted <- t(apply(p_sorted, 1, cumsum))
+  threshold <- 1 - alpha
+  df$conformal_set_size_90 <- apply(cum_sorted, 1, function(cs) {
+    hit <- which(cs >= threshold)
+    if (length(hit) == 0) ncol(prob_mat) else hit[1]
+  })
+  df
+}
+
 main_train_test_analysis <- function(merge_classes = FALSE){
 
   #' Map filtered-dataset 0-based indices to full-dataset 1-based indices.
@@ -95,6 +151,10 @@ main_train_test_analysis <- function(merge_classes = FALSE){
         local_idx <- parse_numeric_string(inner_fold_data$sample_indices[1])
         probability_matrix$indices <- map_filtered_local_to_global_indices(local_idx, filter)
         probability_matrix$study <- study_names[probability_matrix$indices]
+        # KNN vectors are identical across OvR class rows within a fold.
+        probability_matrix <- add_optional_knn_columns(
+          probability_matrix, inner_fold_data[1, , drop = FALSE], num_samples
+        )
 
         # Apply class merging if requested (summed method, consistent with inner CV)
         if (merge_classes) {
@@ -214,6 +274,9 @@ main_train_test_analysis <- function(merge_classes = FALSE){
         local_idx <- parse_numeric_string(inner_fold_data$sample_indices)
         probability_matrix$indices <- map_filtered_local_to_global_indices(local_idx, filter)
         probability_matrix$study <- study_names[probability_matrix$indices]
+        probability_matrix <- add_optional_knn_columns(
+          probability_matrix, inner_fold_data[1, , drop = FALSE], num_samples
+        )
 
         # Apply class merging if requested (summed method, consistent with inner CV)
         if (merge_classes) {
@@ -280,6 +343,7 @@ main_train_test_analysis <- function(merge_classes = FALSE){
     # leftout fold assignments (which are written in 0-based form).
     prob_df$sample_indices <- sample_indices
     prob_df$is_leftout <- TRUE
+    prob_df <- add_optional_knn_columns(prob_df, lo[1, , drop = FALSE], length(sample_indices))
 
     # Keep left-out rows fully uncollapsed so OOD subtypes are not folded into
     # merged classes such as other.KMT2A.
@@ -436,10 +500,10 @@ main_train_test_analysis <- function(merge_classes = FALSE){
   #' Generate One-vs-Rest optimized ensemble probability matrices for train/test
   #' @param results Analysis results containing probability matrices
   #' @param weights Weight configurations for ensemble
-  #' @param type Type of analysis ("cv" only; LOSO removed)
+  #' @param type Type of analysis ("loso" for final deployment)
   #' @param ensemble_performance Performance results from perform_ovr_ensemble_analysis_train_test
   #' @return List containing optimized probability matrices and weights used for each outer fold
-  generate_ovr_optimized_ensemble_matrices_train_test <- function(results, weights, type = "cv", ensemble_performance) {
+  generate_ovr_optimized_ensemble_matrices_train_test <- function(results, weights, type = "loso", ensemble_performance) {
     cat("Generating One-vs-Rest optimized ensemble probability matrices for train/test...\n")
 
     outer_folds <- names(results$probability_matrices$svm[[type]])
@@ -629,10 +693,10 @@ main_train_test_analysis <- function(merge_classes = FALSE){
   #' Generate globally optimized ensemble probability matrices for train/test
   #' @param results Analysis results containing probability matrices
   #' @param weights Weight configurations for ensemble
-  #' @param type Type of analysis ("cv" only; LOSO removed)
+  #' @param type Type of analysis ("loso" for final deployment)
   #' @param ensemble_performance Performance results from perform_global_ensemble_analysis_train_test
   #' @return List containing optimized probability matrices and weights used for each outer fold
-  generate_global_optimized_ensemble_matrices_train_test <- function(results, weights, type = "cv", ensemble_performance) {
+  generate_global_optimized_ensemble_matrices_train_test <- function(results, weights, type = "loso", ensemble_performance) {
     cat("Generating globally optimized ensemble probability matrices for train/test...\n")
 
     outer_folds <- names(results$probability_matrices$svm[[type]])
@@ -723,9 +787,9 @@ main_train_test_analysis <- function(merge_classes = FALSE){
 
   #' Calculate performance metrics for optimized ensemble matrices (train/test version)
   #' @param ensemble_result Result containing optimized ensemble probability matrices and weights
-  #' @param type Type of analysis ("cv" only; LOSO removed)
+  #' @param type Type of analysis ("loso" for final deployment)
   #' @return Performance results for each outer fold
-  analyze_optimized_ensemble_performance_train_test <- function(ensemble_result, type = "cv") {
+  analyze_optimized_ensemble_performance_train_test <- function(ensemble_result, type = "loso") {
     cat("Analyzing optimized ensemble performance for train/test...\n")
 
     # Handle different input structures
@@ -766,174 +830,6 @@ main_train_test_analysis <- function(merge_classes = FALSE){
     }
 
     performance_results
-  }
-
-  #' Evaluate nested CV kappa with rejection for a single probability matrix (train/test version)
-  #' Uses the unified function from utility_functions.R
-  evaluate_single_matrix_with_rejection_train_test <- function(prob_matrix, fold_name, model_name, type) {
-    evaluate_single_matrix_with_rejection_parallel(prob_matrix, fold_name, model_name, type)
-  }
-
-  #' Evaluate rejection analysis for all probability matrices (train/test version, parallelized)
-  #' Uses the unified function from utility_functions.R
-  evaluate_all_matrices_with_rejection_train_test <- function(probability_matrices, ensemble_matrices, type = "cv") {
-    evaluate_all_matrices_with_rejection_unified(probability_matrices, ensemble_matrices, type, has_inner_folds = FALSE)
-  }
-
-  #' Find optimal probability cutoff for each model/ensemble per outer fold (train/test version)
-  #' @param rejection_results Data frame with rejection analysis results
-  #' @param optimization_metric Metric to optimize ("kappa" or "accuracy")
-  #' @param target_risk Maximum acceptable error rate on accepted samples (e.g. 0.05 for 5%)
-  #' @return List with optimal cutoffs per outer fold and summary statistics
-  find_optimal_cutoffs_train_test <- function(rejection_results,
-                                              optimization_metric = "kappa",
-                                              target_risk = 0.02) {
-    cat("Finding optimal probability cutoffs per outer fold (train/test)...\n")
-
-    # optimal_cutoffs_per_outer_fold <- rejection_results %>%
-    #   filter((is.na(rejected_accuracy) | rejected_accuracy < 0.5) & (perc_rejected < 0.05)) %>%
-    #   mutate(rejected_accuracy_mod = ifelse(is.na(rejected_accuracy), 0, rejected_accuracy)) %>%
-    #   group_by(model, outer_fold) %>%
-    #   slice_max(kappa) %>%
-    #   slice_min(rejected_accuracy_mod, with_ties = F) %>%
-    #   ungroup()
-
-    # Aggregate metrics per model / cutoff to get risk–coverage curve
-    summarised <- rejection_results %>%
-      mutate(rejected_accuracy_mod = ifelse(is.na(rejected_accuracy), 0, rejected_accuracy)) %>%
-      group_by(model, prob_cutoff) %>%
-      summarise(
-        mean_cutoff = mean(prob_cutoff, na.rm = TRUE),
-        sd_cutoff = sd(prob_cutoff, na.rm = TRUE),
-        mean_kappa = mean(kappa, na.rm = TRUE),
-        sd_kappa = sd(kappa, na.rm = TRUE),
-        mean_accuracy = mean(accuracy, na.rm = TRUE),
-        sd_accuracy = sd(accuracy, na.rm = TRUE),
-        mean_rejected_accuracy = mean(rejected_accuracy_mod, na.rm = TRUE),
-        sd_rejected_accuracy = sd(rejected_accuracy_mod, na.rm = TRUE),
-        mean_perc_rejected = mean(perc_rejected, na.rm = TRUE),
-        sd_perc_rejected = sd(perc_rejected, na.rm = TRUE),
-        n_outer_folds = n(),
-        mean_risk = 1 - mean_accuracy,
-        mean_coverage = 1 - mean_perc_rejected,
-        .groups = "drop"
-      )
-
-    # Select operating cutoff per model: mean_risk <= target_risk, then maximise
-    # mean_coverage. High cutoffs can yield NA metrics when no samples are
-    # accepted in any fold; filter those out before comparing so logical
-    # expressions do not short-circuit into NA. If every row is NA for a
-    # model, fall back to the lowest-cutoff row so the pipeline keeps going.
-    optimal_cutoffs_per_outer_fold <- summarised %>%
-      group_by(model) %>%
-      arrange(mean_risk, desc(mean_coverage), desc(mean_kappa)) %>%
-      group_modify(~{
-        df <- .x
-        usable <- !is.na(df$mean_risk) & !is.na(df$mean_coverage)
-        if (!any(usable)) {
-          return(df[1, , drop = FALSE])
-        }
-        df_usable <- df[usable, , drop = FALSE]
-        meets <- df_usable$mean_risk <= target_risk
-        if (any(meets)) {
-          df_ok <- df_usable[meets, , drop = FALSE]
-          best_cov <- max(df_ok$mean_coverage, na.rm = TRUE)
-          df_ok <- df_ok[df_ok$mean_coverage == best_cov, , drop = FALSE]
-          best_kappa <- suppressWarnings(max(df_ok$mean_kappa, na.rm = TRUE))
-          if (is.finite(best_kappa)) {
-            df_ok <- df_ok[!is.na(df_ok$mean_kappa) & df_ok$mean_kappa == best_kappa, , drop = FALSE]
-          }
-          df_ok[1, , drop = FALSE]
-        } else {
-          best_risk <- min(df_usable$mean_risk, na.rm = TRUE)
-          df_r <- df_usable[df_usable$mean_risk == best_risk, , drop = FALSE]
-          best_cov <- max(df_r$mean_coverage, na.rm = TRUE)
-          df_r <- df_r[df_r$mean_coverage == best_cov, , drop = FALSE]
-          best_kappa <- suppressWarnings(max(df_r$mean_kappa, na.rm = TRUE))
-          if (is.finite(best_kappa)) {
-            df_r <- df_r[!is.na(df_r$mean_kappa) & df_r$mean_kappa == best_kappa, , drop = FALSE]
-          }
-          df_r[1, , drop = FALSE]
-        }
-      }) %>%
-      ungroup()
-
-    summary_stats <- optimal_cutoffs_per_outer_fold %>%
-      group_by(model) %>%
-      summarise(
-        mean_cutoff = mean(mean_cutoff, na.rm = TRUE),
-        sd_cutoff = sd(sd_cutoff, na.rm = TRUE),
-        mean_kappa = mean(mean_kappa, na.rm = TRUE),
-        sd_kappa = sd(sd_kappa, na.rm = TRUE),
-        mean_accuracy = mean(mean_accuracy, na.rm = TRUE),
-        sd_accuracy = sd(sd_accuracy, na.rm = TRUE),
-        mean_rejected_accuracy = mean(mean_rejected_accuracy, na.rm = TRUE),
-        sd_rejected_accuracy = sd(mean_rejected_accuracy, na.rm = TRUE),
-        mean_perc_rejected = mean(mean_perc_rejected, na.rm = TRUE),
-        sd_perc_rejected = sd(mean_perc_rejected, na.rm = TRUE),
-        mean_risk = mean(mean_risk, na.rm = TRUE),
-        sd_risk = sd(mean_risk, na.rm = TRUE),
-        mean_coverage = mean(mean_coverage, na.rm = TRUE),
-        sd_coverage = sd(mean_coverage, na.rm = TRUE),
-        .groups = "drop"
-      ) %>%
-      arrange(desc(mean_kappa))
-
-    return(list(
-      optimal_cutoffs_per_outer_fold = optimal_cutoffs_per_outer_fold,
-      summary_stats = summary_stats,
-      risk_coverage = summarised
-    ))
-  }
-
-  #' Compare performance with and without rejection for train/test analysis
-  #' @param type Analysis type ("cv" only)
-  #' @param train_test_results Train/test results object
-  #' @return Combined data frame with performance metrics with and without rejection
-  compare_all_results_train_test <- function(type, train_test_results){
-    # Extract performance without rejection
-    df_no_rejection <- train_test_results[["performance_comparisons"]][[type]] %>%
-      as_tibble() %>%
-      rename(model = Method,
-             mean_kappa = Mean_Kappa) %>%
-      select(model, mean_kappa) %>%
-      mutate(model = str_to_lower(model))
-
-    # Extract performance with rejection. Final deployment no longer selects
-    # cutoffs in this script, so this block can be absent; keep NA placeholders
-    # so downstream summaries remain well-formed.
-    df_rejection <- NULL
-    if (!is.null(train_test_results[["rejection_results"]]) &&
-        type %in% names(train_test_results[["rejection_results"]]) &&
-        "optimal_results" %in% names(train_test_results[["rejection_results"]][[type]]) &&
-        "summary_stats" %in% names(train_test_results[["rejection_results"]][[type]][["optimal_results"]])) {
-      df_rejection <- train_test_results[["rejection_results"]][[type]][["optimal_results"]][["summary_stats"]] %>%
-        select(model, mean_kappa_with_rejection = mean_kappa, mean_perc_rejected) %>%
-        mutate(model = str_to_lower(model))
-    } else {
-      df_rejection <- df_no_rejection %>%
-        mutate(
-          mean_kappa_with_rejection = NA_real_,
-          mean_perc_rejected = NA_real_
-        )
-    }
-
-    # Combine
-    combined_df <- df_no_rejection %>%
-      left_join(df_rejection, by = "model")
-
-    return(combined_df)
-  }
-
-  #' Combine results for CV train/test analysis
-  #' @param train_test_results Train/test results object
-  #' @return List with combined results for CV
-  combine_all_results_train_test <- function(train_test_results){
-    combined_results <- list()
-    if ("cv" %in% names(train_test_results[["performance_comparisons"]])) {
-      combined_results[["cv"]] <- compare_all_results_train_test("cv", train_test_results)
-    }
-    return(combined_results)
   }
 
   load_library_quietly("plyr")
@@ -983,21 +879,23 @@ main_train_test_analysis <- function(merge_classes = FALSE){
 
   dir.create("../data/out/final_train_test/best_params")
 
-  # CV only (hyperparameters for final model are selected from standard CV)
+  # LOSO only (hyperparameters for final deployment model are selected under LOSO)
+  # Paths must match bash/final_selection_array_*_loso.sh --run_name and
+  # python/run_final_selection_array.py output directory.
   MODEL_CONFIGS <- list(
     svm = list(
       classification_type = "OvR",
-      file_paths = list(cv = "../data/out/final_train_test/SVM_final_selection/final_cv_march26/"),
+      file_paths = list(loso = "../data/out/final_train_test/SVM_final_selection/final_loso_svm/"),
       output_dir = "../data/out/final_train_test/best_params/SVM"
     ),
     xgboost = list(
       classification_type = "OvR",
-      file_paths = list(cv = "../data/out/final_train_test/XGBOOST_final_selection/final_cv_march26//"),
+      file_paths = list(loso = "../data/out/final_train_test/XGBOOST_final_selection/final_loso_xgb/"),
       output_dir = "../data/out/final_train_test/best_params/XGBOOST"
     ),
     neural_net = list(
       classification_type = "standard",
-      file_paths = list(cv = "../data/out/final_train_test/NN_final_selection/final_cv_march26/"),
+      file_paths = list(loso = "../data/out/final_train_test/NN_final_selection/final_loso_nn/"),
       output_dir = "../data/out/final_train_test/best_params/NN"
     )
   )
@@ -1057,11 +955,11 @@ main_train_test_analysis <- function(merge_classes = FALSE){
 
   per_class_results <- do.call(rbind, per_class_results)
 
-  # Run ensemble analysis for CV (final model uses CV-selected hyperparameters)
-  cat("Running ensemble analysis for train/test (CV)...\n")
+  # Run ensemble analysis for LOSO (final model uses LOSO-selected hyperparameters)
+  cat("Running ensemble analysis for train/test (LOSO)...\n")
   ensemble_results <- list()
 
-  for (analysis_type in "cv") {
+  for (analysis_type in "loso") {
     cat(sprintf("\n=== Running %s analysis ===\n", toupper(analysis_type)))
 
     # Check if we have data for this analysis type
@@ -1097,14 +995,8 @@ main_train_test_analysis <- function(merge_classes = FALSE){
     )
   }
 
-  # Final train/test deployment no longer uses this pre-leftout multivariate pass.
-  # We keep global ensemble matrices uncalibrated here and calibrate only through
-  # the selected left-out two-head multivariate path below.
-  cat("Skipping standalone multivariate calibration on base global ensemble matrices (train/test)...\n")
-
-  # Deployment-only script: do not run train/test cutoff sweeps here.
-  # Operating cutoffs should come from nested CV analysis outputs.
-  rejection_results <- list()
+  # NOTE: Rejection / calibration feature selection moved to calibration_reject_models_final.R
+  # (mirrors outer_cv_analysis.r + calibration_reject_models.R).
 
   # Determine suffix for file paths (maxprob method - uses max probability instead of summing)
   if (!merge_classes) {
@@ -1118,23 +1010,23 @@ main_train_test_analysis <- function(merge_classes = FALSE){
   dir.create(weights_dir, recursive = TRUE)
   save_ensemble_weights(ensemble_results, weights_dir, save_per_fold = FALSE)
 
-  # Save cutoff artifacts directory (used by deployment parameter exports).
-  cutoff_dir <- paste0("../data/out/final_train_test/cutoffs", merge_suffix)
-  dir.create(cutoff_dir, recursive = TRUE)
-  combined_cutoffs <- data.frame()
+  multivariate_results <- list(with_leftout_ood_aware = list())
+  CALIBRATION_MV_BASE_MODEL <- "Global_Optimized"
+  CALIBRATION_MV_MODEL_LABEL <- "Global_Optimized_augmented_disagreement_folds"
+  has_leftout_augmentation <- FALSE
 
   # -------------------------------------------------------------------------
-  # Left-out-aware augmentation for deployment calibration fitting
+  # Left-out-aware augmented ensemble folds for calibration_reject_models_final.R
   # -------------------------------------------------------------------------
-  cat("Preparing left-out-aware augmented matrices for deployment calibration fitting...\n")
+  cat("Preparing left-out-aware augmented matrices for final calibration analysis...\n")
   leftout_file_configs <- list(
-    svm = find_latest_csv("../data/out/final_models/SVM", "^SVM_final_CV_OvR_leftout.*\\.csv$"),
-    xgboost = find_latest_csv("../data/out/final_models/XGBOOST", "^XGBOOST_final_CV_OvR_leftout.*\\.csv$"),
-    neural_net = find_latest_csv("../data/out/final_models/NN", "^NN_final_CV_standard_leftout.*\\.csv$")
+    svm = find_latest_csv("../data/out/final_models/SVM", "^SVM_final_loso_OvR_leftout.*\\.csv$"),
+    xgboost = find_latest_csv("../data/out/final_models/XGBOOST", "^XGBOOST_final_loso_OvR_leftout.*\\.csv$"),
+    neural_net = find_latest_csv("../data/out/final_models/NN", "^NN_final_loso_standard_leftout.*\\.csv$")
   )
 
   has_all_leftout <- all(sapply(leftout_file_configs, function(p) !is.null(p) && file.exists(p)))
-  if (has_all_leftout && "cv" %in% names(ensemble_results)) {
+  if (has_all_leftout && "loso" %in% names(ensemble_results)) {
     cat("  Found final-model left-out prediction files. Building augmented matrices...\n")
 
     lo_svm <- build_leftout_probability_matrix(leftout_file_configs$svm, "svm", label_mapping, leukemia_subtypes, merge_classes = merge_classes)
@@ -1142,39 +1034,25 @@ main_train_test_analysis <- function(merge_classes = FALSE){
     lo_nn <- build_leftout_probability_matrix(leftout_file_configs$neural_net, "neural_net", label_mapping, leukemia_subtypes, merge_classes = merge_classes)
 
     if (!is.null(lo_svm) && !is.null(lo_xgb) && !is.null(lo_nn)) {
-      # Load per-fold leftout assignment from any available outer CV leftout CSV
-      # so train/test mirrors the partitioning used by outer CV. If none is
-      # available, fall back to duplicating leftouts in every fold (legacy path).
-      outer_cv_leftout_candidates <- c(
-        find_latest_csv("../data/out/outer_cv/NN_n10_fs_eta",
-                        "^NN_outer_cv_CV_standard_leftout_fs_eta_\\d+_\\d+\\.csv$"),
-        find_latest_csv("../data/out/outer_cv/SVM_n10_fs_eta",
-                        "^SVM_outer_cv_CV_OvR_leftout_fs_eta_\\d+_\\d+\\.csv$"),
-        find_latest_csv("../data/out/outer_cv/XGBOOST_n10_fs_eta",
-                        "^XGBOOST_outer_cv_CV_OvR_leftout_fs_eta_\\d+_\\d+\\.csv$")
-      )
-      outer_cv_leftout_candidates <- outer_cv_leftout_candidates[
-        !sapply(outer_cv_leftout_candidates, is.null)
-      ]
-      leftout_fold_assignment <- NULL
-      for (cand in outer_cv_leftout_candidates) {
-        leftout_fold_assignment <- load_leftout_fold_assignment(cand)
-        if (!is.null(leftout_fold_assignment)) {
-          cat(sprintf("  Using outer-CV leftout fold assignment from: %s\n", cand))
-          break
-        }
-      }
-      if (is.null(leftout_fold_assignment)) {
-        cat("  WARNING: no outer-CV leftout CSV found; left-out rows will be duplicated into every fold (legacy behaviour).\n")
+      # Per-fold left-out partition for LOFO calibration (written by run_final_train.py).
+      final_leftout_assignment_path <- "../data/out/final_train_test/leftout_fold_assignment_loso.csv"
+      leftout_fold_assignment <- load_leftout_fold_assignment(final_leftout_assignment_path)
+      if (!is.null(leftout_fold_assignment)) {
+        cat(sprintf("  Using final-pipeline leftout fold assignment from: %s\n", final_leftout_assignment_path))
+      } else {
+        stop(sprintf(
+          "Missing %s. Run run_final_train.py --include_leftout before the second train_test_analysis.R pass.",
+          final_leftout_assignment_path
+        ))
       }
 
       prob_aug <- list(
-        svm = list(cv = augment_model_with_leftout(
-          probability_matrices$svm$cv, lo_svm, leftout_fold_assignment)),
-        xgboost = list(cv = augment_model_with_leftout(
-          probability_matrices$xgboost$cv, lo_xgb, leftout_fold_assignment)),
-        neural_net = list(cv = augment_model_with_leftout(
-          probability_matrices$neural_net$cv, lo_nn, leftout_fold_assignment))
+        svm = list(loso = augment_model_with_leftout(
+          probability_matrices$svm$loso, lo_svm, leftout_fold_assignment)),
+        xgboost = list(loso = augment_model_with_leftout(
+          probability_matrices$xgboost$loso, lo_xgb, leftout_fold_assignment)),
+        neural_net = list(loso = augment_model_with_leftout(
+          probability_matrices$neural_net$loso, lo_nn, leftout_fold_assignment))
       )
 
       # LOFO isolation check: when leftouts are partitioned, a given
@@ -1183,7 +1061,7 @@ main_train_test_analysis <- function(merge_classes = FALSE){
       # its fit pool.
       assert_leftout_fold_disjoint <- function(prob_aug_by_model) {
         for (model_name in names(prob_aug_by_model)) {
-          folds <- prob_aug_by_model[[model_name]]$cv
+          folds <- prob_aug_by_model[[model_name]]$loso
           if (!is.list(folds) || length(folds) == 0) next
           per_fold_idx <- lapply(folds, function(m) {
             if (is.null(m) || !"sample_indices" %in% colnames(m) ||
@@ -1279,10 +1157,10 @@ main_train_test_analysis <- function(merge_classes = FALSE){
       }
 
       aug_global <- list()
-      weights_used <- ensemble_results$cv$global_optimized_ensemble_matrices$weights_used
-      for (outer_fold in names(prob_aug$svm$cv)) {
+      weights_used <- ensemble_results$loso$global_optimized_ensemble_matrices$weights_used
+      for (outer_fold in names(prob_aug$svm$loso)) {
         aligned <- align_probability_matrices_cached(
-          prob_aug, outer_fold, NULL, "cv", new.env(hash = TRUE)
+          prob_aug, outer_fold, NULL, "loso", new.env(hash = TRUE)
         )
         if (is.null(aligned) || !outer_fold %in% names(weights_used)) next
         w <- weights_used[[outer_fold]]$weights
@@ -1295,410 +1173,43 @@ main_train_test_analysis <- function(merge_classes = FALSE){
         poe <- as.data.frame(poe / rs)
         ens_with_meta <- cbind(poe, aligned$non_prob_cols)
         ens_with_meta <- add_disagreement_features_to_ensemble(ens_with_meta, aligned)
+        ens_with_meta <- add_roi_reject_features(ens_with_meta)
         aug_global[[outer_fold]] <- ens_with_meta
       }
 
-      # Deployment-only behavior: do not run train/test cutoff sweeps or write
-      # train/test risk-coverage artifacts. Cutoff selection is delegated to
-      # nested CV outputs from outer_cv_analysis.R.
-      cat("  Skipping left-out-aware train/test cutoff sweeps; using nested-CV cutoffs at inference.\n")
+      if (length(aug_global) >= 2L) {
+        multivariate_results$with_leftout_ood_aware[[CALIBRATION_MV_BASE_MODEL]] <- list(
+          loso = list(
+            fold_matrices = copy_fold_matrix_list(aug_global),
+            model_label = CALIBRATION_MV_MODEL_LABEL
+          )
+        )
+        has_leftout_augmentation <- TRUE
+        cat(sprintf(
+          "  Saved %d augmented ensemble folds for %s (R/calibration_reject_models_final.R).\n",
+          length(aug_global), CALIBRATION_MV_BASE_MODEL
+        ))
+      } else {
+        warning("Augmented ensemble has fewer than 2 folds; skipping multivariate_results bundle.")
+      }
     } else {
-      stop(
-        "Could not parse one or more left-out prediction files. ",
-        "Two-head deployment requires these files to train the OOD head on ",
-        "known + left-out data."
-      )
+      warning("Could not parse one or more left-out prediction files; skipping augmented calibration folds.")
     }
   } else {
-    stop(
+    warning(
       "Left-out prediction files were not found for all models. ",
-      "Two-head deployment requires these files to train the OOD head on ",
-      "known + left-out data."
+      "Run run_final_train.py --include_leftout, then re-run this script before calibration_reject_models_final.R."
     )
   }
 
-  # Fit and save calibration parameters for deployment.
-  # Exported calibration settings:
-  #   * known_only  : P(correct | features) on known-only rows
-  #   * known_only_logit: known_only with logit(max_prob) replacing max_prob
-  #   * ood_aware   : P(correct_AND_id | features) on known + left-out rows
-  #   * ood_aware_logit: ood_aware with logit(max_prob) replacing max_prob
-  #   * two_head    : correctness head + dedicated OOD head (product at inference)
-  # For each setting we export univariate (max_prob) and multivariate variants.
-  cat("Fitting calibration model(s) for deployment (known-only, ood-aware, two-head; uni + multi)...\n")
-
-  fit_and_save_single_head_params <- function(
-    fold_list,
-    out_dir,
-    out_filename,
-    description,
-    candidate_terms,
-    target_mode = c("correct", "correct_and_id"),
-    use_logit_max_prob = FALSE,
-    eps = 1e-6
-  ) {
-    target_mode <- match.arg(target_mode)
-    if (!is.list(fold_list) || length(fold_list) == 0L) return(invisible(NULL))
-    pooled_features <- lapply(fold_list, function(m) {
-      if (is.null(m) || nrow(m) == 0) return(NULL)
-      feats <- get_rejection_features_from_matrix(m)
-      if ("n_models_agree" %in% colnames(m)) feats$n_models_agree <- m$n_models_agree
-      feats$is_id <- if ("is_leftout" %in% colnames(m)) {
-        as.integer(!as.logical(m$is_leftout))
-      } else {
-        rep(1L, nrow(m))
-      }
-      if (target_mode == "correct_and_id") {
-        feats$target <- as.integer(feats$correct) * as.integer(feats$is_id)
-      } else {
-        feats$target <- as.integer(feats$correct)
-      }
-      feats
-    })
-    pooled_features <- pooled_features[sapply(pooled_features, nrow) > 0]
-    if (length(pooled_features) == 0) {
-      cat(sprintf("  Warning: No pooled feature rows for %s calibration model\n", description))
-      return(invisible(NULL))
-    }
-    pooled_df <- do.call(rbind, pooled_features)
-    if (nrow(pooled_df) < 10L || length(unique(pooled_df$target)) < 2L) {
-      cat(sprintf("  Warning: Not enough pooled data for %s calibration model\n", description))
-      return(invisible(NULL))
-    }
-    if (use_logit_max_prob) {
-      pooled_df$logit_max_prob <- qlogis(pmin(1 - eps, pmax(eps, pooled_df$max_prob)))
-      candidate_terms <- ifelse(candidate_terms == "max_prob", "logit_max_prob", candidate_terms)
-    }
-    usable_terms <- candidate_terms[sapply(candidate_terms, function(v) {
-      v %in% colnames(pooled_df) && any(is.finite(pooled_df[[v]]))
-    })]
-    if (length(usable_terms) == 0L) {
-      cat(sprintf("  Warning: No usable predictors for %s calibration model\n", description))
-      return(invisible(NULL))
-    }
-    formula <- stats::as.formula(paste("target ~", paste(usable_terms, collapse = " + ")))
-    fit <- tryCatch(
-      stats::glm(
-        formula,
-        data = pooled_df,
-        family = stats::binomial(),
-        control = stats::glm.control(maxit = 200, epsilon = 1e-8)
-      ),
-      error = function(e) NULL
-    )
-    if (is.null(fit)) {
-      cat(sprintf("  Warning: Could not fit %s calibration model for deployment\n", description))
-      return(invisible(NULL))
-    }
-    coef_vec <- stats::coef(fit)
-    params_df <- data.frame(
-      model = "Global_Optimized",
-      term = names(coef_vec),
-      estimate = as.numeric(coef_vec),
-      stringsAsFactors = FALSE
-    )
-    dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
-    out_path <- file.path(out_dir, out_filename)
-    write.csv(params_df, out_path, row.names = FALSE)
-    cat(sprintf("  Saved %s calibration parameters to: %s\n", description, out_path))
-    invisible(params_df)
+  if (!has_leftout_augmentation) {
+    cat("  No with_leftout_ood_aware fold bundles written (left-out augmentation incomplete).\n")
   }
-
-  if ("cv" %in% names(ensemble_results) &&
-      "global_optimized_ensemble_matrices" %in% names(ensemble_results[["cv"]]) &&
-      "matrices" %in% names(ensemble_results[["cv"]]$global_optimized_ensemble_matrices)) {
-    multivariate_dir <- paste0("../data/out/final_train_test/multivariate_params", merge_suffix)
-    univariate_dir <- paste0("../data/out/final_train_test/univariate_params", merge_suffix)
-
-    # Known-only single-head (existing behavior).
-    fit_and_save_single_head_params(
-      ensemble_results[["cv"]]$global_optimized_ensemble_matrices$matrices,
-      multivariate_dir,
-      paste0("multivariate_params", merge_suffix, ".csv"),
-      "multivariate known-only",
-      candidate_terms = c("max_prob", "margin", "entropy", "n_models_agree", "top1_prob_variance_across_models"),
-      target_mode = "correct"
-    )
-
-    fit_and_save_single_head_params(
-      ensemble_results[["cv"]]$global_optimized_ensemble_matrices$matrices,
-      univariate_dir,
-      paste0("univariate_params", merge_suffix, ".csv"),
-      "univariate known-only",
-      candidate_terms = c("max_prob"),
-      target_mode = "correct"
-    )
-
-    # Explicit known-only filenames for unified predictor loading.
-    fit_and_save_single_head_params(
-      ensemble_results[["cv"]]$global_optimized_ensemble_matrices$matrices,
-      multivariate_dir,
-      paste0("multivariate_params_known_only", merge_suffix, ".csv"),
-      "multivariate known-only (explicit)",
-      candidate_terms = c("max_prob", "margin", "entropy", "n_models_agree", "top1_prob_variance_across_models"),
-      target_mode = "correct"
-    )
-    fit_and_save_single_head_params(
-      ensemble_results[["cv"]]$global_optimized_ensemble_matrices$matrices,
-      univariate_dir,
-      paste0("univariate_params_known_only", merge_suffix, ".csv"),
-      "univariate known-only (explicit)",
-      candidate_terms = c("max_prob"),
-      target_mode = "correct"
-    )
-
-    # Logit(max_prob) variants for known-only single-head calibration.
-    fit_and_save_single_head_params(
-      ensemble_results[["cv"]]$global_optimized_ensemble_matrices$matrices,
-      multivariate_dir,
-      paste0("multivariate_params_known_only_logit", merge_suffix, ".csv"),
-      "multivariate known-only logit(max_prob)",
-      candidate_terms = c("max_prob", "margin", "entropy", "n_models_agree", "top1_prob_variance_across_models"),
-      target_mode = "correct",
-      use_logit_max_prob = TRUE
-    )
-    fit_and_save_single_head_params(
-      ensemble_results[["cv"]]$global_optimized_ensemble_matrices$matrices,
-      univariate_dir,
-      paste0("univariate_params_known_only_logit", merge_suffix, ".csv"),
-      "univariate known-only logit(max_prob)",
-      candidate_terms = c("max_prob"),
-      target_mode = "correct",
-      use_logit_max_prob = TRUE
-    )
-  }
-
-  # Two-head deployment: the correctness head is the existing known-only model
-  # (multivariate_params). We additionally fit a dedicated OOD head on
-  # is_id ~ features from the full augmented pool (known + leftout) with
-  # inverse-class-frequency weights. At inference the composite accept score
-  # is P_ID(x) * P_correct(x).
-  fit_and_save_ood_head_params <- function(fold_list, out_dir, out_filename, description, candidate_terms) {
-    if (!is.list(fold_list) || length(fold_list) == 0L) return(invisible(NULL))
-    pool_features <- list()
-    for (m in fold_list) {
-      if (is.null(m) || nrow(m) == 0) next
-      feats <- get_rejection_features_from_matrix(m)
-      if ("n_models_agree" %in% colnames(m)) feats$n_models_agree <- m$n_models_agree
-      feats$is_id <- if ("is_leftout" %in% colnames(m)) {
-        as.integer(!as.logical(m$is_leftout))
-      } else {
-        rep(1L, nrow(m))
-      }
-      pool_features[[length(pool_features) + 1]] <- feats
-    }
-    if (length(pool_features) == 0) {
-      cat("  Warning: No pooled features available for OOD head deployment fit\n")
-      return(invisible(NULL))
-    }
-    pool_df <- do.call(rbind, pool_features)
-    if (nrow(pool_df) < 10L || length(unique(pool_df$is_id)) < 2L) {
-      cat("  Warning: Not enough data / no OOD examples for OOD head deployment fit\n")
-      return(invisible(NULL))
-    }
-
-    usable_terms <- candidate_terms[sapply(candidate_terms, function(v) {
-      v %in% colnames(pool_df) && any(is.finite(pool_df[[v]]))
-    })]
-    if (length(usable_terms) == 0L) {
-      cat(sprintf("  Warning: No usable predictors for %s OOD head deployment fit\n", description))
-      return(invisible(NULL))
-    }
-    formula <- stats::as.formula(paste("is_id ~", paste(usable_terms, collapse = " + ")))
-    freq <- table(pool_df$is_id)
-    per_row <- 1 / as.numeric(freq[as.character(pool_df$is_id)])
-    weights_vec <- per_row * nrow(pool_df) / sum(per_row)
-    # Fractional class-balancing weights require quasibinomial to avoid the
-    # non-integer-successes warning while keeping the same mean model.
-    ood_family <- stats::quasibinomial()
-    fit <- tryCatch(
-      stats::glm(
-        formula,
-        data = pool_df,
-        family = ood_family,
-        weights = weights_vec,
-        control = stats::glm.control(maxit = 200, epsilon = 1e-8)
-      ),
-      error = function(e) NULL
-    )
-    if (is.null(fit)) {
-      cat("  Warning: Could not fit OOD head for deployment\n")
-      return(invisible(NULL))
-    }
-    coef_vec <- stats::coef(fit)
-    params_df <- data.frame(
-      model = "Global_Optimized",
-      term = names(coef_vec),
-      estimate = as.numeric(coef_vec),
-      stringsAsFactors = FALSE
-    )
-    dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
-    out_path <- file.path(out_dir, out_filename)
-    write.csv(params_df, out_path, row.names = FALSE)
-    cat(sprintf("  Saved %s OOD head (is_id ~ features, class-balanced) parameters to: %s\n", description, out_path))
-    invisible(params_df)
-  }
-
-  fit_and_save_two_head_postcal_params <- function(
-    fold_list,
-    out_dir,
-    out_filename,
-    description,
-    use_multivariate = TRUE
-  ) {
-    if (!is.list(fold_list) || length(fold_list) < 2L) return(invisible(NULL))
-    fold_names <- names(fold_list)
-    rows <- list()
-    idx <- 1L
-    eps <- 1e-6
-
-    for (k in seq_along(fold_names)) {
-      target <- fold_list[[fold_names[k]]]
-      others <- fold_list[setdiff(fold_names, fold_names[k])]
-      if (is.null(target) || nrow(target) == 0 || length(others) == 0) next
-
-      confidence_col <- if (use_multivariate) "confidence_multivariate" else "confidence_two_head"
-      scored <- tryCatch(
-        apply_two_head_calibration_to_target_from_pool(
-          others,
-          target,
-          use_multivariate = use_multivariate,
-          confidence_col = confidence_col
-        ),
-        error = function(e) NULL
-      )
-      if (is.null(scored) || !confidence_col %in% colnames(scored)) next
-
-      base <- get_max_prob_and_correct_from_matrix(scored)
-      s <- as.numeric(scored[[confidence_col]])
-      s <- pmin(1 - eps, pmax(eps, s))
-      rows[[idx]] <- data.frame(
-        correct = as.integer(base$correct),
-        logit_score = qlogis(s),
-        stringsAsFactors = FALSE
-      )
-      idx <- idx + 1L
-    }
-
-    if (length(rows) == 0) {
-      cat(sprintf("  Warning: No cross-fitted rows for %s two_head_postcal fit\n", description))
-      return(invisible(NULL))
-    }
-    df <- do.call(rbind, rows)
-    if (nrow(df) < 10L || length(unique(df$correct)) < 2L) {
-      cat(sprintf("  Warning: Not enough class variation for %s two_head_postcal fit\n", description))
-      return(invisible(NULL))
-    }
-
-    fit <- tryCatch(
-      stats::glm(
-        correct ~ logit_score,
-        data = df,
-        family = stats::binomial(),
-        control = stats::glm.control(maxit = 200, epsilon = 1e-8)
-      ),
-      error = function(e) NULL
-    )
-    if (is.null(fit)) {
-      cat(sprintf("  Warning: Could not fit %s two_head_postcal model\n", description))
-      return(invisible(NULL))
-    }
-    coef_vec <- stats::coef(fit)
-    params_df <- data.frame(
-      model = "Global_Optimized",
-      term = names(coef_vec),
-      estimate = as.numeric(coef_vec),
-      stringsAsFactors = FALSE
-    )
-    dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
-    out_path <- file.path(out_dir, out_filename)
-    write.csv(params_df, out_path, row.names = FALSE)
-    cat(sprintf("  Saved %s two_head_postcal calibration parameters to: %s\n", description, out_path))
-    invisible(params_df)
-  }
-
-  if (!exists("aug_global") || !is.list(aug_global) || length(aug_global) == 0L) {
-    stop(
-      "Missing augmented fold matrices for OOD head training. ",
-      "Two-head deployment requires pooled known + left-out data."
-    )
-  }
-  multivariate_dir <- paste0("../data/out/final_train_test/multivariate_params", merge_suffix)
-  univariate_dir <- paste0("../data/out/final_train_test/univariate_params", merge_suffix)
-
-  # OOD-aware single-head calibrators on full augmented pool.
-  fit_and_save_single_head_params(
-    aug_global,
-    multivariate_dir,
-    paste0("multivariate_params_ood_aware", merge_suffix, ".csv"),
-    "multivariate ood-aware",
-    candidate_terms = c("max_prob", "margin", "entropy", "n_models_agree", "top1_prob_variance_across_models"),
-    target_mode = "correct_and_id"
-  )
-  fit_and_save_single_head_params(
-    aug_global,
-    univariate_dir,
-    paste0("univariate_params_ood_aware", merge_suffix, ".csv"),
-    "univariate ood-aware",
-    candidate_terms = c("max_prob"),
-    target_mode = "correct_and_id"
-  )
-
-  fit_and_save_single_head_params(
-    aug_global,
-    multivariate_dir,
-    paste0("multivariate_params_ood_aware_logit", merge_suffix, ".csv"),
-    "multivariate ood-aware logit(max_prob)",
-    candidate_terms = c("max_prob", "margin", "entropy", "n_models_agree", "top1_prob_variance_across_models"),
-    target_mode = "correct_and_id",
-    use_logit_max_prob = TRUE
-  )
-  fit_and_save_single_head_params(
-    aug_global,
-    univariate_dir,
-    paste0("univariate_params_ood_aware_logit", merge_suffix, ".csv"),
-    "univariate ood-aware logit(max_prob)",
-    candidate_terms = c("max_prob"),
-    target_mode = "correct_and_id",
-    use_logit_max_prob = TRUE
-  )
-
-  fit_and_save_ood_head_params(
-    aug_global,
-    multivariate_dir,
-    paste0("ood_head_params", merge_suffix, ".csv"),
-    description = "multivariate",
-    candidate_terms = c("max_prob", "margin", "entropy", "n_models_agree", "top1_prob_variance_across_models")
-  )
-  fit_and_save_ood_head_params(
-    aug_global,
-    univariate_dir,
-    paste0("ood_head_params_univariate", merge_suffix, ".csv"),
-    description = "univariate",
-    candidate_terms = c("max_prob")
-  )
-
-  # Post-calibration on top of two-head product score.
-  fit_and_save_two_head_postcal_params(
-    aug_global,
-    multivariate_dir,
-    paste0("two_head_postcal_params", merge_suffix, ".csv"),
-    description = "multivariate",
-    use_multivariate = TRUE
-  )
-  fit_and_save_two_head_postcal_params(
-    aug_global,
-    univariate_dir,
-    paste0("two_head_postcal_params", merge_suffix, ".csv"),
-    description = "univariate",
-    use_multivariate = FALSE
-  )
-
-  # Calculate performance comparisons (CV only)
-  cat("Calculating performance comparisons (CV)...\n")
+  # Calculate performance comparisons (LOSO only)
+  cat("Calculating performance comparisons (LOSO)...\n")
   performance_comparisons <- list()
 
-  for (analysis_type in "cv") {
+  for (analysis_type in "loso") {
     if (analysis_type %in% names(ensemble_results)) {
 
       # Individual model performance
@@ -1772,7 +1283,7 @@ main_train_test_analysis <- function(merge_classes = FALSE){
     }
   }
 
-  # Create comprehensive results structure for final model building
+  # Comprehensive results for final model building + calibration_reject_models_final.R
   train_test_results <- list(
     model_results = model_results,
     best_parameters = best_parameters,
@@ -1780,17 +1291,19 @@ main_train_test_analysis <- function(merge_classes = FALSE){
     per_model_results = per_model_results,
     per_class_results = per_class_results,
     ensemble_results = ensemble_results,
-    rejection_results = rejection_results,
-    optimal_cutoffs = combined_cutoffs,
-    performance_comparisons = performance_comparisons
+    performance_comparisons = performance_comparisons,
+    multivariate_results = multivariate_results
   )
+  train_test_results$merge_classes <- merge_classes
 
-  # Add final results comparison (with and without rejection)
-  train_test_results$final_results <- combine_all_results_train_test(train_test_results)
-  train_test_results$merge_classes <- merge_classes  # Store merge status in results
-
-  cat("\n=== Final Train/Test Results Summary ===\n")
-  print(train_test_results$final_results)
+  cat("\n=== Final Train/Test Performance Summary ===\n")
+  if ("loso" %in% names(performance_comparisons)) {
+    print(performance_comparisons$loso)
+  }
+  cat(sprintf(
+    "  multivariate_results: with_leftout_ood_aware$%s (calibration via R/calibration_reject_models_final.R)\n",
+    CALIBRATION_MV_BASE_MODEL
+  ))
 
   saveRDS(train_test_results, paste0("../data/out/final_train_test/final_train_test_results_10feb2026", merge_suffix, ".rds"))
   return(train_test_results)

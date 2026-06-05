@@ -450,6 +450,17 @@ generate_weights <- function(step = 0.025) {
   return(ENSEMBLE_WEIGHTS)
 }
 
+#' Product-of-experts ensemble: p(class) ∝ Π_m p_m(class)^{w_m}
+#' @param weights Named list with SVM, XGB, NN exponents (sum to 1 on the weight grid)
+product_of_experts_probs <- function(prob_mat_SVM, prob_mat_XGB, prob_mat_NN, weights, eps = 1e-12) {
+  poe <- (pmax(prob_mat_SVM, eps) ^ weights$SVM) *
+    (pmax(prob_mat_XGB, eps) ^ weights$XGB) *
+    (pmax(prob_mat_NN, eps) ^ weights$NN)
+  row_sums <- rowSums(poe)
+  row_sums[row_sums == 0] <- 1
+  poe / row_sums
+}
+
 #' Load ensemble weights used for outer fold analysis
 #' @param weights_base_dir Base directory containing saved weights
 #' @param analysis_type Type of analysis ("cv" or "loso")
@@ -781,7 +792,11 @@ align_probability_matrices <- function(prob_matrices, outer_fold_name, inner_fol
   # Keep all sample-level metadata out of probability columns.
   # `sample_indices` is critical in left-out-aware paths and must never be
   # interpreted as a class probability feature.
-  meta_col_names <- c("y", "inner_fold", "outer_fold", "indices", "sample_indices", "study", "is_leftout")
+  meta_col_names <- c(
+    "y", "inner_fold", "outer_fold", "indices", "sample_indices", "study", "is_leftout",
+    "n_models_agree", "top1_prob_variance_across_models",
+    KNN_DISTANCE_COLUMNS, REJECT_OPTION_EXTRA_FEATURE_COLUMNS
+  )
 
   non_prob_cols <- svm_matrix[, colnames(svm_matrix) %in% meta_col_names, drop = FALSE]
 
@@ -1129,14 +1144,9 @@ evaluate_single_matrix_with_rejection_parallel <- function(prob_matrix, fold_nam
 #' @param type Type of analysis
 #' @return Data frame row with ensemble performance for this weight config
 evaluate_single_weight_global_matrix <- function(weight_config, weight_name, prob_mat_SVM, prob_mat_XGB, prob_mat_NN, class_names, truth, outer_fold, inner_fold, type) {
-  # Calculate weighted ensemble probabilities using matrix operations
-  prob_mat <- prob_mat_SVM * weight_config$SVM +
-    prob_mat_XGB * weight_config$XGB +
-    prob_mat_NN * weight_config$NN
-
-  # Normalize probabilities to sum to 1 for each sample
-  row_sums <- rowSums(prob_mat)
-  prob_mat <- prob_mat / row_sums
+  prob_mat <- product_of_experts_probs(
+    prob_mat_SVM, prob_mat_XGB, prob_mat_NN, weight_config
+  )
 
   # Vectorized: Get predictions using max.col (much faster than apply)
   pred_indices <- max.col(prob_mat, ties.method = "first")
@@ -1294,15 +1304,9 @@ create_weight_class_combinations <- function(weights, all_classes) {
 #' @param type Type of analysis
 #' @return Data frame with ensemble performance for all weight configs
 evaluate_batch_weights_global <- function(weights, prob_mat_SVM, prob_mat_XGB, prob_mat_NN, class_names, truth, outer_fold, inner_fold, type) {
-  # Pre-compute all weighted probability matrices
+  # Pre-compute PoE ensemble matrices for every weight grid point
   weighted_matrices <- lapply(weights, function(w) {
-    prob_mat_SVM * w$SVM + prob_mat_XGB * w$XGB + prob_mat_NN * w$NN
-  })
-
-  # Batch normalize all matrices
-  weighted_matrices <- lapply(weighted_matrices, function(mat) {
-    row_sums <- rowSums(mat)
-    mat / row_sums
+    product_of_experts_probs(prob_mat_SVM, prob_mat_XGB, prob_mat_NN, w)
   })
 
   # Pre-compute cleaned truth once (used for all weights)
@@ -1450,7 +1454,10 @@ align_probability_matrices_cached <- function(prob_matrices, outer_fold_name, in
 #' @param has_inner_folds Whether data has inner fold nesting (TRUE for inner_cv, FALSE for train_test)
 #' @return List of performance metrics for each outer fold and weight configuration
 perform_global_ensemble_analysis_unified <- function(results, weights, type = "cv", has_inner_folds = TRUE) {
-  cat(sprintf("Performing global ensemble analysis (%s)...\n", ifelse(has_inner_folds, "with inner folds", "train/test")))
+  cat(sprintf(
+    "Performing global ensemble analysis (product-of-experts, %s)...\n",
+    ifelse(has_inner_folds, "with inner folds", "train/test")
+  ))
 
   outer_folds <- names(results$probability_matrices$svm[[type]])
 

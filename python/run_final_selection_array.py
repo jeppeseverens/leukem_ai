@@ -44,8 +44,8 @@ def main():
         },
         'fold_type': {
             'type': str,
-            'default': 'CV',
-            'help': 'Type of cross-validation fold to use (default: CV)'
+            'default': 'loso',
+            'help': 'Type of cross-validation fold to use (default: loso)'
         },
         'random_seed': {
             'type': int,
@@ -83,8 +83,15 @@ def main():
     # Get the current date and time in string format
     time = datetime.datetime.now().strftime("%Y%m%d_%H%M")
 
-    # Create the output directory if it doesn't exist
-    output_dir = f"out/{args.model_type}_final_selection/{args.run_name}"
+    # Match R/train_test_analysis.R MODEL_CONFIGS file_paths.
+    output_dir = (
+        Path(__file__).resolve().parent.parent
+        / "data"
+        / "out"
+        / "final_train_test"
+        / f"{args.model_type}_final_selection"
+        / args.run_name
+    )
     os.makedirs(output_dir, exist_ok=True)
     print(f"Output dir is {output_dir}")
 
@@ -211,9 +218,10 @@ def main():
         for multi_type in multi_types:
             # Use the new train/test function
             df = train_test.run_train_test_single_param(
-                X, y, study_labels, model, single_param, pipe, 
+                X, y, study_labels, model, single_param, pipe,
                 multi_type=multi_type, k_out=k_folds,
-                model_type=args.model_type
+                model_type=args.model_type,
+                fs_method=fs_method,
             )
 
             # Convert encoded labels back to original class names
@@ -221,7 +229,7 @@ def main():
 
             # Save results with parameter index in filename
             output_filename = f"{args.model_type}_final_selection_{multi_type}_param_{param_index:03d}{fs_suffix}_{time}.csv"
-            df.to_csv(f"{output_dir}/{output_filename}")
+            df.to_csv(output_dir / output_filename)
             print(f"Saved results to {output_filename}")
             
     elif args.fold_type == "loso":
@@ -238,7 +246,7 @@ def main():
 
             # Save results with parameter index in filename
             output_filename = f"{args.model_type}_final_selection_loso_{multi_type}_param_{param_index:03d}{fs_suffix}_{time}.csv"
-            df.to_csv(f"{output_dir}/{output_filename}")
+            df.to_csv(output_dir / output_filename)
             print(f"Saved results to {output_filename}")
     else:
         raise ValueError(f"Fold type {args.fold_type} not supported.")

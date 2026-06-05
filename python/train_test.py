@@ -649,6 +649,48 @@ def get_leftout_samples(X, y, study_labels, min_n=20):
     return leftout_X, leftout_y, leftout_study, leftout_global_idx
 
 
+def assign_leftout_to_loso_folds(study_leftout):
+    """Assign left-out samples to LOSO folds by cohort (study name)."""
+    study_leftout = np.asarray(study_leftout, dtype=object)
+    if len(study_leftout) == 0:
+        return np.array([], dtype=object)
+    return study_leftout.copy()
+
+
+def export_leftout_fold_assignment_csv(leftout_global_idx, leftout_fold_assignments, output_path):
+    """
+    Write per-fold left-out sample indices for final calibration augmentation.
+    Schema matches outer leftout CSVs read by R/load_leftout_fold_assignment().
+    outer_fold may be integer (CV) or study name string (LOSO).
+    """
+    leftout_global_idx = np.asarray(leftout_global_idx, dtype=np.int64)
+    leftout_fold_assignments = np.asarray(leftout_fold_assignments, dtype=object)
+    if len(leftout_global_idx) != len(leftout_fold_assignments):
+        raise ValueError("leftout_global_idx and leftout_fold_assignments length mismatch.")
+    if len(leftout_global_idx) == 0:
+        raise ValueError("No left-out samples to export fold assignment for.")
+
+    rows = []
+    for fold in sorted(np.unique(leftout_fold_assignments).tolist(), key=str):
+        mask = leftout_fold_assignments == fold
+        idx = leftout_global_idx[mask].tolist()
+        if not idx:
+            continue
+        outer_fold = int(fold) if str(fold).isdigit() else str(fold)
+        rows.append({
+            "outer_fold": outer_fold,
+            "sample_indices": json.dumps(idx),
+        })
+    if not rows:
+        raise ValueError("Left-out fold assignment produced no fold rows.")
+
+    out_dir = os.path.dirname(output_path)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+    pd.DataFrame(rows).to_csv(output_path, index=False)
+    print(f"Saved left-out fold assignment: {output_path}")
+
+
 def assign_leftout_to_cv_folds(y_leftout, study_leftout, n_folds=5, random_state=None):
     """
     Assign left-out samples to CV folds with stratification and deterministic fallback.
@@ -772,6 +814,145 @@ def conditional_f1(y_true, preds):
 # Main function to evaluate one set of hyperparameters for inner cross validation #
 ###################################################################################
 
+def _knn_features_to_json(knn_features, feature_name):
+    """Serialize one per-sample KNN vector for CSV output."""
+    if not knn_features:
+        return None
+    vals = knn_features.get(feature_name)
+    if vals is None:
+        return None
+    return json.dumps(np.asarray(vals, dtype=np.float32).tolist())
+
+
+def _append_knn_columns(result_dict, knn_features):
+    """Attach KNN reject-feature columns when vectors are available."""
+    if not knn_features:
+        return result_dict
+    for col in KNN_DISTANCE_COLUMNS:
+        result_dict[col] = _knn_features_to_json(knn_features, col)
+    return result_dict
+
+
+def compute_knn_features_full_reference(
+    X_train,
+    y_train,
+    study_labels,
+    X_eval,
+    pipe,
+    fs_method="eta2",
+    knn_n_genes=KNN_REJECTION_FEATURE_N_GENES,
+    cache_dir=None,
+):
+    """
+    KNN distance summaries with the full training set as the reference space.
+    Used for final-deployment left-out scoring (model fit on all included data).
+    """
+    local_cache_dir = cache_dir or _get_reject_cache_dir()
+    pipe_clone = clone(pipe)
+    X_train_proc = pipe_clone.fit_transform(
+        X_train,
+        y_train,
+        feature_selection__study_per_patient=study_labels,
+        feature_selection__n_genes=int(knn_n_genes),
+    ).astype(np.float32)
+    X_eval_proc = pipe_clone.transform(X_eval).astype(np.float32)
+    knn_key_payload = json.dumps(
+        {
+            "mode": "final_full_reference",
+            "fs_method": str(fs_method),
+            "n_genes": int(knn_n_genes),
+            "train_hash": _stable_hash_array(np.arange(X_train.shape[0])),
+            "eval_hash": _stable_hash_array(np.arange(X_eval.shape[0])),
+            "k_values": list(KNN_REJECTION_K_VALUES),
+        },
+        sort_keys=True,
+    ).encode("utf-8")
+    knn_key = hashlib.sha256(knn_key_payload).hexdigest()
+    return _load_or_compute_knn_features(
+        local_cache_dir, knn_key, X_train_proc, X_eval_proc
+    )
+
+
+def backfill_knn_columns_in_final_leftout_results(
+    leftout_results_df,
+    X,
+    y,
+    study_labels,
+    X_leftout,
+    leftout_global_idx,
+    pipe,
+    fs_method="eta2",
+    knn_n_genes=KNN_REJECTION_FEATURE_N_GENES,
+    cache_dir=None,
+    strict=True,
+):
+    """
+    Backfill KNN columns for final full-data left-out CSV rows (outer_fold = -1).
+    Reference space is all included training samples, matching deployment inference.
+    """
+    if leftout_results_df is None or len(leftout_results_df) == 0:
+        return leftout_results_df
+
+    result = leftout_results_df.copy()
+    features = compute_knn_features_full_reference(
+        X,
+        y,
+        study_labels,
+        X_leftout,
+        pipe,
+        fs_method=fs_method,
+        knn_n_genes=knn_n_genes,
+        cache_dir=cache_dir,
+    )
+    bundle = {
+        "sample_indices": np.asarray(leftout_global_idx, dtype=np.int64),
+        "features": features,
+    }
+
+    for col in KNN_DISTANCE_COLUMNS:
+        if col not in result.columns:
+            result[col] = None
+
+    for row_idx in result.index:
+        row_indices = _parse_index_vector(result.at[row_idx, "sample_indices"])
+        if len(row_indices) == 0:
+            if strict:
+                raise ValueError(f"Empty sample_indices vector at leftout row {row_idx}.")
+            continue
+        fold_indices = bundle["sample_indices"]
+        index_to_pos = {int(v): i for i, v in enumerate(fold_indices.tolist())}
+        pos = [index_to_pos.get(int(v), None) for v in row_indices.tolist()]
+        if any(p is None for p in pos):
+            if strict:
+                missing = [int(v) for v, p in zip(row_indices.tolist(), pos) if p is None]
+                raise ValueError(
+                    f"Leftout row {row_idx} has sample_indices not found in KNN bundle: {missing[:10]}"
+                )
+            continue
+        pos = np.asarray(pos, dtype=np.int64)
+        feats = bundle["features"]
+        for col in KNN_DISTANCE_COLUMNS:
+            vec = feats.get(col)
+            if vec is None:
+                if strict:
+                    raise ValueError(f"Missing KNN feature '{col}' for final leftout backfill.")
+                continue
+            result.at[row_idx, col] = json.dumps(
+                np.asarray(vec, dtype=np.float32)[pos].tolist()
+            )
+
+    if strict:
+        for col in KNN_DISTANCE_COLUMNS:
+            missing_mask = result[col].isna() | (result[col].astype(str).str.len() == 0)
+            if missing_mask.any():
+                n_missing = int(missing_mask.sum())
+                raise ValueError(
+                    f"Final leftout KNN backfill incomplete: '{col}' missing on {n_missing} rows."
+                )
+
+    return result
+
+
 def evaluate_inner_fold(
     outer_fold,
     inner_fold,
@@ -782,7 +963,8 @@ def evaluate_inner_fold(
     model,
     params,
     multi_type="standard",
-    model_type="any"
+    model_type="any",
+    knn_features=None,
 ):
 
     def standard_eval():
@@ -848,7 +1030,7 @@ def evaluate_inner_fold(
         preds_prob = np.round(preds_prob, 4)
         preds_prob = preds_prob.tolist()
         classes = label_encoder.classes_
-        return {
+        return _append_knn_columns({
             "outer_fold": outer_fold,
             "inner_fold": inner_fold,
             "classes": classes,
@@ -863,7 +1045,7 @@ def evaluate_inner_fold(
             "preds": preds,        # All predictions 
             "preds_prob": json.dumps(preds_prob),  # All prediction probabilities
             "sample_indices": original_val_inner_idx  # All sample indices
-        }
+        }, knn_features)
 
     def ovr_eval():
         results = []
@@ -894,7 +1076,7 @@ def evaluate_inner_fold(
             preds_prob = preds_prob.tolist()
             
             results.append(
-                {
+                _append_knn_columns({
                     "outer_fold": outer_fold,
                     "inner_fold": inner_fold,
                     "class": cl,
@@ -907,7 +1089,7 @@ def evaluate_inner_fold(
                     "preds": preds,
                     "preds_prob": json.dumps(preds_prob),
                     "sample_indices": original_val_inner_idx
-                }
+                }, knn_features)
             )
         return results
 
@@ -1522,7 +1704,10 @@ def run_train_test_single_param(
     pipe,
     multi_type="standard",
     k_out=5,
-    model_type="any"
+    model_type="any",
+    fs_method="unknown",
+    cache_dir=None,
+    knn_n_genes=KNN_REJECTION_FEATURE_N_GENES,
 ):
     """
     Function for final hyperparameter selection using simple train/test splits.
@@ -1534,8 +1719,8 @@ def run_train_test_single_param(
         n_splits=k_out, shuffle=True, random_state=CV_RANDOM_STATE
     )
 
-    # Single parameter instead of list
-    n_genes_list = [single_param["n_genes"]]
+    # Single parameter instead of list; always include KNN reference space.
+    n_genes_list = sorted(list({single_param["n_genes"], int(knn_n_genes)}))
     all_results = []
 
     combined = build_hybrid_stratify_labels(y, study_labels, k_out)
@@ -1553,7 +1738,34 @@ def run_train_test_single_param(
             test_idx,
             study_labels,
             pipe,
+            cache_dir=cache_dir,
+            split_tag=f"final_selection_{fold}",
+            fs_method=fs_method,
         )
+
+        knn_features = None
+        if int(knn_n_genes) in processed_X:
+            X_train_knn, X_test_knn = processed_X[int(knn_n_genes)]
+            knn_cache_dir = cache_dir or _get_reject_cache_dir()
+            knn_key_payload = json.dumps(
+                {
+                    "mode": "final_selection_cv",
+                    "outer_fold": int(fold),
+                    "fs_method": str(fs_method),
+                    "n_genes": int(knn_n_genes),
+                    "train_hash": _stable_hash_array(train_idx),
+                    "test_hash": _stable_hash_array(test_idx),
+                    "k_values": list(KNN_REJECTION_K_VALUES),
+                },
+                sort_keys=True,
+            ).encode("utf-8")
+            knn_key = hashlib.sha256(knn_key_payload).hexdigest()
+            knn_features = _load_or_compute_knn_features(
+                knn_cache_dir,
+                knn_key,
+                X_train_knn,
+                X_test_knn,
+            )
         
         # Process single hyperparameter combination
         result = evaluate_inner_fold(
@@ -1566,7 +1778,8 @@ def run_train_test_single_param(
             model,
             single_param.copy(),  # Make copy to avoid modifying original
             multi_type=multi_type,
-            model_type=model_type
+            model_type=model_type,
+            knn_features=knn_features,
         )
 
         # Handle result
@@ -2476,6 +2689,7 @@ def predict_leftout_final(
     y_leftout,
     leftout_global_idx,
     multi_type="standard",
+    knn_features=None,
 ):
     """
     Score left-out samples with final trained models (fit on all included data).
@@ -2509,7 +2723,7 @@ def predict_leftout_final(
 
         return pd.DataFrame(
             [
-                {
+                _append_knn_columns({
                     "outer_fold": fold_tag,
                     "classes": list(classes),
                     "params": out_params,
@@ -2521,7 +2735,7 @@ def predict_leftout_final(
                     "preds": preds,
                     "preds_prob": json.dumps(preds_prob_flat),
                     "sample_indices": leftout_global_idx,
-                }
+                }, knn_features)
             ]
         )
 
@@ -2544,7 +2758,7 @@ def predict_leftout_final(
             preds_prob_list = np.round(preds_prob_pos, 4).tolist()
 
             rows.append(
-                {
+                _append_knn_columns({
                     "outer_fold": fold_tag,
                     "class": class_val,
                     "params": out_params,
@@ -2556,7 +2770,7 @@ def predict_leftout_final(
                     "preds": preds,
                     "preds_prob": json.dumps(preds_prob_list),
                     "sample_indices": leftout_global_idx,
-                }
+                }, knn_features)
             )
         return pd.DataFrame(rows)
 
