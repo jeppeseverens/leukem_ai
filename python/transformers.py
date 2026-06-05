@@ -219,6 +219,28 @@ class FeatureSelection2(BaseEstimator, TransformerMixin):
         return X[:, self.mvgs_] 
 
 
+class FeatureSelectionMADGlobal(BaseEstimator, TransformerMixin):
+    """
+    Select top n_genes by MAD over all training samples (cohort-agnostic).
+
+    Unlike FeatureSelection/FeatureSelection2, genes are ranked by variability
+    in the pooled training matrix without per-study intersection.
+    """
+
+    def __init__(self):
+        self.n_genes = None
+
+    def fit(self, X, y=None, study_per_patient=None, n_genes=2000):
+        self.n_genes = min(n_genes, X.shape[1])
+        mad = np.median(np.abs(X - np.median(X, axis=0)), axis=0)
+        kth = X.shape[1] - self.n_genes
+        self.mvgs_ = list(np.argpartition(mad, kth)[kth:])
+        return self
+
+    def transform(self, X, y=None):
+        return X[:, self.mvgs_]
+
+
 class FeatureSelectionEta(BaseEstimator, TransformerMixin):
     """
     Transformer that selects genes based on eta-squared difference:

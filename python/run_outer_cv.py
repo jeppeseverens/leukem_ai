@@ -40,7 +40,7 @@ def main():
         'fs_method': {
             'type': str,
             'default': 'mad',
-            'help': 'Feature selection method: "mad" (intersection MVGs, default) or "eta2" (eta2_subtype - eta2_study)'
+            'help': 'Feature selection: "mad", "mad_global" (pooled MAD), or "eta2" (eta2_subtype - eta2_study)'
         }
     }
 
@@ -80,7 +80,12 @@ def main():
     project_root = base_path.parent
     
     fs_method_lower = args.fs_method.lower()
-    fs_suffix = "_fs_eta" if fs_method_lower == "eta2" else ""
+    if fs_method_lower == "eta2":
+        fs_suffix = "_fs_eta"
+    elif fs_method_lower == "mad_global":
+        fs_suffix = "_fs_madglobal"
+    else:
+        fs_suffix = ""
     output_dir = project_root / "data" / "out" / "outer_cv" / f"{args.model_type}_n10{fs_suffix}"
     output_dir.mkdir(parents=True, exist_ok=True)
     print(f"Output dir is {output_dir}", flush=True)
@@ -125,11 +130,14 @@ def main():
     if fs_method_lower == "eta2":
         feature_selector = transformers.FeatureSelectionEta()
         print("Using eta2-based feature selection (eta2_subtype - eta2_study).", flush=True)
+    elif fs_method_lower == "mad_global":
+        feature_selector = transformers.FeatureSelectionMADGlobal()
+        print("Using MAD-global feature selection (pooled MAD, cohort-agnostic).", flush=True)
     elif fs_method_lower == "mad":
         feature_selector = transformers.FeatureSelection2()
         print("Using MAD-based intersecting MVG feature selection (default).", flush=True)
     else:
-        raise ValueError(f"Unknown fs_method '{args.fs_method}'. Use 'mad' or 'eta2'.")
+        raise ValueError(f"Unknown fs_method '{args.fs_method}'. Use 'mad', 'mad_global', or 'eta2'.")
     
     pipe = Pipeline([
         ('DEseq2', transformers.DESeq2RatioNormalizer()),

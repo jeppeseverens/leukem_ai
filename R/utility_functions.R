@@ -965,40 +965,15 @@ evaluate_single_cutoff <- function(cutoff, max_probs, truth, preds, model_name, 
   )
 }
 
-#' Compute correctness for rejection analysis with collapsed-classifier exceptions.
-#' For left-out samples in collapsed-classifier runs, a prediction of "other.KMT2A"
-#' is treated as correct when the true fusion is KMT2A but not MLLT3.
+#' Compute correctness for rejection analysis.
+#' Left-out/OOD rows are never granted subtype-collapse correctness exceptions.
 #' @param prob_matrix Probability matrix with metadata columns.
 #' @param truth Character vector of true labels (cleaned).
 #' @param preds Character vector of predicted labels (cleaned).
 #' @param prob_cols Character vector of probability column names used for prediction.
 #' @return Integer vector (0/1) indicating correctness.
 compute_rejection_correctness <- function(prob_matrix, truth, preds, prob_cols) {
-  correct <- as.integer(truth == preds)
-
-  # Collapsed runs expose merged class columns. Use this to scope the override so
-  # unmerged analyses are not affected.
-  is_collapsed_classifier <- "MDS.r" %in% prob_cols && "other.KMT2A" %in% prob_cols
-  if (!is_collapsed_classifier || !"is_leftout" %in% colnames(prob_matrix)) {
-    return(correct)
-  }
-
-  is_leftout <- as.logical(prob_matrix$is_leftout)
-  if (length(is_leftout) != length(correct)) {
-    is_leftout <- rep(FALSE, length(correct))
-  }
-
-  pred_norm <- gsub("[^a-z0-9]", "", tolower(preds))
-  truth_norm <- gsub("[^a-z0-9]", "", tolower(truth))
-
-  # Special case: non-MLLT3 KMT2A left-out samples predicted as Other KMT2A.
-  special_correct <- is_leftout &
-    grepl("kmt2a", truth_norm) &
-    !grepl("mllt3", truth_norm) &
-    pred_norm == "otherkmt2a"
-
-  correct[special_correct] <- 1L
-  correct
+  as.integer(truth == preds)
 }
 
 #' Vectorized cutoff analysis - much faster than per-cutoff evaluation
@@ -1045,7 +1020,7 @@ evaluate_single_matrix_with_rejection_vectorized <- function(prob_matrix, fold_n
   truth <- factor(truth, levels = all_classes)
   preds <- factor(preds, levels = all_classes)
 
-  # Pre-compute correctness (includes collapsed left-out KMT2A override).
+  # Pre-compute correctness with strict label equality (no OOD overrides).
   correct <- compute_rejection_correctness(
     prob_matrix = prob_matrix,
     truth = as.character(truth),
@@ -2594,9 +2569,20 @@ merge_classes_in_matrix <- function(prob_matrix, non_prob_cols = c("y", "inner_f
   # Merge probability matrix classes
   merged_matrix <- merge_probability_matrix_classes(prob_matrix, non_prob_cols, merge_prob_method)
 
-  # Merge true labels if present
+  # Merge true labels if present. Keep left-out/OOD labels uncollapsed so they
+  # remain truly out-of-distribution in merged-class analyses.
   if ("y" %in% colnames(merged_matrix)) {
-    merged_matrix$y <- merge_true_labels(merged_matrix$y)
+    if ("is_leftout" %in% colnames(merged_matrix)) {
+      is_leftout <- as.logical(merged_matrix$is_leftout)
+      if (length(is_leftout) != nrow(merged_matrix)) {
+        is_leftout <- rep(FALSE, nrow(merged_matrix))
+      }
+      merged_y <- merge_true_labels(merged_matrix$y)
+      merged_y[is_leftout] <- as.character(merged_matrix$y[is_leftout])
+      merged_matrix$y <- merged_y
+    } else {
+      merged_matrix$y <- merge_true_labels(merged_matrix$y)
+    }
   }
 
   return(merged_matrix)

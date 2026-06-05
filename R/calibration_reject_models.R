@@ -41,7 +41,7 @@ dir.create(OUTPUT_DIR, recursive = TRUE, showWarnings = FALSE)
 # Primary CSVs (per-fold summary, heatmap, inner grid): this risk only.
 PRIMARY_TABLE_TARGET_RISK <- 0.05
 # Calibration curve: outer threshold refit per requested risk (1% … 10% step 0.5%); RHS fixed to primary inner winner.
-CALIBRATION_CURVE_TARGET_RISKS <- seq(10L, 100L, by = 5L) / 1000 # e.g. 0.010, 0.015, …, 0.100
+CALIBRATION_CURVE_TARGET_RISKS <- seq(20L, 100L, by = 5L) / 1000 # e.g. 0.010, 0.015, …, 0.100
 TARGET_RISK <- PRIMARY_TABLE_TARGET_RISK
 # Inner fusion: score + rank grid at each anchor; RHS minimizing sum(inner_rank); ties — max rank, p05 / p03 / p10 rank, rhs_key.
 INNER_SELECTION_ANCHOR_RISKS <- c(0.03, 0.05, 0.10)
@@ -74,6 +74,12 @@ SCENARIO_KEY <- "with_leftout_ood_aware"
 SCENARIO_NAME <- "Single-head (OOD-aware train)"
 POOL_RULE <- "all_rows"
 TEST_RULE <- "all_rows"
+# Calibration-curve comparison: fused inner winner vs probability-only rejector.
+CALIBRATION_RECIPE_INNER_BEST <- "inner_best_features"
+CALIBRATION_RECIPE_MAX_PROB <- "max_prob_only"
+BASELINE_ONLY_RHS_KEY <- "max_prob"
+# Accept-all threshold for full seen-class coverage baseline (risk–coverage curve origin).
+FULL_COVERAGE_THRESHOLD <- 0
 
 cat("Starting nested target-risk calibration (strict inner-CV thresholding)...\n")
 cat(sprintf("  Scenario: %s, splits: 2 (CV/LOSO), label sets: %d\n", SCENARIO_KEY, nrow(ANALYSIS_INPUTS)))
@@ -96,6 +102,11 @@ cat(sprintf(
   "  Calibration curve CSV: risks %s%% using fixed inner winner from %.0f%% (threshold refit per target only).\n",
   paste(format(100 * CALIBRATION_CURVE_TARGET_RISKS, trim = TRUE), collapse = ", "),
   100 * PRIMARY_TABLE_TARGET_RISK
+))
+cat(sprintf(
+  "  Calibration compare CSV: %s vs %s (same risk sweep; threshold refit per target).\n",
+  CALIBRATION_RECIPE_INNER_BEST,
+  CALIBRATION_RECIPE_MAX_PROB
 ))
 cat("  Inner: per val fold, train on pool\\val, threshold from LOSO-OOF on train, evaluate on val.\n")
 cat("  Outer: threshold from LOSO-OOF on full pool; final model on pool; evaluate on held-out target.\n")
@@ -225,10 +236,24 @@ select_threshold_with_target_risk <- function(y_true, p_hat, is_seen, risk_targe
 
 extract_features <- function(prob_matrix) {
   feats <- get_rejection_features_from_matrix(prob_matrix)
+  feats$true_class <- gsub("Class\\. ", "", prob_matrix$y)
   feats$is_seen <- if ("is_leftout" %in% colnames(prob_matrix)) as.integer(!as.logical(prob_matrix$is_leftout)) else 1L
   feats$is_unseen <- 1L - feats$is_seen
   feats$accept_combined <- as.integer(feats$correct == 1L & feats$is_seen == 1L)
   feats
+}
+
+# Cohen's kappa on accepted rows (pred vs truth); NA if too few accepts or one class only.
+kappa_accepted_at_threshold <- function(truth_chr, pred_chr, p_hat, threshold) {
+  keep <- is.finite(p_hat) & is.finite(threshold)
+  if (sum(keep) < 2L) return(NA_real_)
+  acc <- p_hat[keep] >= threshold
+  if (sum(acc) < 2L) return(NA_real_)
+  truth_a <- as.character(truth_chr[keep][acc])
+  pred_a <- as.character(pred_chr[keep][acc])
+  lvls <- sort(unique(c(truth_a, pred_a)))
+  if (length(lvls) < 2L) return(NA_real_)
+  fast_kappa(factor(pred_a, levels = lvls), factor(truth_a, levels = lvls))
 }
 
 apply_row_rule <- function(df, rule) {
@@ -373,16 +398,23 @@ candidate_terms_from_df <- function(df) {
   }, logical(1))]
 }
 
-# Outer: threshold from LOSO-OOF on pool; fit on full pool; evaluate once on held-out target.
-outer_eval_singlehead <- function(pool_fold_dfs, target_df, y_col, rhs_terms, pool_rule, test_rule, risk_target, min_rows = 20L) {
+# Outer: fit on pool; evaluate on target. Threshold from pool LOSO-OOF unless fixed_threshold is set.
+outer_eval_singlehead <- function(
+  pool_fold_dfs, target_df, y_col, rhs_terms, pool_rule, test_rule, risk_target,
+  min_rows = 20L, fixed_threshold = NULL
+) {
   pool_ids <- names(pool_fold_dfs)
   if (length(pool_ids) < 2L) return(list(ok = FALSE))
   tgt_u <- apply_row_rule(target_df, test_rule)
   if (nrow(tgt_u) < 10L) return(list(ok = FALSE))
 
-  thr <- threshold_from_oof_pool_singlehead(
-    pool_fold_dfs, pool_ids, y_col, rhs_terms, pool_rule, test_rule, risk_target, min_rows
-  )
+  thr <- if (!is.null(fixed_threshold)) {
+    as.numeric(fixed_threshold)
+  } else {
+    threshold_from_oof_pool_singlehead(
+      pool_fold_dfs, pool_ids, y_col, rhs_terms, pool_rule, test_rule, risk_target, min_rows
+    )
+  }
   if (!is.finite(thr)) return(list(ok = FALSE))
 
   train_df <- bind_rows(pool_fold_dfs)
@@ -403,6 +435,12 @@ outer_eval_singlehead <- function(pool_fold_dfs, target_df, y_col, rhs_terms, po
   m <- metrics_at_fixed_threshold(y_te, p_te, seen_te, thr)
   if (!is.finite(m$risk_all_accepted) || !is.finite(m$coverage_seen)) return(list(ok = FALSE))
   aup <- calc_binary_metrics(y_te, p_te)$auprc
+  if (!all(c("true_class", "pred_class") %in% colnames(tgt_u))) {
+    return(list(ok = FALSE))
+  }
+  kappa_acc <- kappa_accepted_at_threshold(
+    tgt_u$true_class[row_te], tgt_u$pred_class[row_te], p_te, thr
+  )
   list(
     ok = TRUE,
     threshold = thr,
@@ -411,9 +449,167 @@ outer_eval_singlehead <- function(pool_fold_dfs, target_df, y_col, rhs_terms, po
     risk_all_accepted_median = m$risk_all_accepted,
     coverage_seen = m$coverage_seen,
     coverage_seen_median = m$coverage_seen,
+    kappa_accepted = kappa_acc,
+    kappa_accepted_median = kappa_acc,
     auprc_outer = aup,
     auprc_outer_median = aup
   )
+}
+
+# Rejection rates by outcome stratum on the outer target fold (rejected = p_hat < threshold).
+rejection_stratum_counts_singlehead <- function(
+  pool_fold_dfs, target_df, y_col, rhs_terms, pool_rule, test_rule, risk_target,
+  min_rows = 20L
+) {
+  pool_ids <- names(pool_fold_dfs)
+  if (length(pool_ids) < 2L) return(list(ok = FALSE))
+  tgt_u <- apply_row_rule(target_df, test_rule)
+  if (nrow(tgt_u) < 10L) return(list(ok = FALSE))
+  if (!all(c("correct", "is_seen") %in% colnames(tgt_u))) return(list(ok = FALSE))
+
+  thr <- threshold_from_oof_pool_singlehead(
+    pool_fold_dfs, pool_ids, y_col, rhs_terms, pool_rule, test_rule, risk_target, min_rows
+  )
+  if (!is.finite(thr)) return(list(ok = FALSE))
+
+  train_df <- bind_rows(pool_fold_dfs)
+  train_u <- apply_row_rule(train_df, pool_rule)
+  if (nrow(train_u) < min_rows) return(list(ok = FALSE))
+  fit_obj <- fit_binary_model(train_u, y_col, rhs_terms)
+  if (is.null(fit_obj)) return(list(ok = FALSE))
+  rhs <- fit_obj$rhs_terms
+  te2 <- tgt_u[, unique(c(y_col, "correct", "is_seen", rhs)), drop = FALSE]
+  keep_te <- complete.cases(te2)
+  if (sum(keep_te) < 10L) return(list(ok = FALSE))
+  pred_te <- predict_binary_model(fit_obj, te2[keep_te, , drop = FALSE])
+  if (is.null(pred_te)) return(list(ok = FALSE))
+
+  row_te <- which(keep_te)[pred_te$row_id]
+  seen <- as.integer(tgt_u$is_seen[row_te] > 0)
+  correct <- as.integer(tgt_u$correct[row_te] > 0)
+  p_te <- pred_te$p_hat
+  rejected <- p_te < thr
+
+  ood <- seen == 0L
+  incorrect_seen <- seen == 1L & correct == 0L
+  correct_seen <- seen == 1L & correct == 1L
+
+  list(
+    ok = TRUE,
+    threshold = thr,
+    n_ood = sum(ood),
+    n_rejected_ood = sum(rejected & ood),
+    n_incorrect_seen = sum(incorrect_seen),
+    n_rejected_incorrect_seen = sum(rejected & incorrect_seen),
+    n_correct_seen = sum(correct_seen),
+    n_rejected_correct_seen = sum(rejected & correct_seen)
+  )
+}
+
+pct_rejected <- function(n_rejected, n_total) {
+  ifelse(!is.finite(n_total) | n_total <= 0, NA_real_, 100 * n_rejected / n_total)
+}
+
+build_rejection_stratum_per_fold <- function(recipe_jobs, risk_target) {
+  if (length(recipe_jobs) == 0L) return(data.frame())
+  rows <- lapply(recipe_jobs, function(stub) {
+    rhs_terms <- strsplit(stub$inner_winner_rhs_key, ";", fixed = TRUE)[[1]]
+    cnt <- rejection_stratum_counts_singlehead(
+      stub$pool_fold_dfs, stub$target_df, "accept_combined", rhs_terms,
+      POOL_RULE, TEST_RULE, risk_target
+    )
+    if (is.null(cnt) || !isTRUE(cnt$ok)) return(NULL)
+    data.frame(
+      label_set = stub$label_set,
+      split_type = stub$split_type,
+      target_fold = as.character(stub$fold_name),
+      scenario_key = SCENARIO_KEY,
+      scenario_name = SCENARIO_NAME,
+      requested_target_risk = risk_target,
+      threshold_outer = cnt$threshold,
+      n_ood = cnt$n_ood,
+      n_rejected_ood = cnt$n_rejected_ood,
+      pct_rejected_ood = pct_rejected(cnt$n_rejected_ood, cnt$n_ood),
+      n_incorrect_seen = cnt$n_incorrect_seen,
+      n_rejected_incorrect_seen = cnt$n_rejected_incorrect_seen,
+      pct_rejected_incorrect_seen = pct_rejected(cnt$n_rejected_incorrect_seen, cnt$n_incorrect_seen),
+      n_correct_seen = cnt$n_correct_seen,
+      n_rejected_correct_seen = cnt$n_rejected_correct_seen,
+      pct_rejected_correct_seen = pct_rejected(cnt$n_rejected_correct_seen, cnt$n_correct_seen),
+      stringsAsFactors = FALSE
+    )
+  })
+  rows <- rows[!vapply(rows, is.null, logical(1))]
+  if (length(rows) == 0L) data.frame() else bind_rows(rows)
+}
+
+summarize_rejection_stratum <- function(per_fold_df) {
+  if (nrow(per_fold_df) == 0L) return(data.frame())
+  per_fold_df %>%
+    mutate(setting_col = setting_column_label(split_type, label_set)) %>%
+    group_by(label_set, split_type, setting_col, requested_target_risk) %>%
+    summarise(
+      scenario_key = dplyr::first(scenario_key),
+      scenario_name = dplyr::first(scenario_name),
+      requested_target_risk_pct = 100 * dplyr::first(requested_target_risk),
+      n_outer_folds = n(),
+      n_ood = sum(n_ood, na.rm = TRUE),
+      n_rejected_ood = sum(n_rejected_ood, na.rm = TRUE),
+      n_incorrect_seen = sum(n_incorrect_seen, na.rm = TRUE),
+      n_rejected_incorrect_seen = sum(n_rejected_incorrect_seen, na.rm = TRUE),
+      n_correct_seen = sum(n_correct_seen, na.rm = TRUE),
+      n_rejected_correct_seen = sum(n_rejected_correct_seen, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      pct_rejected_ood = pct_rejected(n_rejected_ood, n_ood),
+      pct_rejected_incorrect_seen = pct_rejected(n_rejected_incorrect_seen, n_incorrect_seen),
+      pct_rejected_correct_seen = pct_rejected(n_rejected_correct_seen, n_correct_seen)
+    ) %>%
+    arrange(label_set, split_type)
+}
+
+# LOSO only: unweighted mean of rejection % across full_subtypes and collapsed_classes.
+summarize_rejection_stratum_loso_labels_averaged <- function(summary_df) {
+  loso <- summary_df %>% filter(split_type == "loso")
+  if (nrow(loso) != 2L) return(data.frame())
+  loso %>%
+    summarise(
+      split_type = "loso",
+      scenario_key = dplyr::first(scenario_key),
+      scenario_name = dplyr::first(scenario_name),
+      requested_target_risk = dplyr::first(requested_target_risk),
+      requested_target_risk_pct = dplyr::first(requested_target_risk_pct),
+      n_outer_folds = sum(n_outer_folds, na.rm = TRUE),
+      n_label_sets_averaged = n(),
+      pct_rejected_ood = mean(pct_rejected_ood, na.rm = TRUE),
+      pct_rejected_incorrect_seen = mean(pct_rejected_incorrect_seen, na.rm = TRUE),
+      pct_rejected_correct_seen = mean(pct_rejected_correct_seen, na.rm = TRUE),
+      .groups = "drop"
+    )
+}
+
+summarize_rejection_stratum_pooled <- function(per_fold_df) {
+  if (nrow(per_fold_df) == 0L) return(data.frame())
+  data.frame(
+    scenario_key = per_fold_df$scenario_key[[1]],
+    scenario_name = per_fold_df$scenario_name[[1]],
+    requested_target_risk = per_fold_df$requested_target_risk[[1]],
+    requested_target_risk_pct = 100 * per_fold_df$requested_target_risk[[1]],
+    n_outer_folds = nrow(per_fold_df),
+    n_ood = sum(per_fold_df$n_ood, na.rm = TRUE),
+    n_rejected_ood = sum(per_fold_df$n_rejected_ood, na.rm = TRUE),
+    n_incorrect_seen = sum(per_fold_df$n_incorrect_seen, na.rm = TRUE),
+    n_rejected_incorrect_seen = sum(per_fold_df$n_rejected_incorrect_seen, na.rm = TRUE),
+    n_correct_seen = sum(per_fold_df$n_correct_seen, na.rm = TRUE),
+    n_rejected_correct_seen = sum(per_fold_df$n_rejected_correct_seen, na.rm = TRUE),
+    stringsAsFactors = FALSE
+  ) %>%
+    mutate(
+      pct_rejected_ood = pct_rejected(n_rejected_ood, n_ood),
+      pct_rejected_incorrect_seen = pct_rejected(n_rejected_incorrect_seen, n_incorrect_seen),
+      pct_rejected_correct_seen = pct_rejected(n_rejected_correct_seen, n_correct_seen)
+    )
 }
 
 # Count RHS terms other than max_prob in one semicolon-separated key.
@@ -705,6 +901,8 @@ evaluate_outer_fold_joint <- function(pool_fold_dfs, target_df, split_type, labe
     outer_risk_all_accepted_median = out$risk_all_accepted_median,
     outer_coverage_seen = out$coverage_seen,
     outer_coverage_seen_median = out$coverage_seen_median,
+    outer_kappa_accepted = out$kappa_accepted,
+    outer_kappa_accepted_median = out$kappa_accepted_median,
     outer_auprc = out$auprc_outer,
     outer_auprc_median = out$auprc_outer_median,
     base_model = TARGET_BASE_MODEL,
@@ -898,6 +1096,8 @@ summarize_four_settings <- function(per_fold_df) {
       sd_outer_coverage_seen = stats::sd(outer_coverage_seen, na.rm = TRUE),
       mean_outer_risk_all_accepted = mean(outer_risk_all_accepted, na.rm = TRUE),
       sd_outer_risk_all_accepted = stats::sd(outer_risk_all_accepted, na.rm = TRUE),
+      mean_outer_kappa_accepted = mean(outer_kappa_accepted, na.rm = TRUE),
+      sd_outer_kappa_accepted = stats::sd(outer_kappa_accepted, na.rm = TRUE),
       .groups = "drop"
     ) %>%
     arrange(label_set, split_type)
@@ -986,8 +1186,10 @@ run_fixed_recipe_outer_eval <- function(stub, risk_target) {
   data.frame(
     label_set = stub$label_set,
     split_type = stub$split_type,
+    target_fold = as.character(stub$fold_name),
     outer_risk_all_accepted = out$risk_all_accepted,
     outer_coverage_seen = out$coverage_seen,
+    outer_kappa_accepted = out$kappa_accepted,
     stringsAsFactors = FALSE
   )
 }
@@ -1008,16 +1210,160 @@ build_calibration_curve_from_stubs <- function(recipe_jobs, risk_targets) {
   if (ci == 1L) data.frame() else bind_rows(chunks)
 }
 
+# Clone outer-fold stubs with a fixed RHS (e.g. max_prob-only baseline).
+stubs_with_fixed_rhs <- function(recipe_jobs, rhs_key) {
+  if (length(recipe_jobs) == 0L) return(list())
+  lapply(recipe_jobs, function(stub) {
+    stub$inner_winner_rhs_key <- rhs_key
+    stub
+  })
+}
+
+# Full-coverage baseline: inner-winning multivariate recipe, accept all (threshold = 0).
+evaluate_full_coverage_from_stub <- function(stub) {
+  rhs_terms <- strsplit(stub$inner_winner_rhs_key, ";", fixed = TRUE)[[1]]
+  out <- outer_eval_singlehead(
+    stub$pool_fold_dfs, stub$target_df, "accept_combined", rhs_terms,
+    POOL_RULE, TEST_RULE, risk_target = NULL, fixed_threshold = FULL_COVERAGE_THRESHOLD
+  )
+  if (is.null(out) || !isTRUE(out$ok)) return(NULL)
+  data.frame(
+    label_set = stub$label_set,
+    split_type = stub$split_type,
+    target_fold = as.character(stub$fold_name),
+    scenario_key = SCENARIO_KEY,
+    inner_winner_rhs_key = stub$inner_winner_rhs_key,
+    outer_risk_all_accepted = out$risk_all_accepted,
+    outer_coverage_seen = out$coverage_seen,
+    outer_kappa_accepted = out$kappa_accepted,
+    stringsAsFactors = FALSE
+  )
+}
+
+# Classifier-only baseline (no rejector): error rate and kappa on all target-fold samples.
+evaluate_classifier_only_full_coverage <- function(target_df) {
+  tgt_u <- apply_row_rule(target_df, TEST_RULE)
+  if (nrow(tgt_u) < 10L || !all(c("true_class", "pred_class", "correct") %in% colnames(tgt_u))) {
+    return(NULL)
+  }
+  risk_all_accepted <- mean(as.integer(tgt_u$correct == 0L))
+  lvls <- sort(unique(c(as.character(tgt_u$true_class), as.character(tgt_u$pred_class))))
+  kappa_acc <- if (length(lvls) < 2L) {
+    NA_real_
+  } else {
+    fast_kappa(
+      factor(tgt_u$pred_class, levels = lvls),
+      factor(tgt_u$true_class, levels = lvls)
+    )
+  }
+  data.frame(
+    outer_risk_all_accepted = risk_all_accepted,
+    outer_coverage_seen = if ("is_seen" %in% colnames(tgt_u)) {
+      mean(as.integer(tgt_u$is_seen > 0))
+    } else {
+      1
+    },
+    outer_kappa_accepted = kappa_acc,
+    stringsAsFactors = FALSE
+  )
+}
+
+# Outer-fold metrics at primary risk with max_prob-only RHS (no inner feature selection).
+build_max_prob_per_fold_primary <- function(
+  recipe_jobs,
+  risk_target = PRIMARY_TABLE_TARGET_RISK
+) {
+  if (length(recipe_jobs) == 0L) return(data.frame())
+  rows <- lapply(recipe_jobs, function(stub) {
+    stub_mp <- stubs_with_fixed_rhs(list(stub), BASELINE_ONLY_RHS_KEY)[[1]]
+    ev <- run_fixed_recipe_outer_eval(stub_mp, risk_target)
+    if (is.null(ev)) return(NULL)
+    data.frame(
+      label_set = stub$label_set,
+      split_type = stub$split_type,
+      target_fold = ev$target_fold,
+      scenario_key = SCENARIO_KEY,
+      scenario_name = SCENARIO_NAME,
+      inner_winner_optional_features = "max_prob (baseline only)",
+      inner_winner_rhs_key = BASELINE_ONLY_RHS_KEY,
+      outer_risk_all_accepted = ev$outer_risk_all_accepted,
+      outer_coverage_seen = ev$outer_coverage_seen,
+      outer_kappa_accepted = ev$outer_kappa_accepted,
+      stringsAsFactors = FALSE
+    )
+  })
+  rows <- rows[!vapply(rows, is.null, logical(1))]
+  if (length(rows) == 0L) data.frame() else bind_rows(rows)
+}
+
+# Inner-best vs max_prob-only means across outer folds (for risk–coverage comparison plots).
+build_calibration_compare_curves <- function(recipe_jobs, risk_targets) {
+  if (length(recipe_jobs) == 0L) return(data.frame())
+  inner_best <- build_calibration_curve_from_stubs(recipe_jobs, risk_targets) %>%
+    mutate(calibration_recipe = CALIBRATION_RECIPE_INNER_BEST)
+  max_prob_only <- build_calibration_curve_from_stubs(
+    stubs_with_fixed_rhs(recipe_jobs, BASELINE_ONLY_RHS_KEY),
+    risk_targets
+  ) %>%
+    mutate(calibration_recipe = CALIBRATION_RECIPE_MAX_PROB)
+  bind_rows(inner_best, max_prob_only) %>%
+    arrange(label_set, split_type, calibration_recipe, requested_target_risk_pct)
+}
+
+# Per outer fold: realized risk/coverage vs requested target (no cross-fold aggregation).
+build_calibration_curve_per_fold_from_stubs <- function(recipe_jobs, risk_targets) {
+  if (length(recipe_jobs) == 0L) return(data.frame())
+  chunks <- list()
+  ci <- 1L
+  for (tr in risk_targets) {
+    rows <- lapply(recipe_jobs, function(stub) run_fixed_recipe_outer_eval(stub, tr))
+    rows <- rows[!vapply(rows, is.null, logical(1))]
+    if (length(rows) == 0L) next
+    chunks[[ci]] <- bind_rows(rows) %>%
+      mutate(
+        setting_col = setting_column_label(split_type, label_set),
+        requested_target_risk_pct = 100 * tr,
+        realized_risk_pct = 100 * outer_risk_all_accepted,
+        realized_coverage_seen_pct = 100 * outer_coverage_seen
+      ) %>%
+      select(
+        label_set, split_type, setting_col, target_fold,
+        requested_target_risk_pct, realized_risk_pct, realized_coverage_seen_pct
+      )
+    ci <- ci + 1L
+  }
+  if (ci == 1L) {
+    data.frame()
+  } else {
+    bind_rows(chunks) %>%
+      arrange(label_set, split_type, target_fold, requested_target_risk_pct)
+  }
+}
+
 all_per_fold <- list()
+all_rejection_stratum_per_fold <- list()
 all_summary <- list()
+all_max_prob_per_fold <- list()
+all_summary_max_prob <- list()
 all_heat <- list()
 all_inner_ranked <- list()
 calibration_curve_chunks <- list()
+calibration_curve_per_fold_chunks <- list()
+calibration_compare_chunks <- list()
+full_coverage_per_fold_rows <- list()
+classifier_only_per_fold_rows <- list()
 p_idx <- 1L
+rej_idx <- 1L
 s_idx <- 1L
+mpf_idx <- 1L
+smp_idx <- 1L
 h_idx <- 1L
 in_idx <- 1L
 cc_idx <- 1L
+cc_pf_idx <- 1L
+cc_cmp_idx <- 1L
+fc_idx <- 1L
+co_idx <- 1L
 
 for (i in seq_len(nrow(ANALYSIS_INPUTS))) {
   row <- ANALYSIS_INPUTS[i, ]
@@ -1047,6 +1393,47 @@ for (i in seq_len(nrow(ANALYSIS_INPUTS))) {
     calibration_curve_chunks[[cc_idx]] <- curve_part
     cc_idx <- cc_idx + 1L
   }
+  curve_pf_part <- build_calibration_curve_per_fold_from_stubs(res$recipe_jobs, CALIBRATION_CURVE_TARGET_RISKS)
+  if (nrow(curve_pf_part) > 0L) {
+    calibration_curve_per_fold_chunks[[cc_pf_idx]] <- curve_pf_part
+    cc_pf_idx <- cc_pf_idx + 1L
+  }
+  compare_part <- build_calibration_compare_curves(res$recipe_jobs, CALIBRATION_CURVE_TARGET_RISKS)
+  if (nrow(compare_part) > 0L) {
+    calibration_compare_chunks[[cc_cmp_idx]] <- compare_part
+    cc_cmp_idx <- cc_cmp_idx + 1L
+  }
+  for (stub in res$recipe_jobs) {
+    fc_row <- evaluate_full_coverage_from_stub(stub)
+    if (!is.null(fc_row)) {
+      full_coverage_per_fold_rows[[fc_idx]] <- fc_row
+      fc_idx <- fc_idx + 1L
+    }
+    co_row <- evaluate_classifier_only_full_coverage(stub$target_df)
+    if (!is.null(co_row)) {
+      co_row$label_set <- stub$label_set
+      co_row$split_type <- stub$split_type
+      co_row$target_fold <- as.character(stub$fold_name)
+      classifier_only_per_fold_rows[[co_idx]] <- co_row
+      co_idx <- co_idx + 1L
+    }
+  }
+  rej_pf <- build_rejection_stratum_per_fold(res$recipe_jobs, PRIMARY_TABLE_TARGET_RISK)
+  if (nrow(rej_pf) > 0L) {
+    all_rejection_stratum_per_fold[[rej_idx]] <- rej_pf
+    rej_idx <- rej_idx + 1L
+  }
+
+  max_prob_pf <- build_max_prob_per_fold_primary(res$recipe_jobs, PRIMARY_TABLE_TARGET_RISK)
+  if (nrow(max_prob_pf) > 0L) {
+    all_max_prob_per_fold[[mpf_idx]] <- max_prob_pf
+    mpf_idx <- mpf_idx + 1L
+    max_prob_sum <- summarize_four_settings(max_prob_pf)
+    if (nrow(max_prob_sum) > 0L) {
+      all_summary_max_prob[[smp_idx]] <- max_prob_sum
+      smp_idx <- smp_idx + 1L
+    }
+  }
 
   if (nrow(res$per_fold_df) > 0L) {
     all_per_fold[[p_idx]] <- res$per_fold_df
@@ -1067,7 +1454,71 @@ for (i in seq_len(nrow(ANALYSIS_INPUTS))) {
 }
 
 per_fold_out <- if (length(all_per_fold) == 0L) data.frame() else bind_rows(all_per_fold)
+rejection_stratum_per_fold_out <- if (length(all_rejection_stratum_per_fold) == 0L) {
+  data.frame()
+} else {
+  bind_rows(all_rejection_stratum_per_fold)
+}
+rejection_stratum_summary_out <- summarize_rejection_stratum(rejection_stratum_per_fold_out)
+rejection_stratum_loso_avg_out <- summarize_rejection_stratum_loso_labels_averaged(rejection_stratum_summary_out)
+rejection_stratum_pooled_out <- summarize_rejection_stratum_pooled(rejection_stratum_per_fold_out)
 summary_out <- if (length(all_summary) == 0L) data.frame() else bind_rows(all_summary)
+per_fold_max_prob_out <- if (length(all_max_prob_per_fold) == 0L) {
+  data.frame()
+} else {
+  bind_rows(all_max_prob_per_fold)
+}
+summary_max_prob_out <- if (length(all_summary_max_prob) == 0L) {
+  data.frame()
+} else {
+  bind_rows(all_summary_max_prob)
+}
+summarize_full_coverage_baseline <- function(per_fold_df, baseline_kind) {
+  if (nrow(per_fold_df) == 0L) return(data.frame())
+  per_fold_df %>%
+    mutate(setting_col = setting_column_label(split_type, label_set)) %>%
+    group_by(label_set, split_type, setting_col) %>%
+    summarise(
+      baseline_kind = baseline_kind,
+      n_outer_folds = n(),
+      mean_outer_risk_all_accepted = mean(outer_risk_all_accepted, na.rm = TRUE),
+      sd_outer_risk_all_accepted = stats::sd(outer_risk_all_accepted, na.rm = TRUE),
+      mean_outer_coverage_seen = mean(outer_coverage_seen, na.rm = TRUE),
+      mean_outer_kappa_accepted = mean(outer_kappa_accepted, na.rm = TRUE),
+      sd_outer_kappa_accepted = stats::sd(outer_kappa_accepted, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    arrange(label_set, split_type)
+}
+
+full_coverage_per_fold_out <- if (length(full_coverage_per_fold_rows) == 0L) {
+  data.frame()
+} else {
+  bind_rows(full_coverage_per_fold_rows)
+}
+classifier_only_per_fold_out <- if (length(classifier_only_per_fold_rows) == 0L) {
+  data.frame()
+} else {
+  bind_rows(classifier_only_per_fold_rows)
+}
+full_coverage_summary_out <- dplyr::bind_rows(
+  summarize_full_coverage_baseline(full_coverage_per_fold_out, "multivariate_accept_all"),
+  summarize_full_coverage_baseline(classifier_only_per_fold_out, "classifier_only")
+)
+
+summary_combined_out <- if (nrow(summary_out) == 0L && nrow(summary_max_prob_out) == 0L) {
+  data.frame()
+} else {
+  bind_rows(
+    if (nrow(summary_out) > 0L) {
+      summary_out %>% mutate(calibration_recipe = CALIBRATION_RECIPE_INNER_BEST)
+    },
+    if (nrow(summary_max_prob_out) > 0L) {
+      summary_max_prob_out %>% mutate(calibration_recipe = CALIBRATION_RECIPE_MAX_PROB)
+    }
+  ) %>%
+    arrange(label_set, split_type, calibration_recipe)
+}
 heatmap_out <- if (length(all_heat) == 0L) data.frame() else bind_rows(all_heat)
 inner_scores_out <- if (length(all_inner_ranked) == 0L) data.frame() else bind_rows(all_inner_ranked)
 calibration_curve_out <- if (length(calibration_curve_chunks) == 0L) {
@@ -1075,12 +1526,78 @@ calibration_curve_out <- if (length(calibration_curve_chunks) == 0L) {
 } else {
   bind_rows(calibration_curve_chunks) %>% arrange(label_set, split_type, requested_target_risk_pct)
 }
-
+calibration_curve_per_fold_out <- if (length(calibration_curve_per_fold_chunks) == 0L) {
+  data.frame()
+} else {
+  bind_rows(calibration_curve_per_fold_chunks) %>%
+    arrange(label_set, split_type, target_fold, requested_target_risk_pct)
+}
+calibration_compare_out <- if (length(calibration_compare_chunks) == 0L) {
+  data.frame()
+} else {
+  bind_rows(calibration_compare_chunks) %>%
+    arrange(label_set, split_type, calibration_recipe, requested_target_risk_pct)
+}
 if (nrow(calibration_curve_out) > 0L) {
   cat("Writing nested_target_risk_calibration_curve.csv ...\n")
   write_csv(calibration_curve_out, file.path(OUTPUT_DIR, "nested_target_risk_calibration_curve.csv"))
 }
-
+if (nrow(calibration_curve_per_fold_out) > 0L) {
+  cat("Writing nested_target_risk_calibration_curve_per_fold.csv ...\n")
+  write_csv(
+    calibration_curve_per_fold_out,
+    file.path(OUTPUT_DIR, "nested_target_risk_calibration_curve_per_fold.csv")
+  )
+}
+if (nrow(calibration_compare_out) > 0L) {
+  cat("Writing nested_target_risk_calibration_compare.csv ...\n")
+  write_csv(
+    calibration_compare_out,
+    file.path(OUTPUT_DIR, "nested_target_risk_calibration_compare.csv")
+  )
+}
+if (nrow(full_coverage_per_fold_out) > 0L) {
+  cat("Writing nested_target_risk_full_coverage_per_fold.csv ...\n")
+  write_csv(
+    full_coverage_per_fold_out,
+    file.path(OUTPUT_DIR, "nested_target_risk_full_coverage_per_fold.csv")
+  )
+}
+if (nrow(full_coverage_summary_out) > 0L) {
+  cat("Writing nested_target_risk_full_coverage_summary.csv ...\n")
+  write_csv(
+    full_coverage_summary_out,
+    file.path(OUTPUT_DIR, "nested_target_risk_full_coverage_summary.csv")
+  )
+}
+if (nrow(rejection_stratum_per_fold_out) > 0L) {
+  cat("Writing nested_target_risk_rejection_stratum_per_fold.csv ...\n")
+  write_csv(
+    rejection_stratum_per_fold_out,
+    file.path(OUTPUT_DIR, "nested_target_risk_rejection_stratum_per_fold.csv")
+  )
+}
+if (nrow(rejection_stratum_summary_out) > 0L) {
+  cat("Writing nested_target_risk_rejection_stratum_summary.csv ...\n")
+  write_csv(
+    rejection_stratum_summary_out,
+    file.path(OUTPUT_DIR, "nested_target_risk_rejection_stratum_summary.csv")
+  )
+}
+if (nrow(rejection_stratum_loso_avg_out) > 0L) {
+  cat("Writing nested_target_risk_rejection_stratum_loso_labels_averaged.csv ...\n")
+  write_csv(
+    rejection_stratum_loso_avg_out,
+    file.path(OUTPUT_DIR, "nested_target_risk_rejection_stratum_loso_labels_averaged.csv")
+  )
+}
+if (nrow(rejection_stratum_pooled_out) > 0L) {
+  cat("Writing nested_target_risk_rejection_stratum_pooled.csv ...\n")
+  write_csv(
+    rejection_stratum_pooled_out,
+    file.path(OUTPUT_DIR, "nested_target_risk_rejection_stratum_pooled.csv")
+  )
+}
 if (nrow(per_fold_out) > 0L) {
   cat("Writing nested_target_risk_per_fold.csv ...\n")
   write_csv(per_fold_out, file.path(OUTPUT_DIR, "nested_target_risk_per_fold.csv"))
@@ -1088,6 +1605,18 @@ if (nrow(per_fold_out) > 0L) {
 if (nrow(summary_out) > 0L) {
   cat("Writing nested_target_risk_summary_four_settings.csv ...\n")
   write_csv(summary_out, file.path(OUTPUT_DIR, "nested_target_risk_summary_four_settings.csv"))
+}
+if (nrow(summary_max_prob_out) > 0L) {
+  cat("Writing nested_target_risk_summary_max_prob.csv ...\n")
+  write_csv(summary_max_prob_out, file.path(OUTPUT_DIR, "nested_target_risk_summary_max_prob.csv"))
+}
+if (nrow(per_fold_max_prob_out) > 0L) {
+  cat("Writing nested_target_risk_per_fold_max_prob.csv ...\n")
+  write_csv(per_fold_max_prob_out, file.path(OUTPUT_DIR, "nested_target_risk_per_fold_max_prob.csv"))
+}
+if (nrow(summary_combined_out) > 0L) {
+  cat("Writing nested_target_risk_summary_combined.csv ...\n")
+  write_csv(summary_combined_out, file.path(OUTPUT_DIR, "nested_target_risk_summary_combined.csv"))
 }
 if (nrow(heatmap_out) > 0L) {
   cat("Writing nested_target_risk_feature_heatmap_long.csv ...\n")
@@ -1102,11 +1631,21 @@ if (nrow(inner_scores_out) > 0L) {
 manifest <- data.frame(
   key = c(
     "timestamp_utc", "output_dir", "inputs", "base_model", "scenarios", "baseline_terms", "all_feature_terms",
-    "selection_metric", "selection_strategy", "canonical_family_order", "per_fold_csv", "summary_four_csv",
+    "selection_metric", "selection_strategy", "canonical_family_order",     "per_fold_csv", "summary_four_csv", "summary_max_prob_csv", "summary_combined_csv",
+    "per_fold_max_prob_csv",
     "heatmap_long_csv", "inner_scores_ranked_csv", "calibration_curve_csv",
+    "calibration_curve_per_fold_csv",
+    "calibration_compare_csv",
+    "full_coverage_per_fold_csv",
+    "full_coverage_summary_csv",
+    "rejection_stratum_per_fold_csv",
+    "rejection_stratum_summary_csv",
+    "rejection_stratum_loso_labels_averaged_csv",
+    "rejection_stratum_pooled_csv",
     "risk_targets_primary_outputs_fraction",
     "risk_targets_calibration_curve_fraction",
     "calibration_curve_inner_recipe_policy",
+    "calibration_compare_recipes",
     "parallel_mc_cores", "parallel_outer_folds_backend"
   ),
   value = c(
@@ -1125,12 +1664,24 @@ manifest <- data.frame(
     SCENARIO_KEY,
     file.path(OUTPUT_DIR, "nested_target_risk_per_fold.csv"),
     file.path(OUTPUT_DIR, "nested_target_risk_summary_four_settings.csv"),
+    file.path(OUTPUT_DIR, "nested_target_risk_summary_max_prob.csv"),
+    file.path(OUTPUT_DIR, "nested_target_risk_summary_combined.csv"),
+    file.path(OUTPUT_DIR, "nested_target_risk_per_fold_max_prob.csv"),
     file.path(OUTPUT_DIR, "nested_target_risk_feature_heatmap_long.csv"),
     file.path(OUTPUT_DIR, "nested_target_risk_inner_scores_ranked.csv"),
     file.path(OUTPUT_DIR, "nested_target_risk_calibration_curve.csv"),
+    file.path(OUTPUT_DIR, "nested_target_risk_calibration_curve_per_fold.csv"),
+    file.path(OUTPUT_DIR, "nested_target_risk_calibration_compare.csv"),
+    file.path(OUTPUT_DIR, "nested_target_risk_full_coverage_per_fold.csv"),
+    file.path(OUTPUT_DIR, "nested_target_risk_full_coverage_summary.csv"),
+    file.path(OUTPUT_DIR, "nested_target_risk_rejection_stratum_per_fold.csv"),
+    file.path(OUTPUT_DIR, "nested_target_risk_rejection_stratum_summary.csv"),
+    file.path(OUTPUT_DIR, "nested_target_risk_rejection_stratum_loso_labels_averaged.csv"),
+    file.path(OUTPUT_DIR, "nested_target_risk_rejection_stratum_pooled.csv"),
     as.character(PRIMARY_TABLE_TARGET_RISK),
     paste(as.character(CALIBRATION_CURVE_TARGET_RISKS), collapse = ", "),
     "fixed_rhs_from_primary_target;_outer_threshold_refit_only",
+    paste(CALIBRATION_RECIPE_INNER_BEST, CALIBRATION_RECIPE_MAX_PROB, sep = ";"),
     as.character(PARALLEL_MC_CORES),
     if (.Platform$OS.type == "unix") "parallel::mclapply fork" else "sequential"
   ),

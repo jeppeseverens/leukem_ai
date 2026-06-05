@@ -22,9 +22,9 @@ find_latest_csv <- function(directory, pattern) {
 
 # Output directories per model
 OUTER_CV_DIRS <- list(
-  svm     = "../data/out/outer_cv/SVM_n10_fs_eta",
-  xgboost = "../data/out/outer_cv/XGBOOST_n10_fs_eta",
-  nn      = "../data/out/outer_cv/NN_n10_fs_eta"
+  svm     = "../data/out/outer_cv/SVM_n10_fs_madglobal",
+  xgboost = "../data/out/outer_cv/XGBOOST_n10_fs_madglobal",
+  nn      = "../data/out/outer_cv/NN_n10_fs_madglobal"
 )
 
 # Auto-discover the latest outer CV result files (standard + leftout)
@@ -32,22 +32,22 @@ OUTER_MODEL_CONFIGS <- list(
   svm = list(
     classification_type = "OvR",
     file_paths = list(
-      cv   = find_latest_csv(OUTER_CV_DIRS$svm, "^SVM_outer_cv_CV_OvR_fs_eta_\\d+_\\d+(_with_knn)?\\.csv$"),
-      loso = find_latest_csv(OUTER_CV_DIRS$svm, "^SVM_outer_cv_loso_OvR_fs_eta_\\d+_\\d+(_with_knn)?\\.csv$")
+      cv   = find_latest_csv(OUTER_CV_DIRS$svm, "^SVM_outer_cv_CV_OvR_fs_madglobal_\\d+_\\d+(_with_knn)?\\.csv$"),
+      loso = find_latest_csv(OUTER_CV_DIRS$svm, "^SVM_outer_cv_loso_OvR_fs_madglobal_\\d+_\\d+(_with_knn)?\\.csv$")
     )
   ),
   xgboost = list(
     classification_type = "OvR",
     file_paths = list(
-      cv   = find_latest_csv(OUTER_CV_DIRS$xgboost, "^XGBOOST_outer_cv_CV_OvR_fs_eta_\\d+_\\d+(_with_knn)?\\.csv$"),
-      loso = find_latest_csv(OUTER_CV_DIRS$xgboost, "^XGBOOST_outer_cv_loso_OvR_fs_eta_\\d+_\\d+(_with_knn)?\\.csv$")
+      cv   = find_latest_csv(OUTER_CV_DIRS$xgboost, "^XGBOOST_outer_cv_CV_OvR_fs_madglobal_\\d+_\\d+(_with_knn)?\\.csv$"),
+      loso = find_latest_csv(OUTER_CV_DIRS$xgboost, "^XGBOOST_outer_cv_loso_OvR_fs_madglobal_\\d+_\\d+(_with_knn)?\\.csv$")
     )
   ),
   neural_net = list(
     classification_type = "standard",
     file_paths = list(
-      cv   = find_latest_csv(OUTER_CV_DIRS$nn, "^NN_outer_cv_CV_standard_fs_eta_\\d+_\\d+(_with_knn)?\\.csv$"),
-      loso = find_latest_csv(OUTER_CV_DIRS$nn, "^NN_outer_cv_loso_standard_fs_eta_\\d+_\\d+(_with_knn)?\\.csv$")
+      cv   = find_latest_csv(OUTER_CV_DIRS$nn, "^NN_outer_cv_CV_standard_fs_madglobal_\\d+_\\d+(_with_knn)?\\.csv$"),
+      loso = find_latest_csv(OUTER_CV_DIRS$nn, "^NN_outer_cv_loso_standard_fs_madglobal_\\d+_\\d+(_with_knn)?\\.csv$")
     )
   )
 )
@@ -57,22 +57,22 @@ LEFTOUT_MODEL_CONFIGS <- list(
   svm = list(
     classification_type = "OvR",
     file_paths = list(
-      cv   = find_latest_csv(OUTER_CV_DIRS$svm, "^SVM_outer_cv_CV_OvR_leftout_fs_eta_\\d+_\\d+(_with_knn)?\\.csv$"),
-      loso = find_latest_csv(OUTER_CV_DIRS$svm, "^SVM_outer_cv_loso_OvR_leftout_fs_eta_\\d+_\\d+(_with_knn)?\\.csv$")
+      cv   = find_latest_csv(OUTER_CV_DIRS$svm, "^SVM_outer_cv_CV_OvR_leftout_fs_madglobal_\\d+_\\d+(_with_knn)?\\.csv$"),
+      loso = find_latest_csv(OUTER_CV_DIRS$svm, "^SVM_outer_cv_loso_OvR_leftout_fs_madglobal_\\d+_\\d+(_with_knn)?\\.csv$")
     )
   ),
   xgboost = list(
     classification_type = "OvR",
     file_paths = list(
-      cv   = find_latest_csv(OUTER_CV_DIRS$xgboost, "^XGBOOST_outer_cv_CV_OvR_leftout_fs_eta_\\d+_\\d+(_with_knn)?\\.csv$"),
-      loso = find_latest_csv(OUTER_CV_DIRS$xgboost, "^XGBOOST_outer_cv_loso_OvR_leftout_fs_eta_\\d+_\\d+(_with_knn)?\\.csv$")
+      cv   = find_latest_csv(OUTER_CV_DIRS$xgboost, "^XGBOOST_outer_cv_CV_OvR_leftout_fs_madglobal_\\d+_\\d+(_with_knn)?\\.csv$"),
+      loso = find_latest_csv(OUTER_CV_DIRS$xgboost, "^XGBOOST_outer_cv_loso_OvR_leftout_fs_madglobal_\\d+_\\d+(_with_knn)?\\.csv$")
     )
   ),
   neural_net = list(
     classification_type = "standard",
     file_paths = list(
-      cv   = find_latest_csv(OUTER_CV_DIRS$nn, "^NN_outer_cv_CV_standard_leftout_fs_eta_\\d+_\\d+(_with_knn)?\\.csv$"),
-      loso = find_latest_csv(OUTER_CV_DIRS$nn, "^NN_outer_cv_loso_standard_leftout_fs_eta_\\d+_\\d+(_with_knn)?\\.csv$")
+      cv   = find_latest_csv(OUTER_CV_DIRS$nn, "^NN_outer_cv_CV_standard_leftout_fs_madglobal_\\d+_\\d+(_with_knn)?\\.csv$"),
+      loso = find_latest_csv(OUTER_CV_DIRS$nn, "^NN_outer_cv_loso_standard_leftout_fs_madglobal_\\d+_\\d+(_with_knn)?\\.csv$")
     )
   )
 )
@@ -93,8 +93,8 @@ DATA_FILTERS <- list(
 )
 
 # Base directory for ensemble weights
-WEIGHTS_BASE_DIR_UNMERGED <- "../data/out/inner_cv/ensemble_weights_unmerged_eta2/"
-WEIGHTS_BASE_DIR_MERGED <- "../data/out/inner_cv/ensemble_weights_merged_summed_eta2/"
+WEIGHTS_BASE_DIR_UNMERGED <- "../data/out/inner_cv/ensemble_weights_unmerged_madglobal/"
+WEIGHTS_BASE_DIR_MERGED <- "../data/out/inner_cv/ensemble_weights_merged_summed_madglobal/"
 
 # Nested analysis (R/calibration_reject_models.R) reads outer_cv_results.rds ->
 # multivariate_results$with_leftout_ood_aware$Global_Product_Optimized: augmented
@@ -1770,9 +1770,9 @@ main_outer_cv <- function(merge_classes = FALSE) {
 
   # Determine suffix for file paths (maxprob method - uses max probability instead of summing)
   if (!merge_classes) {
-    merge_suffix <- "_unmerged_maxprob"
+    merge_suffix <- "_unmerged_maxprob_madglobal"
   } else {
-    merge_suffix <- "_merged_summed"
+    merge_suffix <- "_merged_summed_madglobal"
   }
   outer_cv_results$merge_classes <- merge_classes  # Store merge status in results
 

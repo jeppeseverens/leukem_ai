@@ -65,7 +65,7 @@ def main():
         'fs_method': {
             'type': str,
             'default': 'mad',
-            'help': 'Feature selection method: "mad" (intersection MVGs, default) or "eta2" (eta2_subtype - eta2_study)'
+            'help': 'Feature selection: "mad", "mad_global" (pooled MAD), or "eta2" (eta2_subtype - eta2_study)'
         }
     }
 
@@ -153,8 +153,8 @@ def main():
     else:
         raise ValueError(f"Model type {args.model_type} not supported")
 
-    # If using eta2-based feature selection, restrict n_genes to smaller values
-    if args.fs_method.lower() == "eta2" and 'n_genes' in param_grid:
+    # eta2 and mad_global share the same smaller n_genes grid
+    if args.fs_method.lower() in ("eta2", "mad_global") and 'n_genes' in param_grid:
         param_grid['n_genes'] = [250, 500, 1000, 1500]
 
     # Generate full parameter list (same logic as original)
@@ -189,12 +189,16 @@ def main():
         feature_selector = transformers.FeatureSelectionEta()
         fs_suffix = "_fs_eta"
         print("Using eta2-based feature selection (eta2_subtype - eta2_study).")
+    elif fs_method == "mad_global":
+        feature_selector = transformers.FeatureSelectionMADGlobal()
+        fs_suffix = "_fs_madglobal"
+        print("Using MAD-global feature selection (pooled MAD, cohort-agnostic).")
     elif fs_method == "mad":
         feature_selector = transformers.FeatureSelection()
         fs_suffix = ""
         print("Using MAD-based intersecting MVG feature selection (default).")
     else:
-        raise ValueError(f"Unknown fs_method '{args.fs_method}'. Use 'mad' or 'eta2'.")
+        raise ValueError(f"Unknown fs_method '{args.fs_method}'. Use 'mad', 'mad_global', or 'eta2'.")
 
     # Define the pipeline
     pipe = Pipeline([

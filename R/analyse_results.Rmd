@@ -34,7 +34,7 @@ outer_merged <- readRDS("../data/out/outer_cv/outer_cv_analysis_outputs_merged_s
 ```
 
 ```{r}
-source("train_test_analysis.R")
+#source("train_test_analysis.R")
 #train_test_results_unmerged$performance_comparisons
 #train_test_results_merged$performance_comparisons
 ```
@@ -79,8 +79,9 @@ label_mapping <- read.csv("../data/label_mapping_all.csv")
 # Load leukemia subtype data
 leukemia_subtypes <- read.csv("../data/rgas_10feb26.csv")$ICC_Subtype
 
-# Load study metadata
-meta <- read.csv("../data/meta_20aug25.csv")
+# Load study metadata (meta_full: all cohort rows; meta: analysis filter subset)
+meta_full <- read.csv("../data/meta_20aug25.csv")
+meta <- meta_full
 study_names <- meta$Studies
 
 # Filter data based on criteria
@@ -90,6 +91,12 @@ filter <- which(
     !leukemia_subtypes %in% DATA_FILTERS$excluded_subtypes &
     study_names %in% DATA_FILTERS$selected_studies
 )
+
+cat(paste0("n cases before filtering: ",nrow(meta_full)))
+
+cat(paste0("\nn cases removed coming from excluded subtypes: ",sum(leukemia_subtypes %in% DATA_FILTERS$excluded_subtypes)))
+
+cat(paste0("\nn cases removed coming from excluded subtypes: ", sum(!leukemia_subtypes %in% subtypes_with_sufficient_samples)))
 
 leukemia_subtypes_mod <- modify_classes(leukemia_subtypes)
 
@@ -682,6 +689,9 @@ ggsave(
   "../writing/figures_new/fig_patients_age_classes.svg",
   p_dual
 )
+
+round(summary(meta$age_years), 1)
+table(meta$age_years>=18)a
 ```
 
 ##  --Performance Boxplots
@@ -956,7 +966,7 @@ p2 <- ggplot(
 
 library(patchwork)
 # Arrange CV and LOSO boxplots vertically and collect a single shared legend
-boxplot_figure <- (p1 / p2) + patchwork::plot_annotation(
+boxplot_figure <- (p2 / p1) + patchwork::plot_annotation(
   title = "Performance by model and class granularity",
   theme = theme(
     plot.title = element_text(size = 10),
@@ -1039,9 +1049,9 @@ performance_table <- cv_full %>%
     `LOSO Accuracy (Full)` = sprintf("%.1f%% ± %.1f%%", loso_acc_mean_full * 100, loso_acc_sd_full * 100),
     `LOSO Accuracy (Collapsed)` = sprintf("%.1f%% ± %.1f%%", loso_acc_mean_collapsed * 100, loso_acc_sd_collapsed * 100)
   ) %>%
-  select(Model, `CV Kappa (Full)`, `CV Kappa (Collapsed)`, `CV Accuracy (Full)`, 
-         `CV Accuracy (Collapsed)`, `LOSO Kappa (Full)`, `LOSO Kappa (Collapsed)`, 
-         `LOSO Accuracy (Full)`, `LOSO Accuracy (Collapsed)`)
+  select(Model, `LOSO Kappa (Full)`, `LOSO Kappa (Collapsed)`, 
+         `LOSO Accuracy (Full)`, `LOSO Accuracy (Collapsed)`, `CV Kappa (Full)`, `CV Kappa (Collapsed)`, `CV Accuracy (Full)`, 
+         `CV Accuracy (Collapsed)`)
 
 # Order by cv_order (reverse order to match original)
 performance_table <- performance_table %>%
@@ -1065,12 +1075,96 @@ performance_table_kable <- kable(
   column_spec(1, bold = TRUE) %>%
   add_header_above(c(" " = 1, "Full" = 1, "Collapsed" = 1, "Full" = 1, "Collapsed" = 1, "Full" = 1, "Collapsed" = 1, "Full" = 1, "Collapsed" = 1)) %>%
   add_header_above(c(" " = 1, "Kappa (Mean ± SD)" = 2, "Accuracy (Mean ± SD)" = 2, "Kappa (Mean ± SD)" = 2, "Accuracy (Mean ± SD)" = 2)) %>%
-  add_header_above(c(" " = 1, "Standard CV" = 4, "LOSO" = 4)) 
+  add_header_above(c(" " = 1, "LOSO" = 4, "Standard CV" = 4)) 
 
 performance_table_kable
 
 save_kable(performance_table_kable, "../writing/tables_new/table2_perf.png", zoom = 2)
 
+```
+
+## Feature selection ablation: eta2 vs MAD-global (ensemble kappa)
+
+Compare ensemble (`Global_Product_Optimized`) kappa between cohort-aware eta2 selection and
+pooled MAD selection (cohort-agnostic). Requires outer CV RDS from both `outer_cv_analysis.r`
+and `outer_cv_analysis_mad_global.R`.
+
+```{r fs_method_kappa_comparison}
+extract_ensemble_kappa <- function(rds_path, label_set) {
+  if (!file.exists(rds_path)) {
+    warning("Missing RDS: ", rds_path)
+    return(NULL)
+  }
+  res <- readRDS(rds_path)
+  rows <- list()
+  idx <- 1L
+  for (fold_type in c("cv", "loso")) {
+    fold_metrics <- res$detailed_performance[[fold_type]][["Global_Product_Optimized"]]
+    if (is.null(fold_metrics) || length(fold_metrics) == 0) next
+    kappas <- vapply(fold_metrics, function(x) x$kappa, numeric(1))
+    rows[[idx]] <- data.frame(
+      label_set = label_set,
+      fold_type = fold_type,
+      mean_kappa = mean(kappas, na.rm = TRUE),
+      sd_kappa = sd(kappas, na.rm = TRUE),
+      stringsAsFactors = FALSE
+    )
+    idx <- idx + 1L
+  }
+  if (length(rows) == 0) return(NULL)
+  do.call(rbind, rows)
+}
+
+eta2_stats <- dplyr::bind_rows(
+  extract_ensemble_kappa(
+    "../data/out/outer_cv/outer_cv_analysis_outputs_unmerged_maxprob/outer_cv_results.rds",
+    "Full subtypes"
+  ),
+  extract_ensemble_kappa(
+    "../data/out/outer_cv/outer_cv_analysis_outputs_merged_summed/outer_cv_results.rds",
+    "Collapsed classes"
+  )
+) %>%
+  dplyr::rename(kappa_eta2 = mean_kappa, sd_eta2 = sd_kappa)
+
+mad_stats <- dplyr::bind_rows(
+  extract_ensemble_kappa(
+    "../data/out/outer_cv/outer_cv_analysis_outputs_unmerged_maxprob_madglobal/outer_cv_results.rds",
+    "Full subtypes"
+  ),
+  extract_ensemble_kappa(
+    "../data/out/outer_cv/outer_cv_analysis_outputs_merged_summed_madglobal/outer_cv_results.rds",
+    "Collapsed classes"
+  )
+) %>%
+  dplyr::rename(kappa_mad_global = mean_kappa, sd_mad_global = sd_kappa)
+
+fs_method_comparison <- dplyr::full_join(
+  eta2_stats,
+  mad_stats,
+  by = c("label_set", "fold_type")
+) %>%
+  dplyr::mutate(
+    delta = kappa_eta2 - kappa_mad_global,
+    kappa_eta2_fmt = sprintf("%.3f ± %.3f", kappa_eta2, sd_eta2),
+    kappa_mad_global_fmt = sprintf("%.3f ± %.3f", kappa_mad_global, sd_mad_global),
+    delta_fmt = sprintf("%+.3f", delta)
+  ) %>%
+  dplyr::arrange(label_set, fold_type)
+
+print(fs_method_comparison)
+
+fs_method_table <- fs_method_comparison %>%
+  dplyr::transmute(
+    `Label set` = label_set,
+    `Fold type` = toupper(fold_type),
+    `Eta2 (kappa ± SD)` = kappa_eta2_fmt,
+    `MAD-global (kappa ± SD)` = kappa_mad_global_fmt,
+    `Delta (eta2 - MAD-global)` = delta_fmt
+  )
+
+knitr::kable(fs_method_table, caption = "Feature selection ablation: ensemble kappa comparison")
+write.csv(fs_method_comparison, "../writing/tables_new/fs_method_kappa_comparison.csv", row.names = FALSE)
 ```
 
 # Per-Class Performance Analysis
@@ -1382,8 +1476,9 @@ library(egg)
 
 # Arrange the four class-performance panels (CV/LOSO × full/collapsed)
 figure2_egg <- ggarrange(
-  cm_fig_cv_full_plot,      cm_fig_cv_collapsed_plot,
   cm_fig_loso_full_plot,    cm_fig_loso_collapsed_plot,
+  cm_fig_cv_full_plot,      cm_fig_cv_collapsed_plot,
+
   ncol  = 2, nrow = 2,
   labels = c("A", "B", "C", "D"),
   label.args = list(gp = gpar(fontface = "bold", cex = 1))
@@ -1481,7 +1576,15 @@ f1_comparison_plot <- f1_comparison %>%
 mds_cyto_class <- "MDS-related, cytogenetic abnormalities"
 f1_comparison_plot <- f1_comparison_plot %>% filter(!is.na(F1) | Class == mds_cyto_class)
 # Shape: CV = closed (dot 16, triangle 17), LOSO = open (dot 1, triangle 2)
-f1_comparison_plot$ShapeType <- paste(f1_comparison_plot$Type, f1_comparison_plot$Validation)
+f1_comparison_plot$ShapeType <- factor(
+  paste(f1_comparison_plot$Type, f1_comparison_plot$Validation),
+  levels = c(
+    "Full LOSO",
+    "Collapsed LOSO",
+    "Full CV",
+    "Collapsed CV"
+  )
+)
 # Order classes consistently; include any class in the data so none become NA (unnamed level)
 all_classes_ordered <- order_AML
 extra_classes <- setdiff(unique(as.character(f1_comparison_plot$Class)), all_classes_ordered)
@@ -1537,7 +1640,7 @@ panel_a <- ggplot(f1_comparison_plot, aes(x = F1, y = Class, color = Category, s
   geom_vline(xintercept = 0.8, linetype = "dashed", color = "gray50", alpha = 0.5) +
  scale_color_manual(values = category_colors, name = "Category") +
 scale_shape_manual(
-  values = c("Full CV" = 16, "Full LOSO" = 1, "Collapsed CV" = 17, "Collapsed LOSO" = 2),
+  values = c("Full CV" = 1, "Full LOSO" = 16, "Collapsed CV" = 2, "Collapsed LOSO" = 17),
   name = "Classes",
   labels = c(
     "Full CV" = "Full (CV)",
@@ -1654,8 +1757,8 @@ panel_a_split_combined
 ```
 
 ```{r}
-sum(f1_full$F1>0.8, na.rm = T)
-sum(f1_full$F1>0.9, na.rm = T)
+sum(f1_full_loso$F1>0.8, na.rm = T)
+sum(f1_full_loso$F1>0.9, na.rm = T)
 ```
 
 
@@ -1663,7 +1766,9 @@ sum(f1_full$F1>0.9, na.rm = T)
 f1_comparison_plot %>% filter(grepl("NPM1|RUNX1|KAT|FUS", Class)) %>% select(Class, Validation, F1)
 ```
 ```{r}
-f1_comparison_plot %>% filter(grepl("MDS|Other KMT2A|MECOM rearrangement", Class) & Validation == "CV") %>% select(Class, Validation, F1)
+f1_comparison_plot %>% filter(grepl("MDS|Other KMT2A|MECOM rearrangement|MLLT3|KMT2A::MLLT1", Class) & Validation == "LOSO") %>% select(Class, Validation, F1)
+
+f1_comparison_plot %>% filter(grepl("MDS|Other KMT2A|MECOM rearrangement|MLLT3|KMT2A::MLLT1", Class) & Validation == "CV") %>% select(Class, Validation, F1)
 ```
 
 ```{r}
@@ -1763,8 +1868,8 @@ focus_groups_panel_c <- c(kmt2a_mllt3, kmt2a_other_merged, mecom_merged, mds_mer
 
 # Get error heatmaps from appropriate result objects
 # Panel B uses full classes (outer_unmerged), Panel C uses collapsed classes (outer_merged)
-error_panel_b <- get_error_heatmap(outer_unmerged, "cv", "Full", focus_groups_panel_b)
-error_panel_c <- get_error_heatmap(outer_merged, "cv", "Collapsed", focus_groups_panel_c)
+error_panel_b <- get_error_heatmap(outer_unmerged, "loso", "Full", focus_groups_panel_b)
+error_panel_c <- get_error_heatmap(outer_merged, "loso", "Collapsed", focus_groups_panel_c)
 
 # Shared styling for both error heatmaps (same cell size and font sizes)
 error_heatmap_cell_w_mm <- 12*0.6
@@ -2102,6 +2207,119 @@ dev.off()
 
 cat("Faceted confusion matrices saved!\n")
 ```
+## -- Compare survival MECOM, MDS and KMT2A-fusions
+
+Test whether the constituent (genomic) subtypes within each collapsed group differ in
+overall survival after adjusting for age, sex, and cohort. The subtype effect is assessed
+with a likelihood-ratio test comparing a Cox model with vs without subtype, both containing
+the covariates. Cohort and age are strong confounders here (e.g. MDS-related cases are
+adult-enriched, KMT2A paediatric-enriched), so adjusted tests are more informative than a
+plain log-rank. Collapsed groups follow `modify_classes()`: MDS/TP53 -> MDS-related,
+KMT2A (excluding KMT2A::MLLT3) -> other KMT2A, MECOM -> MECOM.
+
+```{r survival_collapsed_groups}
+library(survival)
+
+# Per-sample survival table from the filtered analysis set (genomic ground-truth subtype).
+surv_df <- data.frame(
+  subtype = meta$classes,
+  survival_days = meta$survival_days,
+  event = meta$outcome,
+  age = meta$age_days,
+  cohort = meta$Studies,
+  sex = meta$sex,
+  stringsAsFactors = FALSE
+)
+surv_df <- surv_df[!is.na(surv_df$survival_days) & !is.na(surv_df$event) & !is.na(surv_df$subtype), ]
+
+# Membership rules for each collapsed group, mirroring modify_classes().
+group_filters <- list(
+  "other KMT2A" = function(s) grepl("KMT2A", s) & !grepl("MLLT3", s),
+  "MECOM"       = function(s) grepl("MECOM", s),
+  "MDS-related" = function(s) grepl("MDS|TP53", s)
+)
+
+# Adjusted subtype effect: Cox likelihood-ratio test for subtype, adjusting for age + sex +
+# cohort (survdiff cannot adjust for covariates; it would group by every term combination).
+# Covariates are kept only if they vary within the group; rows with missing covariates dropped.
+adjusted_subtype_test <- function(d) {
+  d <- d[complete.cases(d[, c("age", "sex", "cohort")]), ]
+  covars <- c("age", "sex", "cohort")
+  covars <- covars[sapply(covars, function(cv) length(unique(d[[cv]])) > 1)]
+  f_full <- as.formula(paste("Surv(survival_days, event) ~",
+                             paste(c("subtype", covars), collapse = " + ")))
+  f_null <- if (length(covars) == 0) {
+    as.formula("Surv(survival_days, event) ~ 1")
+  } else {
+    as.formula(paste("Surv(survival_days, event) ~", paste(covars, collapse = " + ")))
+  }
+  an <- anova(coxph(f_null, data = d), coxph(f_full, data = d))
+  data.frame(n = nrow(d), covariates = paste(covars, collapse = "+"),
+             chisq = an$Chisq[2], df = an$Df[2], p_value = an$`Pr(>|Chi|)`[2])
+}
+
+within_group_adjusted <- do.call(rbind, lapply(names(group_filters), function(g) {
+  d <- surv_df[group_filters[[g]](surv_df$subtype), ]
+  if (length(unique(d$subtype)) < 2) {
+    return(data.frame(group = g, n = nrow(d), covariates = NA, chisq = NA, df = NA, p_value = NA))
+  }
+  cbind(group = g, adjusted_subtype_test(d))
+}))
+cat("Within-group subtype effect (Cox LRT, adjusted for age+sex+cohort):\n")
+print(within_group_adjusted, row.names = FALSE)
+
+# Per-subtype summary: n, events, median OS (days) within each group.
+per_subtype_summary <- do.call(rbind, lapply(names(group_filters), function(g) {
+  d <- surv_df[group_filters[[g]](surv_df$subtype), ]
+  do.call(rbind, lapply(sort(unique(d$subtype)), function(s) {
+    ds <- d[d$subtype == s, ]
+    fit <- survfit(Surv(survival_days, event) ~ 1, data = ds)
+    data.frame(
+      group = g, subtype = s, n = nrow(ds), events = sum(ds$event),
+      median_os_days = unname(summary(fit)$table["median"])
+    )
+  }))
+}))
+cat("\nPer-subtype survival summary:\n")
+print(per_subtype_summary, row.names = FALSE)
+
+# Between-group: are the three collapsed categories prognostically distinct after adjustment?
+surv_df$collapsed <- modify_classes(surv_df$subtype)
+between_df <- surv_df[surv_df$collapsed %in% c("MDS.r", "other.KMT2A", "MECOM"), ]
+between_df <- between_df[complete.cases(between_df[, c("age", "sex", "cohort")]), ]
+an_between <- anova(
+  coxph(Surv(survival_days, event) ~ age + sex + cohort, data = between_df),
+  coxph(Surv(survival_days, event) ~ collapsed + age + sex + cohort, data = between_df)
+)
+between_group_adjusted <- data.frame(
+  comparison = "MDS-related vs other KMT2A vs MECOM",
+  n = nrow(between_df), chisq = an_between$Chisq[2], df = an_between$Df[2],
+  p_value = an_between$`Pr(>|Chi|)`[2]
+)
+cat("\nBetween collapsed-group effect (Cox LRT, adjusted for age+sex+cohort):\n")
+print(between_group_adjusted, row.names = FALSE)
+```
+
+```{r survival_collapsed_groups_km, fig.width = 12, fig.height = 4}
+# Descriptive (unadjusted) KM curves per collapsed group; annotated with adjusted Cox p.
+png("../writing/figures_new/survival_collapsed_groups_km.png",
+    width = 1500, height = 500, res = 150)
+par(mfrow = c(1, length(group_filters)))
+for (g in names(group_filters)) {
+  d <- surv_df[group_filters[[g]](surv_df$subtype), ]
+  d$subtype <- factor(d$subtype)
+  fit <- survfit(Surv(survival_days, event) ~ subtype, data = d)
+  pval <- within_group_adjusted$p_value[within_group_adjusted$group == g]
+  plot(fit, col = seq_along(levels(d$subtype)), lwd = 2,
+       xlab = "Days", ylab = "Overall survival",
+       main = sprintf("%s (adjusted p = %.3f)", g, pval))
+  legend("topright", legend = levels(d$subtype),
+         col = seq_along(levels(d$subtype)), lwd = 2, bty = "n", cex = 0.7)
+}
+dev.off()
+cat("KM curves saved to ../writing/figures_new/survival_collapsed_groups_km.png\n")
+```
+
 
 # Performance stratification
 
@@ -2198,8 +2416,9 @@ ped_adult_legend_plot <- ggplot(ped_adult_legend_data, aes(x = x, y = y, fill = 
   xlim(0, 0) + ylim(0, 0)
 
 # Combine in 2x2 grid with legends
-plots_grid <- (pa + theme(legend.position = "none") + pb + theme(legend.position = "none")) / 
-              (pc + theme(legend.position = "none") + pd + theme(legend.position = "none"))
+plots_grid <-  
+              (pc + theme(legend.position = "none") + pd + theme(legend.position = "none"))/
+  (pa + theme(legend.position = "none") + pb + theme(legend.position = "none")) 
 model_legend <- get_legend(pa + theme(legend.position = "right"))
 ped_adult_legend <- get_legend(ped_adult_legend_plot)
 combined_legends <- plot_grid(model_legend, ped_adult_legend, ncol = 1, align = "v")
@@ -2287,6 +2506,26 @@ ggsave("../writing/figures_new/pediatric_vs_adult_performance.png", p_ped_adult,
 ## -- Data Preparation: Sample-Level Analysis
 
 ```{r}
+# Columns that are not class probabilities on ensemble fold matrices (keep in sync with utility_functions.R).
+ENSEMBLE_MATRIX_META_COLS <- c(
+  "y", "inner_fold", "outer_fold", "fold", "indices", "study",
+  "sample_indices", "sample_index",
+  "confidence_multivariate",
+  "confidence_id", "confidence_correct", "confidence_two_head",
+  "confidence_seen_new_cohort", "confidence_unseen", "confidence_three_head",
+  "confidence_two_head_postcal", "confidence_two_head_min_gate", "confidence_two_head_id_veto",
+  "is_leftout", "n_models_agree", "top1_prob_variance_across_models",
+  "knn10_mean_d", "knn10_min_d", "knn10_q90_d",
+  "knn20_mean_d", "knn20_min_d", "knn20_q90_d",
+  "trust_ratio_knn10", "conformal_set_size_90"
+)
+
+predictions_from_ensemble_fold <- function(fold_prob_matrix) {
+  class_cols <- colnames(fold_prob_matrix)[!colnames(fold_prob_matrix) %in% ENSEMBLE_MATRIX_META_COLS]
+  pred_idx <- max.col(fold_prob_matrix[, class_cols, drop = FALSE], ties.method = "first")
+  class_cols[pred_idx]
+}
+
 # Build sample-level dataframe with LOSO predictions and metadata
 loso_predictions_list <- list()
 loso_truth_list <- list()
@@ -2295,8 +2534,7 @@ loso_indices_list <- list()
 
 for (fold in names(outer_merged$detailed_performance$loso$Global_Product_Optimized)) {
   fold_prob_matrix <- outer_merged$ensemble_matrices$loso$global_product_ensemble[[fold]]
-  predictions <- apply(fold_prob_matrix[,!colnames(fold_prob_matrix) %in% c("y", "outer_fold", "sample_indices")], 1, which.max)
-  predictions <- colnames(fold_prob_matrix)[!colnames(fold_prob_matrix) %in% c("y", "outer_fold", "sample_indices")][predictions]
+  predictions <- predictions_from_ensemble_fold(fold_prob_matrix)
   truth <- as.character(fold_prob_matrix$y)
   sample_indices <- fold_prob_matrix$sample_indices
   
@@ -2317,15 +2555,16 @@ sample_level_df <- data.frame(
 sample_level_df$correct <- sample_level_df$prediction == sample_level_df$truth
 
 # Add age, sex, survival, and apply class transformations
-sample_level_df$age_days <- meta$age_days[sample_level_df$sample_index + 1]
+# sample_index is 0-based in the full rgas cohort; join metadata via meta_full.
+sample_level_df$age_days <- meta_full$age_days[sample_level_df$sample_index + 1]
 sample_level_df$age_years <- sample_level_df$age_days / 365.25
-sample_level_df$sex <- meta$sex[sample_level_df$sample_index + 1]
-sample_level_df$survival_days <- meta$survival_days[sample_level_df$sample_index + 1]
-sample_level_df$event <- meta$outcome[sample_level_df$sample_index + 1]
+sample_level_df$sex <- meta_full$sex[sample_level_df$sample_index + 1]
+sample_level_df$survival_days <- meta_full$survival_days[sample_level_df$sample_index + 1]
+sample_level_df$event <- meta_full$outcome[sample_level_df$sample_index + 1]
 sample_level_df$truth_merged <- modify_classes(sample_level_df$truth)
-sample_level_df$truth_display <- fix_names(sample_level_df$truth_merged)
+sample_level_df$truth_display <- as.character(fix_names(sample_level_df$truth_merged))
 sample_level_df$prediction_merged <- modify_classes(sample_level_df$prediction)
-sample_level_df$prediction_display <- fix_names(sample_level_df$prediction_merged)
+sample_level_df$prediction_display <- as.character(fix_names(sample_level_df$prediction_merged))
 sample_level_df$is_pediatric <- sample_level_df$cohort %in% c("AAML0531", "AAML1031", "AAML03P1")
 
 # Define rare subtypes
@@ -2352,12 +2591,7 @@ build_sample_level_df <- function(res_obj, setting = c("loso", "cv"), collapsed 
 
   for (fold in names(res_obj$detailed_performance[[setting]]$Global_Product_Optimized)) {
     fold_prob_matrix <- res_obj$ensemble_matrices[[setting]]$global_product_ensemble[[fold]]
-
-    # Keep only class-probability columns when deriving predicted label.
-    non_class_cols <- c("y", "outer_fold", "fold", "sample_indices", "sample_index")
-    class_cols <- colnames(fold_prob_matrix)[!colnames(fold_prob_matrix) %in% non_class_cols]
-    pred_idx <- apply(fold_prob_matrix[, class_cols, drop = FALSE], 1, which.max)
-    predictions <- class_cols[pred_idx]
+    predictions <- predictions_from_ensemble_fold(fold_prob_matrix)
     truth <- as.character(fold_prob_matrix$y)
 
     # Prefer sample_indices; fall back to sample_index if needed.
@@ -2381,15 +2615,18 @@ build_sample_level_df <- function(res_obj, setting = c("loso", "cv"), collapsed 
     stringsAsFactors = FALSE
   )
   out$correct <- out$prediction == out$truth
-  out$age_days <- meta$age_days[out$sample_index + 1]
+  # sample_index is global (full cohort); outer CV matrices use filtered_index_map.
+  out$age_days <- meta_full$age_days[out$sample_index + 1]
   out$age_years <- out$age_days / 365.25
+  out$cohort <- out$fold
+  out$is_pediatric <- out$fold %in% c("AAML0531", "AAML1031", "AAML03P1")
 
   if (collapsed) {
-    out$truth_display <- fix_names(modify_classes(out$truth))
-    out$prediction_display <- fix_names(modify_classes(out$prediction))
+    out$truth_display <- as.character(fix_names(modify_classes(out$truth)))
+    out$prediction_display <- as.character(fix_names(modify_classes(out$prediction)))
   } else {
-    out$truth_display <- fix_names(out$truth)
-    out$prediction_display <- fix_names(out$prediction)
+    out$truth_display <- as.character(fix_names(out$truth))
+    out$prediction_display <- as.character(fix_names(out$prediction))
   }
 
   out
@@ -2473,14 +2710,19 @@ p_age_kappa_cv + p_age_kappa + p_age_kappa_cv_full + p_age_kappa_full + patchwor
 ```
 
 ```{r}
-# Combined trend-line plot across all four age-kappa variants (no points, no SE ribbon).
+# Combined trend-line plot across all four age-kappa variants.
 age_kappa_lines <- dplyr::bind_rows(
   age_performance %>% dplyr::mutate(setting = "LOSO - Collapsed"),
   age_performance_cv %>% dplyr::mutate(setting = "CV - Collapsed"),
   age_performance_full_loso %>% dplyr::mutate(setting = "LOSO - Full"),
   age_performance_full_cv %>% dplyr::mutate(setting = "CV - Full")
 )
-
+age_kappa_lines$setting <- factor(age_kappa_lines$setting, levels = c(
+  "LOSO - Full",
+  "LOSO - Collapsed",
+  "CV - Full",
+  "CV - Collapsed"
+))
 p_age_kappa_all_lines <- ggplot(age_kappa_lines, aes(x = age_mid, y = kappa, color = setting, linetype = setting)) +
   geom_smooth(method = "loess", se = FALSE, formula = y ~ x, linewidth = 1.1) +
   geom_vline(xintercept = 18, linetype = "dashed", color = "gray40", alpha = 0.6) +
@@ -2540,9 +2782,18 @@ ggsave("../writing/figures_new/f2.png", width = 250, height = 180, units = "mm")
 ## -- Per-Subtype F1 by Age Analysis
 
 ```{r}
-# Calculate F1 per subtype per 15-year age bin
+# Calculate F1 per subtype per 10-year age bin
+sample_level_age <- sample_level_age[
+  !is.na(sample_level_age$age_years) &
+    !is.na(sample_level_age$truth_display) &
+    !is.na(sample_level_age$prediction_display),
+]
+sample_level_age$truth_display <- as.character(sample_level_age$truth_display)
+sample_level_age$prediction_display <- as.character(sample_level_age$prediction_display)
+
 age_bins_5yr <- seq(0, 90, by = 10)
 subtypes_unique <- unique(sample_level_age$truth_display)
+subtypes_unique <- subtypes_unique[!is.na(subtypes_unique)]
 f1_by_age_subtype <- data.frame()
 
 for (i in 1:(length(age_bins_5yr)-1)) {
@@ -2556,12 +2807,12 @@ for (i in 1:(length(age_bins_5yr)-1)) {
   if (nrow(age_bin_data) == 0) next
   
   for (subtype_i in subtypes_unique) {
-    tp <- sum(age_bin_data$truth_display == subtype_i & age_bin_data$prediction_display == subtype_i)
-    fp <- sum(age_bin_data$truth_display != subtype_i & age_bin_data$prediction_display == subtype_i)
-    fn <- sum(age_bin_data$truth_display == subtype_i & age_bin_data$prediction_display != subtype_i)
-    n_true <- sum(age_bin_data$truth_display == subtype_i)
+    tp <- sum(age_bin_data$truth_display == subtype_i & age_bin_data$prediction_display == subtype_i, na.rm = TRUE)
+    fp <- sum(age_bin_data$truth_display != subtype_i & age_bin_data$prediction_display == subtype_i, na.rm = TRUE)
+    fn <- sum(age_bin_data$truth_display == subtype_i & age_bin_data$prediction_display != subtype_i, na.rm = TRUE)
+    n_true <- sum(age_bin_data$truth_display == subtype_i, na.rm = TRUE)
     
-    if (n_true >= 5) {
+    if (!is.na(n_true) && n_true >= 5) {
       precision <- ifelse(tp + fp > 0, tp / (tp + fp), NA)
       recall <- ifelse(tp + fn > 0, tp / (tp + fn), NA)
       f1_score <- ifelse(!is.na(precision) & !is.na(recall) & (precision + recall) > 0,
@@ -2611,7 +2862,7 @@ ggsave("../writing/figures_new/f1_by_age_and_subtype_faceted.png", p_f1_age_subt
 
 ```{r}
 # Get F1 scores per subtype from per-class summaries
-per_class_f1 <- outer_merged$per_class_summaries$cv %>%
+per_class_f1 <- outer_merged$per_class_summaries$loso %>%
   filter(Model == "Global_Product_Optimized") %>%
   select(Class, Mean_F1)
 per_class_f1$Class <- gsub("Class: ", "", per_class_f1$Class)
@@ -3262,6 +3513,134 @@ p_out <- (p_eta2_2 + p_tsne_500 +
 ggsave("../writing/figures_new/fig_features.svg", p_out, width = 400, height = 200, units = "mm")
 ```
 
+## Marker heatmap of the 500 selected features
+
+Biological validation of the predictor's feature set: per-subtype mean expression (z-scored)
+of the 500 selected genes. If the features carry subtype-specific signal, each subtype should
+show a distinct block of highly expressed genes. Ensembl IDs are mapped to gene symbols via
+org.Hs.eg.db, and genes belonging to canonical AML gene-expression programs are highlighted on
+the y-axis: the HOX/TALE program (NPM1, KMT2A-rearranged, NUP98), MECOM/3q26 enhancer-hijacking,
+core-binding factor (t(8;21), inv(16)), and the CEBPA and t(7;12)/MNX1 programs.
+
+```{r marker_heatmap_500, fig.width = 9, fig.height = 11}
+library(ComplexHeatmap)
+library(circlize)
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+
+# Z-score each selected gene across samples, then average within each (full-resolution) subtype.
+X_500_z <- scale(counts_deseq2_all[, col_idx_500])
+colnames(X_500_z) <- genes_500_subtype
+
+subtype_lab <- as.character(fix_names(filtered_leukemia_subtypes))
+rs <- rowsum(X_500_z, subtype_lab)
+n_per_subtype <- as.vector(table(subtype_lab)[rownames(rs)])
+subtype_mean <- rs / n_per_subtype        # subtypes x 500 genes (mean z-score)
+mat <- t(subtype_mean)                     # 500 genes x subtypes
+
+# Map Ensembl IDs (version-stripped) to gene symbols; fall back to the ID when unmapped.
+ens_ids <- sub("\\..*$", "", rownames(mat))
+gene_symbols <- unname(AnnotationDbi::mapIds(
+  org.Hs.eg.db, keys = ens_ids, column = "SYMBOL", keytype = "ENSEMBL", multiVals = "first"
+))
+gene_symbols[is.na(gene_symbols)] <- ens_ids[is.na(gene_symbols)]
+rownames(mat) <- gene_symbols
+
+# Canonical AML gene-expression program markers to highlight on the y-axis (literature-based;
+# genes defined only by mutation/fusion rather than a differential-expression signature excluded).
+aml_markers <- c(
+  # HOX/TALE program (NPM1, KMT2A-r, NUP98, DEK::NUP214, UBTF)
+  "HOXA3", "HOXA5", "HOXA7", "HOXA9", "HOXA10",
+  "HOXB2", "HOXB3", "HOXB4", "HOXB5", "HOXB6", "MEIS1", "PBX3",
+  # MECOM / 3q26 enhancer-hijacking (inv(3)/t(3;3) and atypical 3q26)
+  "MECOM", "PRDM16", "GATA2", "MN1", "BAALC", "PROM1",
+  # Core-binding factor: t(8;21) and inv(16)
+  "RUNX1T1", "POU4F1", "TRH", "MYH11", "NT5E",
+  # CEBPA program and t(7;12)
+  "CEBPA", "MNX1"
+)
+mark_idx <- which(rownames(mat) %in% aml_markers)
+row_anno <- if (length(mark_idx) > 0) {
+  rowAnnotation(markers = anno_mark(
+    at = mark_idx, labels = rownames(mat)[mark_idx], labels_gp = gpar(fontsize = 8)
+  ))
+} else NULL
+
+col_fun <- colorRamp2(c(-2, 0, 2), c("#2166ac", "white", "#b2182b"))
+ht_markers <- Heatmap(
+  mat, name = "mean z",
+  col = col_fun,
+  show_row_names = FALSE,
+  cluster_columns = TRUE,
+  clustering_distance_rows = "euclidean",
+  clustering_distance_columns = "euclidean",
+  column_names_gp = gpar(fontsize = 8),
+  row_title = "500 selected genes",
+  column_title = "ICC 2022 subtype",
+  right_annotation = row_anno,
+  heatmap_legend_param = list(title = "Mean z-score")
+)
+png("../writing/figures_new/marker_heatmap_500.png", width = 1300, height = 1600, res = 150)
+draw(ht_markers)
+dev.off()
+draw(ht_markers)
+
+# Top-10 marker genes per subtype (by mean z-score), with symbols, for biological validation.
+symbol_by_gene <- setNames(gene_symbols, genes_500_subtype)
+top_markers <- do.call(rbind, lapply(rownames(subtype_mean), function(s) {
+  v <- sort(subtype_mean[s, ], decreasing = TRUE)[1:10]
+  data.frame(
+    subtype = s, rank = seq_along(v),
+    gene_ensembl = sub("\\..*$", "", names(v)),
+    gene_symbol = symbol_by_gene[names(v)],
+    mean_z = as.numeric(v), stringsAsFactors = FALSE
+  )
+}))
+write.csv(top_markers, "../writing/tables_new/top_markers_per_subtype_500.csv", row.names = FALSE)
+cat("Saved marker heatmap and top-markers table (", nrow(top_markers), "rows);",
+    length(mark_idx), "canonical AML markers highlighted.\n")
+```
+
+## Pathway enrichment of the 500 selected features
+
+Over-representation analysis (GO Biological Process) on the 500 selected genes, using all
+quantified genes as the background universe. This shows which biological programs the
+predictor's feature set is enriched for.
+
+```{r pathway_enrichment_500, fig.width = 9, fig.height = 7}
+library(clusterProfiler)
+library(enrichplot)
+library(org.Hs.eg.db)
+
+genes_500_ens <- sub("\\..*$", "", genes_500_subtype)
+universe_ens <- unique(sub("\\..*$", "", counts_gene_names))
+
+ego_bp <- enrichGO(
+  gene = genes_500_ens,
+  universe = universe_ens,
+  OrgDb = org.Hs.eg.db,
+  keyType = "ENSEMBL",
+  ont = "BP",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.05,
+  qvalueCutoff = 0.05,
+  readable = TRUE
+)
+# Collapse redundant parent/child GO terms.
+ego_bp <- clusterProfiler::simplify(ego_bp, cutoff = 0.7, by = "p.adjust", select_fun = min)
+
+ego_df <- as.data.frame(ego_bp)
+write.csv(ego_df, "../writing/tables_new/go_bp_enrichment_500.csv", row.names = FALSE)
+
+if (nrow(ego_df) > 0) {
+  p_go <- dotplot(ego_bp, showCategory = 26) +
+    ggtitle("GO Biological Process enrichment (500 selected genes)")
+  print(p_go)
+  ggsave("../writing/figures_new/go_bp_enrichment_500.png", p_go, width = 9, height = 7, dpi = 300)
+}
+cat("GO BP enrichment:", nrow(ego_df), "significant terms (BH q < 0.05).\n")
+```
+
 ```{r}
 library(ggplot2)
 library(cowplot)
@@ -3484,7 +3863,7 @@ df_loso_unmerged$scenario <- "LOSO (full)"
 
 df_weights_all <- rbind(df_merged, df_unmerged, df_loso_merged, df_loso_unmerged)
 df_weights_all$scenario <- factor(df_weights_all$scenario,
-  levels = c("CV (collapsed)", "CV (full)", "LOSO (collapsed)", "LOSO (full)"))
+  levels = c( "LOSO (full)", "LOSO (collapsed)", "CV (full)", "CV (collapsed)"))
 
 # One plot: for each model (SVM, XGBoost, DNN), show distribution across the four scenarios
 p_weights_all <- ggplot(df_weights_all, aes(x = model, y = weight, fill = scenario)) +
@@ -3535,8 +3914,8 @@ ggsave('../writing/figures_new/weights_all_four_scenarios_lines.png', p_weights_
 ```{r}
 # 1. Top confusion pairs: which (reference -> predicted) misclassifications are most common (merged, CV)
 conf_table_cv <- list()
-for (fold in names(outer_unmerged$detailed_performance$cv$Global_Product_Optimized)) {
-  conf_table_cv[[fold]] <- outer_unmerged$detailed_performance$cv$Global_Product_Optimized[[fold]]$confusion_matrix$table
+for (fold in names(outer_unmerged$detailed_performance$loso$Global_Product_Optimized)) {
+  conf_table_cv[[fold]] <- outer_unmerged$detailed_performance$loso$Global_Product_Optimized[[fold]]$confusion_matrix$table
 }
 all_classes_cv <- unique(unlist(lapply(conf_table_cv, function(x) c(rownames(x), colnames(x)))))
 conf_padded_cv <- lapply(conf_table_cv, function(mat) {
@@ -3562,14 +3941,14 @@ p_top_confusions_unmerged <- ggplot(pairs_df_top, aes(x = n, y = pair)) +
   geom_col(fill = "steelblue", alpha = 0.8) +
   theme_bw() +
   labs(title = "Top 20 misclassification pairs (CV, full classes)", x = "Count", y = "Reference -> Predicted") + xlim(0,15)
-#p_top_confusions_unmerged
+p_top_confusions_unmerged
 #ggsave('../writing/figures_new/top_confusion_pairs_unmerged.png', p_top_confusions_unmerged, width = 8, height = 5, dpi = 300)
 ```
 ```{r}
 # 1. Top confusion pairs: which (reference -> predicted) misclassifications are most common (merged, CV)
 conf_table_cv <- list()
-for (fold in names(outer_merged$detailed_performance$cv$Global_Product_Optimized)) {
-  conf_table_cv[[fold]] <- outer_merged$detailed_performance$cv$Global_Product_Optimized[[fold]]$confusion_matrix$table
+for (fold in names(outer_merged$detailed_performance$loso$Global_Product_Optimized)) {
+  conf_table_cv[[fold]] <- outer_merged$detailed_performance$loso$Global_Product_Optimized[[fold]]$confusion_matrix$table
 }
 all_classes_cv <- unique(unlist(lapply(conf_table_cv, function(x) c(rownames(x), colnames(x)))))
 conf_padded_cv <- lapply(conf_table_cv, function(mat) {
@@ -3630,7 +4009,7 @@ p_f1_vs_n_cv <- ggplot(f1_cv_combined, aes(x = n_in_fold, y = f1)) +
 p_f1_vs_n_cv
 ggsave('../writing/figures_new/f1_vs_n_in_fold_cv.png', p_f1_vs_n_cv, width = 6, height = 4, dpi = 300)
 
-p_f1_vs_n_cv + p_f1_vs_n_loso
+p_f1_vs_n_loso + p_f1_vs_n_cv
 ```
 
 ```{r}
@@ -3699,7 +4078,7 @@ print(p_f1_vs_n_cv_overall)
 ggsave('../writing/figures_new/f1_vs_n_overall_loso.png', p_f1_vs_n_loso_overall, width = 6, height = 4, dpi = 300)
 ggsave('../writing/figures_new/f1_vs_n_overall_cv.png', p_f1_vs_n_cv_overall, width = 6, height = 4, dpi = 300)
 
-p_f1_vs_n_cv_overall + p_f1_vs_n_loso_overall
+p_f1_vs_n_loso_overall + p_f1_vs_n_cv_overall
 ```
 
 ```{r}
@@ -3725,1508 +4104,7 @@ p_weight_vs_kappa
 ggsave('../writing/figures_new/weight_vs_kappa_loso.png', p_weight_vs_kappa, width = 9, height = 4, dpi = 300)
 ```
 
-### Multivariate Platt Foldwise Diagnostics
 
-```{r}
-library(dplyr)
-library(tidyr)
-
-# Evaluate fold-wise multivariate calibration behavior using the same leave-one-fold-out
-# pool design used in the outer-CV script.
-extract_mv_features <- function(prob_matrix) {
-  meta_cols <- c(
-    "y", "inner_fold", "outer_fold", "indices", "study", "sample_indices",
-    "confidence_multivariate",
-    "confidence_id", "confidence_correct", "confidence_two_head", "confidence_two_head_postcal",
-    "is_leftout", "n_models_agree",
-    "top1_prob_variance_across_models"
-  )
-  prob_cols <- colnames(prob_matrix)[!colnames(prob_matrix) %in% meta_cols]
-  if (length(prob_cols) == 0) return(data.frame())
-
-  prob_mat <- as.matrix(prob_matrix[, prob_cols, drop = FALSE])
-  n <- nrow(prob_mat)
-  if (n == 0) return(data.frame())
-
-  pred_idx <- max.col(prob_mat, ties.method = "first")
-  max_prob <- prob_mat[cbind(seq_len(n), pred_idx)]
-
-  prob_mat_mod <- prob_mat
-  prob_mat_mod[cbind(seq_len(n), pred_idx)] <- -Inf
-  second_prob <- prob_mat_mod[cbind(seq_len(n), max.col(prob_mat_mod, ties.method = "first"))]
-  margin <- max_prob - second_prob
-
-  pred <- gsub("Class\\. ", "", prob_cols[pred_idx])
-  truth <- gsub("Class\\. ", "", prob_matrix$y)
-
-  out <- data.frame(
-    max_prob = as.numeric(max_prob),
-    margin = as.numeric(margin),
-    entropy = {
-      prob_clipped <- pmax(prob_mat, 1e-12)
-      if (ncol(prob_clipped) > 1) {
-        ent <- -rowSums(prob_clipped * log(prob_clipped)) / log(ncol(prob_clipped))
-        pmin(1, pmax(0, ent))
-      } else {
-        rep(0, n)
-      }
-    },
-    n_models_agree = if ("n_models_agree" %in% colnames(prob_matrix)) as.numeric(prob_matrix$n_models_agree) else NA_real_,
-    top1_prob_variance_across_models = if ("top1_prob_variance_across_models" %in% colnames(prob_matrix)) as.numeric(prob_matrix$top1_prob_variance_across_models) else NA_real_,
-    correct = as.integer(truth == pred),
-    stringsAsFactors = FALSE
-  )
-  out
-}
-
-calc_ece <- function(y_true, p_hat, n_bins = 10) {
-  keep <- is.finite(y_true) & is.finite(p_hat)
-  if (!any(keep)) return(NA_real_)
-  y_true <- y_true[keep]
-  p_hat <- p_hat[keep]
-  bins <- cut(p_hat, breaks = seq(0, 1, length.out = n_bins + 1), include.lowest = TRUE, labels = FALSE)
-  bin_tbl <- data.frame(y_true = y_true, p_hat = p_hat, bin = bins) %>%
-    group_by(bin) %>%
-    summarise(
-      n = n(),
-      obs = mean(y_true),
-      conf = mean(p_hat),
-      .groups = "drop"
-    )
-  if (nrow(bin_tbl) == 0) return(NA_real_)
-  sum((bin_tbl$n / sum(bin_tbl$n)) * abs(bin_tbl$obs - bin_tbl$conf))
-}
-
-calc_fold_metrics <- function(y_true, p_hat) {
-  eps <- 1e-6
-  p <- pmin(1 - eps, pmax(eps, p_hat))
-  brier <- mean((y_true - p)^2, na.rm = TRUE)
-  ece <- calc_ece(y_true, p, n_bins = 10)
-  logit_p <- qlogis(p)
-  slope_fit <- tryCatch(stats::glm(y_true ~ logit_p, family = stats::binomial), error = function(e) NULL)
-  slope <- if (!is.null(slope_fit)) as.numeric(stats::coef(slope_fit)[["logit_p"]]) else NA_real_
-  intercept <- if (!is.null(slope_fit)) as.numeric(stats::coef(slope_fit)[["(Intercept)"]]) else NA_real_
-  data.frame(brier = brier, ece = ece, calib_slope = slope, calib_intercept = intercept, stringsAsFactors = FALSE)
-}
-
-safe_mcfadden_r2 <- function(fit_obj) {
-  if (is.null(fit_obj)) return(NA_real_)
-  ll_fit <- tryCatch(as.numeric(stats::logLik(fit_obj)), error = function(e) NA_real_)
-  ll_null <- tryCatch(as.numeric(stats::logLik(update(fit_obj, . ~ 1))), error = function(e) NA_real_)
-  if (!is.finite(ll_fit) || !is.finite(ll_null) || ll_null == 0) return(NA_real_)
-  1 - (ll_fit / ll_null)
-}
-
-run_mv_foldwise_diagnostics <- function(res_obj, scenario_name = "merged") {
-  all_rows <- list()
-  all_coefs <- list()
-  row_idx <- 1L
-  coef_idx <- 1L
-
-  for (regime in c("standard", "with_leftout")) {
-    for (split_type in c("cv", "loso")) {
-      mv_node <- res_obj$multivariate_results[[regime]][[split_type]]
-      if (is.null(mv_node) || is.null(mv_node$fold_matrices)) next
-      fold_mats <- mv_node$fold_matrices
-      if (!is.list(fold_mats) || length(fold_mats) < 2L) next
-
-      fold_names <- names(fold_mats)
-      for (fold in fold_names) {
-        target <- fold_mats[[fold]]
-        others <- fold_mats[setdiff(fold_names, fold)]
-        others_known <- lapply(others, function(m) {
-          if ("is_leftout" %in% colnames(m)) m[!m$is_leftout, , drop = FALSE] else m
-        })
-
-        pool_df <- bind_rows(lapply(others_known, extract_mv_features))
-        target_df <- extract_mv_features(target)
-        if (nrow(pool_df) < 10 || nrow(target_df) == 0 || length(unique(pool_df$correct)) < 2) next
-
-        candidate_terms <- c("max_prob", "margin", "entropy", "n_models_agree", "top1_prob_variance_across_models")
-        usable_terms <- candidate_terms[sapply(candidate_terms, function(v) {
-          v %in% colnames(pool_df) && any(is.finite(pool_df[[v]]))
-        })]
-        full_formula <- stats::as.formula(paste("correct ~", paste(usable_terms, collapse = " + ")))
-
-        fit_full <- tryCatch(stats::glm(full_formula, data = pool_df, family = stats::binomial), error = function(e) NULL)
-        fit_base <- tryCatch(stats::glm(correct ~ max_prob, data = pool_df, family = stats::binomial), error = function(e) NULL)
-        if (is.null(fit_base)) next
-        if (is.null(fit_full)) fit_full <- fit_base
-
-        p_full <- tryCatch(as.numeric(stats::predict(fit_full, newdata = target_df, type = "response")), error = function(e) NULL)
-        p_base <- tryCatch(as.numeric(stats::predict(fit_base, newdata = target_df, type = "response")), error = function(e) NULL)
-        if (is.null(p_full) || is.null(p_base)) next
-
-        m_full <- calc_fold_metrics(target_df$correct, p_full)
-        m_base <- calc_fold_metrics(target_df$correct, p_base)
-
-        all_rows[[row_idx]] <- data.frame(
-          scenario = scenario_name,
-          regime = regime,
-          split_type = split_type,
-          fold = fold,
-          n_pool = nrow(pool_df),
-          n_target = nrow(target_df),
-          full_formula = paste(deparse(stats::formula(fit_full)), collapse = ""),
-          aic_full = stats::AIC(fit_full),
-          aic_base = stats::AIC(fit_base),
-          aic_delta_base_minus_full = stats::AIC(fit_base) - stats::AIC(fit_full),
-          mcfadden_r2_full = safe_mcfadden_r2(fit_full),
-          mcfadden_r2_base = safe_mcfadden_r2(fit_base),
-          brier_full = m_full$brier,
-          brier_base = m_base$brier,
-          brier_delta_base_minus_full = m_base$brier - m_full$brier,
-          ece_full = m_full$ece,
-          ece_base = m_base$ece,
-          ece_delta_base_minus_full = m_base$ece - m_full$ece,
-          calib_slope_full = m_full$calib_slope,
-          calib_intercept_full = m_full$calib_intercept,
-          calib_slope_base = m_base$calib_slope,
-          calib_intercept_base = m_base$calib_intercept,
-          stringsAsFactors = FALSE
-        )
-        row_idx <- row_idx + 1L
-
-        coef_mat <- summary(fit_full)$coefficients
-        coef_df <- data.frame(
-          scenario = scenario_name,
-          regime = regime,
-          split_type = split_type,
-          fold = fold,
-          term = rownames(coef_mat),
-          estimate = as.numeric(coef_mat[, "Estimate"]),
-          std_error = as.numeric(coef_mat[, "Std. Error"]),
-          z_value = as.numeric(coef_mat[, "z value"]),
-          p_value = as.numeric(coef_mat[, "Pr(>|z|)"]),
-          stringsAsFactors = FALSE
-        )
-        all_coefs[[coef_idx]] <- coef_df
-        coef_idx <- coef_idx + 1L
-      }
-    }
-  }
-
-  fold_metrics <- bind_rows(all_rows)
-  coef_table <- bind_rows(all_coefs)
-  coef_stability <- coef_table %>%
-    filter(term != "(Intercept)") %>%
-    group_by(scenario, regime, split_type, term) %>%
-    summarise(
-      n_folds = n(),
-      mean_estimate = mean(estimate, na.rm = TRUE),
-      sd_estimate = sd(estimate, na.rm = TRUE),
-      positive_rate = mean(estimate > 0, na.rm = TRUE),
-      p_lt_0_05_rate = mean(p_value < 0.05, na.rm = TRUE),
-      .groups = "drop"
-    ) %>%
-    arrange(scenario, regime, split_type, desc(abs(mean_estimate)))
-
-  list(
-    fold_metrics = fold_metrics,
-    coef_table = coef_table,
-    coef_stability = coef_stability
-  )
-}
-
-mv_diag_merged <- run_mv_foldwise_diagnostics(outer_merged, "merged")
-mv_diag_unmerged <- run_mv_foldwise_diagnostics(outer_unmerged, "unmerged")
-
-mv_diag_fold_metrics <- bind_rows(mv_diag_merged$fold_metrics, mv_diag_unmerged$fold_metrics)
-mv_diag_coef_table <- bind_rows(mv_diag_merged$coef_table, mv_diag_unmerged$coef_table)
-mv_diag_coef_stability <- bind_rows(mv_diag_merged$coef_stability, mv_diag_unmerged$coef_stability)
-
-# Compact across-fold summary for quick reading.
-mv_diag_summary <- mv_diag_fold_metrics %>%
-  group_by(scenario, regime, split_type) %>%
-  summarise(
-    n_folds = n(),
-    mean_aic_delta = mean(aic_delta_base_minus_full, na.rm = TRUE),
-    mean_brier_delta = mean(brier_delta_base_minus_full, na.rm = TRUE),
-    mean_ece_delta = mean(ece_delta_base_minus_full, na.rm = TRUE),
-    mean_calib_slope_full = mean(calib_slope_full, na.rm = TRUE),
-    mean_calib_slope_base = mean(calib_slope_base, na.rm = TRUE),
-    .groups = "drop"
-  ) %>%
-  arrange(scenario, regime, split_type)
-
-mv_diag_out_dir <- file.path("../data/out/outer_cv", "multivariate_platt_diagnostics")
-dir.create(mv_diag_out_dir, recursive = TRUE, showWarnings = FALSE)
-#write.csv(mv_diag_fold_metrics, file.path(mv_diag_out_dir, "fold_metrics.csv"), row.names = FALSE)
-#write.csv(mv_diag_coef_table, file.path(mv_diag_out_dir, "coefficients_by_fold.csv"), row.names = FALSE)
-#write.csv(mv_diag_coef_stability, file.path(mv_diag_out_dir, "coefficient_stability_summary.csv"), row.names = FALSE)
-#write.csv(mv_diag_summary, file.path(mv_diag_out_dir, "diagnostic_summary.csv"), row.names = FALSE)
-
-mv_diag_summary
-mv_diag_coef_stability
-```
-
-```{r}
-# Final verdict table:
-# 1) model-level winner (multivariate vs simple)
-# 2) term-level usefulness call based on fold stability/significance
-model_verdict <- mv_diag_summary %>%
-  mutate(
-    # Positive deltas favor multivariate (full model).
-    support_score = as.integer(mean_aic_delta > 2) +
-      as.integer(mean_brier_delta > 0) +
-      as.integer(mean_ece_delta > 0),
-    verdict = dplyr::case_when(
-      support_score >= 2 ~ "multivariate_better",
-      support_score == 1 ~ "tie_or_context_dependent",
-      TRUE ~ "simple_better"
-    ),
-    slope_winner = dplyr::case_when(
-      is.finite(mean_calib_slope_full) & is.finite(mean_calib_slope_base) &
-        abs(mean_calib_slope_full - 1) < abs(mean_calib_slope_base - 1) ~ "multivariate",
-      is.finite(mean_calib_slope_full) & is.finite(mean_calib_slope_base) &
-        abs(mean_calib_slope_full - 1) > abs(mean_calib_slope_base - 1) ~ "simple",
-      TRUE ~ "undetermined"
-    )
-  ) %>%
-  arrange(scenario, regime, split_type)
-
-term_verdict <- mv_diag_coef_stability %>%
-  mutate(
-    sign_stable = (positive_rate >= 0.8) | (positive_rate <= 0.2),
-    significant_often = p_lt_0_05_rate >= 0.5,
-    effect_stability = dplyr::if_else(abs(mean_estimate) > sd_estimate, "stable", "noisy"),
-    term_usefulness = dplyr::case_when(
-      sign_stable & significant_often & effect_stability == "stable" ~ "likely_useful",
-      sign_stable & (significant_often | effect_stability == "stable") ~ "possibly_useful",
-      TRUE ~ "weak_or_inconsistent"
-    )
-  ) %>%
-  arrange(scenario, regime, split_type, desc(term_usefulness), term)
-
-# Optional rollup: keep only terms from groups where multivariate is favored.
-term_verdict_in_winning_groups <- term_verdict %>%
-  inner_join(
-    model_verdict %>%
-      filter(verdict == "multivariate_better") %>%
-      select(scenario, regime, split_type),
-    by = c("scenario", "regime", "split_type")
-  )
-
-write.csv(model_verdict, file.path(mv_diag_out_dir, "final_model_verdict.csv"), row.names = FALSE)
-write.csv(term_verdict, file.path(mv_diag_out_dir, "final_term_verdict.csv"), row.names = FALSE)
-write.csv(
-  term_verdict_in_winning_groups,
-  file.path(mv_diag_out_dir, "final_term_verdict_multivariate_wins_only.csv"),
-  row.names = FALSE
-)
-
-model_verdict
-term_verdict %>% select(regime, term, term_usefulness, split_type) %>% group_by(term, split_type) %>% summarise(sum(term_usefulness != "weak_or_inconsistent"))
-```
-
-# Probability Cutoffs Analysis
-
-###  --CV Rejection Summary
-
-```{r}
-library(dplyr)
-library(ggplot2)
-library(tidyr)
-
-# Compare global ensemble variants on multivariate monotonic risk-coverage curves.
-build_monotonic_curve <- function(df) {
-  if (is.null(df) || nrow(df) == 0) return(NULL)
-  df <- df[is.finite(df$risk) & is.finite(df$coverage), , drop = FALSE]
-  if (nrow(df) == 0) return(NULL)
-  df %>%
-    dplyr::arrange(risk, dplyr::desc(coverage)) %>%
-    dplyr::mutate(coverage_mono = cummax(coverage)) %>%
-    dplyr::group_by(risk) %>%
-    dplyr::summarise(coverage = max(coverage_mono, na.rm = TRUE), .groups = "drop")
-}
-
-# Weighted aggregation for mean risk-coverage curves:
-# - risk weight: accepted support (defaults to 1 when unavailable)
-# - coverage weight: known support for seen-coverage, else total support
-summarise_weighted_curve <- function(raw, use_seen_coverage = FALSE) {
-  if (is.null(raw) || nrow(raw) == 0) return(NULL)
-  risk_weight_col <- if ("n_accepted" %in% colnames(raw)) "n_accepted" else NULL
-  if (use_seen_coverage) {
-    coverage_weight_col <- if ("n_known_total" %in% colnames(raw)) "n_known_total" else NULL
-    if (!all(c("accuracy", "coverage_known") %in% colnames(raw))) return(NULL)
-    work <- raw %>%
-      dplyr::mutate(
-        risk = 100 * (1 - accuracy),
-        coverage = 100 * coverage_known
-      )
-  } else {
-    coverage_weight_col <- if ("total_samples" %in% colnames(raw)) "total_samples" else NULL
-    if (!all(c("accuracy", "perc_rejected") %in% colnames(raw))) return(NULL)
-    work <- raw %>%
-      dplyr::mutate(
-        risk = 100 * (1 - accuracy),
-        coverage = 100 * (1 - perc_rejected)
-      )
-  }
-
-  work <- work %>%
-    dplyr::filter(is.finite(risk), is.finite(coverage)) %>%
-    dplyr::mutate(
-      risk_weight = if (!is.null(risk_weight_col)) pmax(0, as.numeric(.data[[risk_weight_col]])) else 1,
-      coverage_weight = if (!is.null(coverage_weight_col)) pmax(0, as.numeric(.data[[coverage_weight_col]])) else 1
-    )
-  if (nrow(work) == 0) return(NULL)
-
-  work %>%
-    dplyr::group_by(prob_cutoff) %>%
-    dplyr::summarise(
-      risk = sum(risk * risk_weight, na.rm = TRUE) / pmax(1, sum(risk_weight, na.rm = TRUE)),
-      coverage = sum(coverage * coverage_weight, na.rm = TRUE) / pmax(1, sum(coverage_weight, na.rm = TRUE)),
-      .groups = "drop"
-    )
-}
-
-build_curve_from_decisions <- function(decisions, split_type, regime_label, method_label) {
-  if (is.null(decisions) || nrow(decisions) == 0) return(NULL)
-  if (!all(c("confidence", "truth", "pred") %in% colnames(decisions))) return(NULL)
-
-  decisions <- decisions %>%
-    dplyr::mutate(
-      is_leftout = if ("is_leftout" %in% colnames(.)) as.logical(is_leftout) else FALSE,
-      is_known = !is_leftout,
-      correct = as.integer(truth == pred)
-    )
-
-  cutoff_grid <- seq(0, 1, by = 0.01)
-  rows <- lapply(cutoff_grid, function(co) {
-    df <- decisions %>%
-      dplyr::mutate(accepted = confidence >= co)
-
-    # Coverage and risk restricted to in-distribution (non-left-out) rows.
-    known_df <- df[df$is_known, , drop = FALSE]
-    n_known_total <- nrow(known_df)
-    n_known_acc <- sum(known_df$accepted, na.rm = TRUE)
-    coverage_seen <- if (n_known_total > 0) n_known_acc / n_known_total else NA_real_
-
-    accepted_known <- known_df[known_df$accepted, , drop = FALSE]
-    risk_seen <- if (nrow(accepted_known) > 0) 1 - mean(accepted_known$correct, na.rm = TRUE) else NA_real_
-
-    data.frame(
-      prob_cutoff = co,
-      risk = 100 * risk_seen,
-      coverage = 100 * coverage_seen,
-      stringsAsFactors = FALSE
-    )
-  })
-
-  pooled <- dplyr::bind_rows(rows)
-  pooled <- pooled[is.finite(pooled$risk) & is.finite(pooled$coverage), , drop = FALSE]
-  if (nrow(pooled) == 0) return(NULL)
-
-  mono <- build_monotonic_curve(pooled)
-  if (is.null(mono) || nrow(mono) == 0) return(NULL)
-
-  mono %>%
-    dplyr::mutate(
-      split_type = toupper(split_type),
-      regime = regime_label,
-      method = method_label
-    )
-}
-
-read_mv_curve <- function(root_dir, regime_dir, model_dir, split_type, regime_label, method_label) {
-  # Augmented left-out regimes: heldout CSV includes coverage_known; RDS names use regime_dir prefix.
-  is_leftout_regime <- grepl("^with_leftout", regime_dir)
-  if (is_leftout_regime) {
-    curve_path <- file.path(root_dir, "ensemble_multivariate", regime_dir, model_dir, paste0("risk_coverage_heldout_curve_raw_", split_type, ".csv"))
-    if (file.exists(curve_path)) {
-      raw <- read.csv(curve_path, stringsAsFactors = FALSE)
-      if (nrow(raw) > 0) {
-        if (all(c("accuracy", "coverage_known") %in% colnames(raw))) {
-          pooled <- summarise_weighted_curve(raw, use_seen_coverage = TRUE)
-          mono <- build_monotonic_curve(pooled)
-          if (!is.null(mono) && nrow(mono) > 0) {
-            return(mono %>% dplyr::mutate(split_type = toupper(split_type), regime = regime_label, method = method_label))
-          }
-        }
-      }
-    }
-    decision_path <- file.path(
-      root_dir,
-      "ensemble_multivariate",
-      regime_dir,
-      model_dir,
-      paste0("global_ensemble_prediction_decisions_", regime_dir, "_", model_dir, "_", split_type, ".rds")
-    )
-    if (!file.exists(decision_path)) return(NULL)
-    decisions <- readRDS(decision_path)
-    return(build_curve_from_decisions(decisions, split_type, regime_label, method_label))
-  }
-
-  curve_path <- file.path(root_dir, "ensemble_multivariate", regime_dir, model_dir, paste0("risk_coverage_heldout_curve_raw_", split_type, ".csv"))
-  if (!file.exists(curve_path)) return(NULL)
-  raw <- read.csv(curve_path, stringsAsFactors = FALSE)
-  if (nrow(raw) == 0) return(NULL)
-
-  pooled <- summarise_weighted_curve(raw, use_seen_coverage = FALSE)
-
-  mono <- build_monotonic_curve(pooled)
-  if (is.null(mono) || nrow(mono) == 0) return(NULL)
-
-  mono %>%
-    dplyr::mutate(
-      split_type = toupper(split_type),
-      regime = regime_label,
-      method = method_label
-    )
-}
-
-# Univariate (simple Platt / two-head) heldout curves; must precede curve_compare.
-read_uv_curve <- function(root_dir, regime_dir, model_dir, split_type, regime_label, method_label) {
-  uv_augmented_regimes <- c(
-    "with_leftout",
-    "with_leftout_logit",
-    "with_leftout_ood_aware",
-    "with_leftout_ood_aware_logit",
-    "with_leftout_two_head",
-    "with_leftout_two_head_postcal",
-    "with_leftout_three_head",
-    "with_leftout_three_head_postcal",
-    "with_leftout_two_head_min_gate",
-    "with_leftout_two_head_id_veto"
-  )
-  if (regime_dir %in% uv_augmented_regimes) {
-    curve_path <- file.path(
-      root_dir,
-      regime_dir,
-      paste0("risk_coverage_heldout_curve_raw_", split_type, ".csv")
-    )
-    if (file.exists(curve_path)) {
-      raw <- read.csv(curve_path, stringsAsFactors = FALSE)
-      if (nrow(raw) > 0) {
-        raw <- raw %>% dplyr::filter(model == model_dir)
-        if (nrow(raw) > 0 && all(c("accuracy", "coverage_known") %in% colnames(raw))) {
-          pooled <- summarise_weighted_curve(raw, use_seen_coverage = TRUE)
-          mono <- build_monotonic_curve(pooled)
-          if (!is.null(mono) && nrow(mono) > 0) {
-            return(mono %>% dplyr::mutate(
-              split_type = toupper(split_type), regime = regime_label, method = method_label,
-              calibration = "Univariate"
-            ))
-          }
-        }
-      }
-    }
-
-    decision_path <- file.path(
-      root_dir,
-      regime_dir,
-      paste0("global_ensemble_prediction_decisions_", regime_dir, "_", model_dir, "_", split_type, ".rds")
-    )
-    if (!file.exists(decision_path)) return(NULL)
-    decisions <- readRDS(decision_path)
-    out <- build_curve_from_decisions(decisions, split_type, regime_label, method_label)
-    if (is.null(out)) return(NULL)
-    return(out %>% dplyr::mutate(calibration = "Univariate"))
-  }
-
-  curve_path <- file.path(
-    root_dir,
-    regime_dir,
-    paste0("risk_coverage_heldout_curve_raw_", split_type, ".csv")
-  )
-  if (!file.exists(curve_path)) return(NULL)
-  raw <- read.csv(curve_path, stringsAsFactors = FALSE)
-  if (nrow(raw) == 0) return(NULL)
-
-  pooled <- raw %>%
-    dplyr::filter(model == model_dir) %>%
-    summarise_weighted_curve(use_seen_coverage = FALSE)
-
-  mono <- build_monotonic_curve(pooled)
-  if (is.null(mono) || nrow(mono) == 0) return(NULL)
-
-  mono %>%
-    dplyr::mutate(
-      split_type = toupper(split_type),
-      regime = regime_label,
-      method = method_label,
-      calibration = "Univariate"
-    )
-}
-
-mv_root_merged <- "../data/out/outer_cv/outer_cv_analysis_outputs_merged_summed"
-mv_root_unmerged <- "../data/out/outer_cv/outer_cv_analysis_outputs_unmerged_maxprob"
-# Later chunks (e.g. product MV by regime) use merged outputs by default.
-mv_root <- mv_root_merged
-# Keep a stable root alias for operating-point evaluation helpers.
-outer_cv_root <- mv_root
-
-mv_models <- tibble::tribble(
-  ~model_dir,                    ~method,
-  "Global_Product_Optimized",    "Product ensemble"
-)
-
-bind_curve_compare <- function(root_dir) {
-  mv_compare_regimes <- tibble::tribble(
-    ~regime_dir, ~regime_label, ~calibration_label,
-    "standard", "Standard", "Multivariate",
-    "standard_multivariate_knn_k10", "Standard", "Multivariate + KNN (k=10)",
-    "standard_multivariate_knn_k20", "Standard", "Multivariate + KNN (k=20)",
-    "with_leftout", "With left-out", "Multivariate",
-    "with_leftout_multivariate_knn_k10", "With left-out", "Multivariate + KNN (k=10)",
-    "with_leftout_multivariate_knn_k20", "With left-out", "Multivariate + KNN (k=20)",
-    "with_leftout_logit", "With left-out (logit)", "Multivariate",
-    "with_leftout_logit_multivariate_knn_k10", "With left-out (logit)", "Multivariate + KNN (k=10)",
-    "with_leftout_logit_multivariate_knn_k20", "With left-out (logit)", "Multivariate + KNN (k=20)",
-    "with_leftout_ood_aware", "OOD-aware calib.", "Multivariate",
-    "with_leftout_ood_aware_multivariate_knn_k10", "OOD-aware calib.", "Multivariate + KNN (k=10)",
-    "with_leftout_ood_aware_multivariate_knn_k20", "OOD-aware calib.", "Multivariate + KNN (k=20)",
-    "with_leftout_ood_aware_logit", "OOD-aware calib. (logit)", "Multivariate",
-    "with_leftout_ood_aware_logit_multivariate_knn_k10", "OOD-aware calib. (logit)", "Multivariate + KNN (k=10)",
-    "with_leftout_ood_aware_logit_multivariate_knn_k20", "OOD-aware calib. (logit)", "Multivariate + KNN (k=20)",
-    "with_leftout_two_head", "Two-head calib.", "Multivariate",
-    "with_leftout_two_head_multivariate_knn_k10", "Two-head calib.", "Multivariate + KNN (k=10)",
-    "with_leftout_two_head_multivariate_knn_k20", "Two-head calib.", "Multivariate + KNN (k=20)",
-    "with_leftout_two_head_postcal", "Two-head + post-calib.", "Multivariate",
-    "with_leftout_two_head_postcal_multivariate_knn_k10", "Two-head + post-calib.", "Multivariate + KNN (k=10)",
-    "with_leftout_two_head_postcal_multivariate_knn_k20", "Two-head + post-calib.", "Multivariate + KNN (k=20)",
-    "with_leftout_three_head", "Three-head calib.", "Multivariate",
-    "with_leftout_three_head_multivariate_knn_k10", "Three-head calib.", "Multivariate + KNN (k=10)",
-    "with_leftout_three_head_multivariate_knn_k20", "Three-head calib.", "Multivariate + KNN (k=20)",
-    "with_leftout_three_head_postcal", "Three-head + post-calib.", "Multivariate",
-    "with_leftout_three_head_postcal_multivariate_knn_k10", "Three-head + post-calib.", "Multivariate + KNN (k=10)",
-    "with_leftout_three_head_postcal_multivariate_knn_k20", "Three-head + post-calib.", "Multivariate + KNN (k=20)",
-    "with_leftout_two_head_min_gate", "Two-head min-gate", "Multivariate",
-    "with_leftout_two_head_min_gate_multivariate_knn_k10", "Two-head min-gate", "Multivariate + KNN (k=10)",
-    "with_leftout_two_head_min_gate_multivariate_knn_k20", "Two-head min-gate", "Multivariate + KNN (k=20)"
-  )
-  uv_compare_regimes <- tibble::tribble(
-    ~regime_dir, ~regime_label,
-    "standard", "Standard",
-    "with_leftout", "With left-out",
-    "with_leftout_logit", "With left-out (logit)",
-    "with_leftout_ood_aware", "OOD-aware calib.",
-    "with_leftout_ood_aware_logit", "OOD-aware calib. (logit)",
-    "with_leftout_two_head", "Two-head calib.",
-    "with_leftout_two_head_postcal", "Two-head + post-calib.",
-    "with_leftout_two_head_min_gate", "Two-head min-gate"
-  )
-  dplyr::bind_rows(
-    lapply(seq_len(nrow(mv_models)), function(i) {
-      md <- mv_models$model_dir[i]
-      mt <- mv_models$method[i]
-      dplyr::bind_rows(
-        dplyr::bind_rows(lapply(seq_len(nrow(mv_compare_regimes)), function(j) {
-          dplyr::bind_rows(
-            read_mv_curve(root_dir, mv_compare_regimes$regime_dir[j], md, "cv", mv_compare_regimes$regime_label[j], mt),
-            read_mv_curve(root_dir, mv_compare_regimes$regime_dir[j], md, "loso", mv_compare_regimes$regime_label[j], mt)
-          ) %>% dplyr::mutate(calibration = mv_compare_regimes$calibration_label[j])
-        })),
-        dplyr::bind_rows(lapply(seq_len(nrow(uv_compare_regimes)), function(j) {
-          dplyr::bind_rows(
-            read_uv_curve(root_dir, uv_compare_regimes$regime_dir[j], md, "cv", uv_compare_regimes$regime_label[j], mt),
-            read_uv_curve(root_dir, uv_compare_regimes$regime_dir[j], md, "loso", uv_compare_regimes$regime_label[j], mt)
-          )
-        }))
-      )
-    })
-  )
-}
-
-curve_compare_merged <- bind_curve_compare(mv_root_merged)
-curve_compare_unmerged <- bind_curve_compare(mv_root_unmerged)
-
-format_curve_compare_plot_tbl <- function(df) {
-  regime_row_order <- c(
-    "Standard",
-    "With left-out",
-    "With left-out (logit)",
-    "OOD-aware calib.",
-    "OOD-aware calib. (logit)",
-    "Two-head calib.",
-    "Two-head + post-calib.",
-    "Three-head calib.",
-    "Three-head + post-calib.",
-    "Two-head min-gate"
-  )
-  df %>%
-    dplyr::filter(is.finite(risk), is.finite(coverage), !is.na(calibration)) %>%
-    dplyr::mutate(
-      regime = factor(
-        regime,
-        levels = regime_row_order[regime_row_order %in% unique(regime)]
-      ),
-      split_type = factor(split_type, levels = c("CV", "LOSO")),
-      calibration_line = dplyr::case_when(
-        calibration == "Multivariate + KNN (k=10)" ~ "Multivariate + KNN (k=10)",
-        calibration == "Multivariate + KNN (k=20)" ~ "Multivariate + KNN (k=20)",
-        calibration == "Multivariate" ~ "Multivariate",
-        TRUE ~ "Univariate"
-      ),
-      calibration_line = factor(
-        calibration_line,
-        levels = c("Univariate", "Multivariate", "Multivariate + KNN (k=10)", "Multivariate + KNN (k=20)")
-      )
-    )
-}
-
-if (!is.null(curve_compare_merged) && nrow(curve_compare_merged) > 0) {
-  curve_compare <- format_curve_compare_plot_tbl(curve_compare_merged)
-  p_curve_compare <- ggplot(
-    curve_compare,
-    aes(x = risk, y = coverage, color = method, linetype = calibration_line)
-  ) +
-    geom_line(linewidth = 1.1) +
-    facet_grid(regime ~ split_type) +
-    scale_color_manual(values = c(
-      "Weighted ensemble" = "#377eb8",
-      "Product ensemble" = "#e41a1c"
-    )) +
-    scale_linetype_manual(
-      values = c(
-        "Univariate" = "dotted",
-        "Multivariate" = "solid",
-        "Multivariate + KNN (k=10)" = "dotdash",
-        "Multivariate + KNN (k=20)" = "longdash"
-      ),
-      labels = c("Univariate (Platt / two-head)", "Multivariate", "Multivariate + KNN (k=10)", "Multivariate + KNN (k=20)"),
-      name = "Confidence"
-    ) +
-    labs(
-      title = "Monotonic risk-coverage: multivariate vs univariate (striped)",
-      subtitle = "Collapsed classes (merged labels); augmented rows use seen-class coverage",
-      x = "Risk on accepted samples (%)",
-      y = "Coverage (%)",
-      color = "Method"
-    ) +
-    theme_bw() +
-    theme(strip.text.y = element_text(size = 9)) +
-    xlim(0, 10)
-
-  print(p_curve_compare)
-}
-
-if (!is.null(curve_compare_unmerged) && nrow(curve_compare_unmerged) > 0) {
-  curve_compare_full_subtypes <- format_curve_compare_plot_tbl(curve_compare_unmerged)
-  p_curve_compare_full_subtypes <- ggplot(
-    curve_compare_full_subtypes,
-    aes(x = risk, y = coverage, color = method, linetype = calibration_line)
-  ) +
-    geom_line(linewidth = 1.1) +
-    facet_grid(regime ~ split_type) +
-    scale_color_manual(values = c(
-      "Weighted ensemble" = "#377eb8",
-      "Product ensemble" = "#e41a1c"
-    )) +
-    scale_linetype_manual(
-      values = c(
-        "Univariate" = "dotted",
-        "Multivariate" = "solid",
-        "Multivariate + KNN (k=10)" = "dotdash",
-        "Multivariate + KNN (k=20)" = "longdash"
-      ),
-      labels = c("Univariate (Platt / two-head)", "Multivariate", "Multivariate + KNN (k=10)", "Multivariate + KNN (k=20)"),
-      name = "Confidence"
-    ) +
-    labs(
-      title = "Monotonic risk-coverage: multivariate vs univariate (striped)",
-      subtitle = "Full subtype granularity (unmerged labels); same metrics as merged panel",
-      x = "Risk on accepted samples (%)",
-      y = "Coverage (%)",
-      color = "Method"
-    ) +
-    theme_bw() +
-    theme(strip.text.y = element_text(size = 9)) +
-    xlim(0, 10)
-
-  print(p_curve_compare_full_subtypes)
-}
-```
-
-```{r}
-# Product ensemble across calibration families: training regimes; facet by calibration and split.
-product_mv_regime_tbl <- tibble::tribble(
-  ~regime_dir, ~regime_label, ~calibration_label,
-  "with_leftout", "With left-out", "Multivariate",
-  "with_leftout_multivariate_knn_k10", "With left-out", "Multivariate + KNN (k=10)",
-  "with_leftout_multivariate_knn_k20", "With left-out", "Multivariate + KNN (k=20)",
-  "with_leftout_logit", "With left-out (logit)", "Multivariate",
-  "with_leftout_logit_multivariate_knn_k10", "With left-out (logit)", "Multivariate + KNN (k=10)",
-  "with_leftout_logit_multivariate_knn_k20", "With left-out (logit)", "Multivariate + KNN (k=20)",
-  "with_leftout_ood_aware", "OOD-aware calib.", "Multivariate",
-  "with_leftout_ood_aware_multivariate_knn_k10", "OOD-aware calib.", "Multivariate + KNN (k=10)",
-  "with_leftout_ood_aware_multivariate_knn_k20", "OOD-aware calib.", "Multivariate + KNN (k=20)",
-  "with_leftout_ood_aware_logit", "OOD-aware calib. (logit)", "Multivariate",
-  "with_leftout_ood_aware_logit_multivariate_knn_k10", "OOD-aware calib. (logit)", "Multivariate + KNN (k=10)",
-  "with_leftout_ood_aware_logit_multivariate_knn_k20", "OOD-aware calib. (logit)", "Multivariate + KNN (k=20)",
-  "with_leftout_two_head", "Two-head calib.", "Multivariate",
-  "with_leftout_two_head_multivariate_knn_k10", "Two-head calib.", "Multivariate + KNN (k=10)",
-  "with_leftout_two_head_multivariate_knn_k20", "Two-head calib.", "Multivariate + KNN (k=20)",
-  "with_leftout_two_head_postcal", "Two-head + post-calib.", "Multivariate",
-  "with_leftout_two_head_postcal_multivariate_knn_k10", "Two-head + post-calib.", "Multivariate + KNN (k=10)",
-  "with_leftout_two_head_postcal_multivariate_knn_k20", "Two-head + post-calib.", "Multivariate + KNN (k=20)",
-  "with_leftout_three_head", "Three-head calib.", "Multivariate",
-  "with_leftout_three_head_multivariate_knn_k10", "Three-head calib.", "Multivariate + KNN (k=10)",
-  "with_leftout_three_head_multivariate_knn_k20", "Three-head calib.", "Multivariate + KNN (k=20)",
-  "with_leftout_three_head_postcal", "Three-head + post-calib.", "Multivariate",
-  "with_leftout_three_head_postcal_multivariate_knn_k10", "Three-head + post-calib.", "Multivariate + KNN (k=10)",
-  "with_leftout_three_head_postcal_multivariate_knn_k20", "Three-head + post-calib.", "Multivariate + KNN (k=20)",
-  "with_leftout_two_head_min_gate", "Two-head min-gate", "Multivariate",
-  "with_leftout_two_head_min_gate_multivariate_knn_k10", "Two-head min-gate", "Multivariate + KNN (k=10)",
-  "with_leftout_two_head_min_gate_multivariate_knn_k20", "Two-head min-gate", "Multivariate + KNN (k=20)"
-)
-product_uv_regime_tbl <- tibble::tribble(
-  ~regime_dir, ~regime_label,
-  "with_leftout", "With left-out",
-  "with_leftout_logit", "With left-out (logit)",
-  "with_leftout_ood_aware", "OOD-aware calib.",
-  "with_leftout_ood_aware_logit", "OOD-aware calib. (logit)",
-  "with_leftout_two_head", "Two-head calib.",
-  "with_leftout_two_head_postcal", "Two-head + post-calib.",
-  "with_leftout_two_head_min_gate", "Two-head min-gate"
-)
-curve_product_mv_regimes <- dplyr::bind_rows(
-  dplyr::bind_rows(lapply(seq_len(nrow(product_mv_regime_tbl)), function(i) {
-    dplyr::bind_rows(
-      read_mv_curve(
-        mv_root, product_mv_regime_tbl$regime_dir[i], "Global_Product_Optimized",
-        "cv", product_mv_regime_tbl$regime_label[i], "Product (multivariate)"
-      ),
-      read_mv_curve(
-        mv_root, product_mv_regime_tbl$regime_dir[i], "Global_Product_Optimized",
-        "loso", product_mv_regime_tbl$regime_label[i], "Product (multivariate)"
-      )
-    ) %>% dplyr::mutate(calibration = product_mv_regime_tbl$calibration_label[i])
-  })),
-  dplyr::bind_rows(lapply(seq_len(nrow(product_uv_regime_tbl)), function(i) {
-    dplyr::bind_rows(
-      read_uv_curve(
-        mv_root, product_uv_regime_tbl$regime_dir[i], "Global_Product_Optimized",
-        "cv", product_uv_regime_tbl$regime_label[i], "Product (univariate)"
-      ),
-      read_uv_curve(
-        mv_root, product_uv_regime_tbl$regime_dir[i], "Global_Product_Optimized",
-        "loso", product_uv_regime_tbl$regime_label[i], "Product (univariate)"
-      )
-    ) %>% dplyr::mutate(calibration = "Univariate")
-  }))
-)
-if (!is.null(curve_product_mv_regimes) && nrow(curve_product_mv_regimes) > 0) {
-  curve_product_mv_regimes <- curve_product_mv_regimes %>%
-    dplyr::filter(is.finite(risk), is.finite(coverage)) %>%
-    dplyr::mutate(
-      regime = factor(
-        regime,
-        # levels = c(
-        #   "Standard",
-        #   "With left-out",
-        #   "With left-out (logit)",
-        #   "OOD-aware calib.",
-        #   "OOD-aware calib. (logit)",
-        #   "Two-head calib.",
-        #   "Two-head + post-calib.",
-        #   "Three-head calib.",
-        #   "Three-head + post-calib.",
-        #   "Multivariate + KNN(k=10)",
-        #   "Multivariate + KNN(k=20)",
-        #   "Two-head min-gate",
-        #   "Two-head ID-veto"
-        # )
-          levels = c(
-          "With left-out",
-          "OOD-aware calib.",
-          "Two-head calib.",
-          "Three-head calib."
-        )
-      ),
-      split_type = factor(split_type, levels = c("CV", "LOSO")),
-      calibration = factor(
-        calibration,
-        #levels = c("Univariate", "Multivariate", "Multivariate + KNN (k=10)", "Multivariate + KNN (k=20)")
-                levels = c("Univariate", "Multivariate", "Multivariate + KNN (k=10)")
-
-      )
-    ) %>% filter(!is.na(calibration) & !is.na(regime))
-  cols_product_regimes <- c(
-    "With left-out" = "#d95f02",
-    "With left-out (logit)" = "#e6ab02",
-    "OOD-aware calib." = "#7570b3",
-    "OOD-aware calib. (logit)" = "#1f78b4",
-    "Two-head calib." = "#e7298a",
-    "Two-head + post-calib." = "#9467bd",
-    "Three-head calib." = "#17becf",
-    "Three-head + post-calib." = "#8c564b",
-    "Two-head min-gate" = "#a6761d"
-  )
-  p_curve_product_mv_regimes <- ggplot(
-    curve_product_mv_regimes,
-    aes(x = risk, y = coverage, color = regime)
-  ) +
-    geom_line(linewidth = 1.1) +
-    facet_grid(calibration ~ split_type) +
-    scale_color_manual(values = cols_product_regimes, name = "Training regime", drop = FALSE) +
-    labs(
-      title = "Ensemble: monotonic risk-coverage",
-      x = "Risk on accepted samples (%)",
-      y = "Coverage (%)"
-    ) +
-    theme_bw() + ggplot2::xlim(0,10)
-
-  print(p_curve_product_mv_regimes)
-}
-```
-
-
-```{r}
-# Evaluate a chosen operating point on prediction-level decisions.
-# Script will be added in R/evaluate_global_ensemble_operating_point.R.
-source("evaluate_global_ensemble_operating_point.R")
-library(kableExtra)
-op_regimes <- c(
-  "with_leftout",
-  "with_leftout_multivariate_knn_k10",
-  "with_leftout_ood_aware",
-  "with_leftout_ood_aware_multivariate_knn_k10",
-  "with_leftout_two_head",
-  "with_leftout_two_head_multivariate_knn_k10",
-  "with_leftout_three_head",
-  "with_leftout_three_head_multivariate_knn_k10"
-)
-op_targets <- c(0.05)
-
-operating_point_grid <- tidyr::expand_grid(
-  regime = op_regimes,
-  target_risk = op_targets,
-  method = c("platt_simple", "multivariate")
-) %>%
-  dplyr::filter(
-    !(
-      method == "platt_simple" &
-      (grepl("_multivariate_knn_k(10|20)$", regime) | grepl("three_head", regime))
-    )
-  ) %>%
-  dplyr::mutate(
-    model_label = "Global_Product_Optimized",
-    ensemble = "Product"
-  )
-
-evaluate_operating_point_row <- function(regime, target_risk, method, model_label, ensemble) {
-  res <- evaluate_global_ensemble_operating_point(
-    analysis_output_root = outer_cv_root,
-    method = method,
-    regime = regime,
-    split_type = "loso",
-    policy = "global",
-    target_risk = target_risk,
-    candidate_cutoff_table = candidate_cutoffs,
-    model_label = model_label,
-    write_outputs = FALSE
-  )
-
-  res$fold_metrics %>%
-    summarise(
-      coverage_all_pct = mean(coverage, na.rm = TRUE) * 100,
-      coverage_all_pct_sd = sd(coverage, na.rm = TRUE) * 100,
-      coverage_seen_pct = if ("coverage_known" %in% names(.)) mean(coverage_known, na.rm = TRUE) * 100 else NA_real_,
-      coverage_seen_pct_sd = if ("coverage_known" %in% names(.)) sd(coverage_known, na.rm = TRUE) * 100 else NA_real_,
-      accepted_risk_pct = mean(accepted_risk, na.rm = TRUE) * 100,
-      accepted_risk_pct_sd = sd(accepted_risk, na.rm = TRUE) * 100,
-      accepted_kappa = mean(accepted_kappa, na.rm = TRUE),
-      accepted_kappa_sd = sd(accepted_kappa, na.rm = TRUE),
-      pct_leftout_rejected = if ("n_unknown_total" %in% names(.) && any(n_unknown_total > 0, na.rm = TRUE)) {
-        mean(n_unknown_rejected / pmax(1, n_unknown_total), na.rm = TRUE) * 100
-      } else {
-        NA_real_
-      },
-      pct_leftout_rejected_sd = if ("n_unknown_total" %in% names(.) && any(n_unknown_total > 0, na.rm = TRUE)) {
-        sd(n_unknown_rejected / pmax(1, n_unknown_total), na.rm = TRUE) * 100
-      } else {
-        NA_real_
-      }
-    ) %>%
-    mutate(
-      regime = dplyr::recode(regime,
-        test_only = "Test only",
-        with_leftout = "With left-out",
-        with_leftout_logit = "With left-out (logit)",
-        with_leftout_ood_aware = "With left-out (OOD-aware calib.)",
-        with_leftout_ood_aware_logit = "With left-out (OOD-aware calib., logit)",
-        with_leftout_two_head = "With left-out (two-head product)",
-        with_leftout_two_head_postcal = "With left-out (two-head post-cal.)",
-        with_leftout_three_head = "With left-out (three-head)",
-        with_leftout_three_head_postcal = "With left-out (three-head post-cal.)",
-        with_leftout_multivariate_knn_k10 = "With left-out (multivariate + KNN k=10)",
-        with_leftout_multivariate_knn_k20 = "With left-out (multivariate + KNN k=20)",
-        with_leftout_two_head_min_gate = "With left-out (two-head min-gate)",
-        with_leftout_two_head_id_veto = "With left-out (two-head ID-veto)"
-      ),
-      target_risk_pct = target_risk * 100,
-      calibration = ifelse(method == "platt_simple", "Univariate", "Multivariate"),
-      ensemble = ensemble
-    )
-}
-
-operating_point_rows <- lapply(seq_len(nrow(operating_point_grid)), function(i) {
-  g <- operating_point_grid[i, ]
-  evaluate_operating_point_row(
-    regime = g$regime,
-    target_risk = g$target_risk,
-    method = g$method,
-    model_label = g$model_label,
-    ensemble = g$ensemble
-  )
-})
-
-operating_point_summary <- bind_rows(operating_point_rows) %>%
-  select(
-    calibration,
-    regime,
-    target_risk_pct,
-    accepted_risk_pct,
-    accepted_risk_pct_sd,
-    coverage_seen_pct,
-    coverage_seen_pct_sd,
-    accepted_kappa,
-    accepted_kappa_sd,
-    pct_leftout_rejected,
-    pct_leftout_rejected_sd
-  ) %>%
-  mutate(across(-c(calibration, regime), ~ round(as.numeric(.x), 3))) %>%
-  arrange(accepted_risk_pct_sd) %>% filter(calibration == "Multivariate")
-
-knitr::kable(
-  operating_point_summary,
-  digits = 2,
-  align = c("l", "l", "r", "r", "r", "r", "r", "r", "r", "r", "r"),
-  col.names = c(
-    "Calibration",
-    "Regime",
-    "Target risk (%)",
-    "Realised risk mean (%)",
-    "Realised risk SD (%)",
-    "Coverage seen mean (%)",
-    "Coverage seen SD (%)",
-    "Accepted kappa mean",
-    "Accepted kappa SD",
-    "Perc left-outs rejected mean (%)",
-    "Perc left-outs rejected SD (%)"
-  ),
-  caption = "Operating point comparison: base with-leftout vs two-head variants (seen-class coverage / risk target)"
-) %>%
-  kable_styling(
-    bootstrap_options = c("striped", "condensed"),
-    full_width = FALSE,
-    position = "left"
-  ) 
-```
-
-
-
-```{r}
-# Deployable risk-coverage curves (cross-fitted operating points).
-# Unlike monotonic held-out envelopes, these points use the same policy
-# as evaluate_global_ensemble_operating_point() and therefore reflect
-# realistic transfer performance on unseen folds.
-deployable_target_grid <- seq(0.03, 0.10, by = 0.005)
-deployable_curve_grid <- tidyr::expand_grid(
-  split_type = c("cv", "loso"),
-  method = c("multivariate"),
-  # regime = c(
-  # "with_leftout",
-  # "with_leftout_multivariate_knn_k10",
-  # "with_leftout_three_head",
-  # "with_leftout_three_head_multivariate_knn_k10",
-  # "with_leftout_two_head_multivariate_knn_k20",
-  # "with_leftout_two_head"
-  # ),
-  regime = c(
-  "with_leftout",
-  "with_leftout_multivariate_knn_k10",
-  "with_leftout_three_head_multivariate_knn_k10",
-  "with_leftout_two_head_multivariate_knn_k10"
-  ),
-  target_risk = deployable_target_grid
-) %>%
-  dplyr::mutate(model_label = "Global_Product_Optimized")
-
-compute_deployable_curve_point <- function(split_type, method, regime, target_risk, model_label) {
-  res <- tryCatch(
-    evaluate_global_ensemble_operating_point(
-      analysis_output_root = outer_cv_root,
-      method = method,
-      regime = regime,
-      split_type = split_type,
-      policy = "global",
-      target_risk = target_risk,
-      candidate_cutoff_table = candidate_cutoffs,
-      model_label = model_label,
-      write_outputs = FALSE
-    ),
-    error = function(e) NULL
-  )
-  if (is.null(res) || is.null(res$fold_metrics) || nrow(res$fold_metrics) == 0) {
-    return(NULL)
-  }
-  fm <- res$fold_metrics
-  n_fold <- nrow(fm)
-  risk_vec <- as.numeric(fm$accepted_risk)
-  risk_mean <- if (length(risk_vec) > 0) mean(risk_vec, na.rm = TRUE) else NA_real_
-  risk_sd <- if (length(risk_vec) > 1) sd(risk_vec, na.rm = TRUE) else NA_real_
-  risk_se <- if (is.finite(risk_sd) && is.finite(n_fold) && n_fold > 0) risk_sd / sqrt(n_fold) else NA_real_
-  risk_ci_lo <- if (is.finite(risk_mean) && is.finite(risk_se)) pmax(0, risk_mean - 1.96 * risk_se) else NA_real_
-  risk_ci_hi <- if (is.finite(risk_mean) && is.finite(risk_se)) pmin(1, risk_mean + 1.96 * risk_se) else NA_real_
-  cov_vec <- if ("coverage_known" %in% colnames(fm)) {
-    as.numeric(fm$coverage_known)
-  } else {
-    rep(NA_real_, n_fold)
-  }
-  cov_mean <- if (length(cov_vec) > 0) mean(cov_vec, na.rm = TRUE) else NA_real_
-  cov_sd <- if (length(cov_vec) > 1) sd(cov_vec, na.rm = TRUE) else NA_real_
-  cov_se <- if (is.finite(cov_sd) && is.finite(n_fold) && n_fold > 0) cov_sd / sqrt(n_fold) else NA_real_
-  cov_ci_lo <- if (is.finite(cov_mean) && is.finite(cov_se)) pmax(0, cov_mean - 1.96 * cov_se) else NA_real_
-  cov_ci_hi <- if (is.finite(cov_mean) && is.finite(cov_se)) pmin(1, cov_mean + 1.96 * cov_se) else NA_real_
-
-  data.frame(
-    split_type = toupper(split_type),
-    calibration = ifelse(method == "platt_simple", "Univariate", "Multivariate"),
-    regime = dplyr::recode(
-      regime,
-      with_leftout = "With left-out",
-      with_leftout_multivariate_knn_k10 = "With left-out + KNN (k=10)",
-      with_leftout_logit = "With left-out (logit)",
-      with_leftout_logit_multivariate_knn_k10 = "With left-out (logit) + KNN (k=10)",
-      with_leftout_ood_aware = "With left-out (OOD-aware calib.)",
-      with_leftout_ood_aware_logit = "With left-out (OOD-aware calib., logit)",
-      with_leftout_two_head = "Two-head product",
-      with_leftout_two_head_postcal = "Two-head + post-calib.",
-      with_leftout_three_head = "Three-head",
-      with_leftout_three_head_multivariate_knn_k10 = "Three-head + KNN (k=10)",
-      with_leftout_three_head_postcal = "Three-head + post-calib.",
-      with_leftout_multivariate_knn_k10 = "Multivariate + KNN (k=10)",
-      with_leftout_multivariate_knn_k20 = "Multivariate + KNN (k=20)",
-      with_leftout_two_head_min_gate = "Two-head min-gate",
-      with_leftout_two_head_id_veto = "Two-head ID-veto"
-    ),
-    target_risk_pct = 100 * target_risk,
-    deployable_risk_pct = if (is.finite(risk_mean)) 100 * risk_mean else NA_real_,
-    deployable_risk_sd_pct = if (is.finite(risk_sd)) 100 * risk_sd else NA_real_,
-    deployable_risk_ci95_lo_pct = if (is.finite(risk_ci_lo)) 100 * risk_ci_lo else NA_real_,
-    deployable_risk_ci95_hi_pct = if (is.finite(risk_ci_hi)) 100 * risk_ci_hi else NA_real_,
-    deployable_coverage_seen_pct = if (is.finite(cov_mean)) 100 * cov_mean else NA_real_,
-    deployable_coverage_seen_sd_pct = if (is.finite(cov_sd)) 100 * cov_sd else NA_real_,
-    deployable_coverage_seen_ci95_lo_pct = if (is.finite(cov_ci_lo)) 100 * cov_ci_lo else NA_real_,
-    deployable_coverage_seen_ci95_hi_pct = if (is.finite(cov_ci_hi)) 100 * cov_ci_hi else NA_real_,
-    n_folds = n_fold,
-    stringsAsFactors = FALSE
-  )
-}
-
-deployable_curve_rows <- lapply(seq_len(nrow(deployable_curve_grid)), function(i) {
-  g <- deployable_curve_grid[i, ]
-  compute_deployable_curve_point(
-    split_type = g$split_type,
-    method = g$method,
-    regime = g$regime,
-    target_risk = g$target_risk,
-    model_label = g$model_label
-  )
-})
-
-deployable_curve_tbl <- dplyr::bind_rows(deployable_curve_rows) %>%
-  dplyr::filter(
-    is.finite(deployable_risk_pct),
-    is.finite(deployable_coverage_seen_pct)
-  ) %>%
-  dplyr::mutate(
-    # regime = factor(
-    #   regime,
-    #   levels = c(
-    #     "With left-out",
-    #     "With left-out + KNN (k=10)",
-    #     "With left-out (logit)",
-    #     "With left-out (logit) + KNN (k=10)",
-    #     "With left-out (OOD-aware calib.)",
-    #     "With left-out (OOD-aware calib., logit)",
-    #     "Two-head product",
-    #     "Three-head",
-    #     "Three-head + KNN (k=10)",
-    #     "Two-head min-gate",
-    #     "Two-head ID-veto"
-    #   )
-    # ),
-    split_type = factor(split_type, levels = c("CV", "LOSO")),
-    calibration = factor(calibration, levels = c("Multivariate", "Univariate"))
-  ) %>% filter(!is.na(regime))
-
-if (nrow(deployable_curve_tbl) > 0) {
-  deployable_cols <- c(
-    "With left-out" = "#d95f02",
-    "With left-out + KNN (k=10)" = "#66a61e",
-    "With left-out (logit)" = "#e6ab02",
-    "With left-out (logit) + KNN (k=10)" = "#1b9e77",
-    "Two-head product" = "#e7298a",
-    "Three-head" = "#17becf",
-    "Three-head + KNN (k=10)" = "#8c564b"
-  )
-
-  # 1) Requested risk vs realized risk.
-  p_deployable_requested_vs_realized_risk <- ggplot(
-    deployable_curve_tbl,
-    aes(
-      x = target_risk_pct,
-      y = deployable_risk_pct,
-      color = regime,
-      group = interaction(regime, split_type)
-    )
-  ) +
-    geom_ribbon(
-      aes(
-        ymin = deployable_risk_ci95_lo_pct,
-        ymax = deployable_risk_ci95_hi_pct,
-        fill = regime
-      ),
-      alpha = 0.14,
-      color = NA
-    ) +
-    geom_line(linewidth = 1.0) +
-    geom_point(size = 1.8) +
-    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "grey40") +
-    facet_grid(regime ~ split_type) +
-    #scale_color_manual(values = deployable_cols, name = "Regime", drop = FALSE) +
-    #scale_fill_manual(values = deployable_cols, guide = "none", drop = FALSE) +
-    labs(
-      title = "Deployable requested vs realized risk",
-      subtitle = "Product ensemble; rows are regimes and columns are CV/LOSO; shaded ribbons show 95% CI across folds; dashed line is y = x",
-      x = "Requested risk target (%)",
-      y = "Realized accepted risk (%)"
-    ) +
-    theme_bw()
-  print(p_deployable_requested_vs_realized_risk)
-
-  # 2) Requested risk vs realized seen-class coverage.
-  p_deployable_requested_vs_coverage <- ggplot(
-    deployable_curve_tbl,
-    aes(
-      x = target_risk_pct,
-      y = deployable_coverage_seen_pct,
-      color = regime,
-      group = interaction(regime, split_type)
-    )
-  ) +
-    geom_ribbon(
-      aes(
-        ymin = deployable_coverage_seen_ci95_lo_pct,
-        ymax = deployable_coverage_seen_ci95_hi_pct,
-        fill = regime
-      ),
-      alpha = 0.14,
-      color = NA
-    ) +
-    geom_line(linewidth = 1.0) +
-    geom_point(size = 1.8) +
-    facet_grid(regime ~ split_type) +
-    #scale_color_manual(values = deployable_cols, name = "Regime", drop = FALSE) +
-    #scale_fill_manual(values = deployable_cols, guide = "none", drop = FALSE) +
-    labs(
-      title = "Deployable requested risk vs realized seen-class coverage",
-      subtitle = "Product ensemble; rows are regimes and columns are CV/LOSO; shaded ribbons show 95% CI across folds",
-      x = "Requested risk target (%)",
-      y = "Realized seen-class coverage (%)"
-    ) +
-    theme_bw()
-  print(p_deployable_requested_vs_coverage)
-}
-
-# LOSO deployable model ranking by:
-# 1) closeness to requested risk (mean absolute error),
-# 2) tightness of realized-risk CI (mean CI width),
-# 3) combined z-score of both metrics.
-loso_deployable_risk_ranking <- deployable_curve_tbl %>%
-  dplyr::filter(split_type == "LOSO") %>%
-  dplyr::mutate(
-    abs_err_pct = abs(deployable_risk_pct - target_risk_pct),
-    ci_width_pct = deployable_risk_ci95_hi_pct - deployable_risk_ci95_lo_pct
-  ) %>%
-  dplyr::group_by(calibration, regime) %>%
-  dplyr::summarise(
-    mean_abs_err_pct = mean(abs_err_pct, na.rm = TRUE),
-    mean_ci_width_pct = mean(ci_width_pct, na.rm = TRUE),
-    n_points = dplyr::n(),
-    .groups = "drop"
-  ) %>%
-  dplyr::mutate(
-    z_abs_err = as.numeric(scale(mean_abs_err_pct)),
-    z_ci_width = as.numeric(scale(mean_ci_width_pct)),
-    combined_score = z_abs_err + z_ci_width
-  ) %>%
-  dplyr::arrange(combined_score, mean_abs_err_pct, mean_ci_width_pct)
-
-knitr::kable(
-  loso_deployable_risk_ranking,
-  digits = 3,
-  caption = "LOSO ranking: target-risk closeness, CI tightness, and combined score"
-) %>%
-  kableExtra::kable_styling(
-    bootstrap_options = c("striped", "condensed"),
-    full_width = FALSE,
-    position = "left"
-  )
-
-# LOSO deployable coverage ranking by:
-# 1) realized seen-class coverage (higher is better),
-# 2) tightness of coverage CI (smaller width is better),
-# 3) combined z-score of both metrics (lower is better).
-loso_deployable_coverage_ranking <- deployable_curve_tbl %>%
-  dplyr::filter(split_type == "LOSO") %>%
-  dplyr::mutate(
-    coverage_ci_width_pct = deployable_coverage_seen_ci95_hi_pct - deployable_coverage_seen_ci95_lo_pct
-  ) %>%
-  dplyr::group_by(calibration, regime) %>%
-  dplyr::summarise(
-    mean_coverage_seen_pct = mean(deployable_coverage_seen_pct, na.rm = TRUE),
-    mean_coverage_ci_width_pct = mean(coverage_ci_width_pct, na.rm = TRUE),
-    n_points = dplyr::n(),
-    .groups = "drop"
-  ) %>%
-  dplyr::mutate(
-    z_neg_coverage = as.numeric(scale(-mean_coverage_seen_pct)),
-    z_ci_width = as.numeric(scale(mean_coverage_ci_width_pct)),
-    combined_score = z_neg_coverage + z_ci_width
-  ) %>%
-  dplyr::arrange(combined_score, dplyr::desc(mean_coverage_seen_pct), mean_coverage_ci_width_pct)
-
-knitr::kable(
-  loso_deployable_coverage_ranking,
-  digits = 3,
-  caption = "LOSO ranking: realized seen-class coverage, CI tightness, and combined score"
-) %>%
-  kableExtra::kable_styling(
-    bootstrap_options = c("striped", "condensed"),
-    full_width = FALSE,
-    position = "left"
-  )
-```
-
-
-```{r}
-# Target-risk transfer plot (cross-fitted outer CV):
-# x-axis: expected risk from non-testing outer folds at a given cutoff (trainpool curve)
-# y-axis: realized risk on the heldout testing fold at the same cutoff (heldout curve)
-# Regimes requested: with_leftout, with_leftout_logit, with_leftout_two_head_min_gate
-transfer_regimes <- c(
-  "with_leftout",
-  "with_leftout_logit",
-  "with_leftout_multivariate_knn_k10",
-  "with_leftout_multivariate_knn_k20",
-  "with_leftout_three_head_postcal",
-  "with_leftout_two_head_min_gate"
-)
-transfer_splits <- c("cv", "loso")
-transfer_calibrations <- c("multivariate", "univariate")
-
-read_target_to_realized_points_from_sweeps <- function(root_dir, regime, split_type,
-                                                       calibration = c("multivariate", "univariate"),
-                                                       model_dir = "Global_Product_Optimized") {
-  calibration <- match.arg(calibration)
-  if (calibration == "multivariate") {
-    heldout_path <- file.path(
-      root_dir, "ensemble_multivariate", regime, model_dir,
-      paste0("risk_coverage_heldout_curve_raw_", split_type, ".csv")
-    )
-    trainpool_path <- file.path(
-      root_dir, "ensemble_multivariate", regime, model_dir,
-      paste0("risk_coverage_trainpool_curve_", split_type, ".csv")
-    )
-  } else {
-    heldout_path <- file.path(
-      root_dir, regime,
-      paste0("risk_coverage_heldout_curve_raw_", split_type, ".csv")
-    )
-    trainpool_path <- file.path(
-      root_dir, regime,
-      paste0("risk_coverage_trainpool_curve_", split_type, ".csv")
-    )
-  }
-  if (!file.exists(heldout_path) || !file.exists(trainpool_path)) return(NULL)
-
-  heldout <- read.csv(heldout_path, stringsAsFactors = FALSE)
-  trainpool <- read.csv(trainpool_path, stringsAsFactors = FALSE)
-  if (nrow(heldout) == 0 || nrow(trainpool) == 0) return(NULL)
-
-  model_aliases <- if (calibration == "multivariate") {
-    unique(c(
-      model_dir,
-      paste0(model_dir, "_MV"),
-      paste0(model_dir, "_MV_leftout"),
-      paste0(model_dir, "_MV_leftout_logit"),
-      paste0(model_dir, "_MV_leftout_ood_aware"),
-      paste0(model_dir, "_MV_leftout_ood_aware_logit"),
-      paste0(model_dir, "_MV_leftout_two_head"),
-      paste0(model_dir, "_MV_leftout_two_head_postcal"),
-      paste0(model_dir, "_MV_leftout_three_head"),
-      paste0(model_dir, "_MV_leftout_three_head_postcal"),
-      paste0(model_dir, "_MV_leftout_multivariate_knn_k10"),
-      paste0(model_dir, "_MV_leftout_multivariate_knn_k20"),
-      paste0(model_dir, "_MV_leftout_two_head_min_gate"),
-      paste0(model_dir, "_MV_leftout_two_head_id_veto")
-    ))
-  } else {
-    model_dir
-  }
-  if ("model" %in% colnames(heldout)) heldout <- heldout[heldout$model %in% model_aliases, , drop = FALSE]
-  if ("model" %in% colnames(trainpool)) trainpool <- trainpool[trainpool$model %in% model_aliases, , drop = FALSE]
-  if (nrow(heldout) == 0 || nrow(trainpool) == 0) return(NULL)
-
-  if (!all(c("fold", "prob_cutoff", "accuracy") %in% colnames(heldout))) return(NULL)
-  if (!all(c("held_out_fold", "prob_cutoff") %in% colnames(trainpool))) return(NULL)
-  if (!("train_risk" %in% colnames(trainpool) || "train_accuracy" %in% colnames(trainpool))) return(NULL)
-
-  trainpool <- trainpool %>%
-    dplyr::mutate(
-      expected_risk = if ("train_risk" %in% colnames(.)) as.numeric(train_risk) else (1 - as.numeric(train_accuracy))
-    ) %>%
-    dplyr::group_by(held_out_fold, prob_cutoff) %>%
-    dplyr::summarise(expected_risk = mean(expected_risk, na.rm = TRUE), .groups = "drop")
-
-  heldout %>%
-    dplyr::mutate(
-      realised_risk = 1 - as.numeric(accuracy),
-      realised_coverage_seen = if ("coverage_known" %in% colnames(.)) {
-        as.numeric(coverage_known)
-      } else if ("perc_rejected" %in% colnames(.)) {
-        1 - as.numeric(perc_rejected)
-      } else {
-        NA_real_
-      }
-    ) %>%
-    dplyr::left_join(
-      trainpool,
-      by = c("fold" = "held_out_fold", "prob_cutoff" = "prob_cutoff")
-    ) %>%
-    dplyr::filter(
-      is.finite(expected_risk),
-      is.finite(realised_risk),
-      is.finite(realised_coverage_seen)
-    ) %>%
-    dplyr::transmute(
-      split_type = toupper(split_type),
-      calibration = ifelse(calibration == "multivariate", "Multivariate", "Univariate"),
-      regime = dplyr::recode(
-        regime,
-        with_leftout = "With left-out",
-        with_leftout_logit = "With left-out (logit)",
-        with_leftout_multivariate_knn_k10 = "Multivariate + KNN (k=10)",
-        with_leftout_multivariate_knn_k20 = "Multivariate + KNN (k=20)",
-        with_leftout_three_head_postcal = "Three-head + post-calib.",
-        with_leftout_two_head_min_gate = "Two-head min-gate"
-      ),
-      target_risk_pct = 100 * expected_risk,
-      realised_risk_pct = 100 * realised_risk,
-      realised_coverage_seen_pct = 100 * realised_coverage_seen,
-      fold = as.character(fold),
-      prob_cutoff = prob_cutoff
-    )
-}
-
-transfer_points <- dplyr::bind_rows(
-  lapply(transfer_calibrations, function(cal) {
-    dplyr::bind_rows(lapply(transfer_regimes, function(reg) {
-      dplyr::bind_rows(lapply(transfer_splits, function(sp) {
-        read_target_to_realized_points_from_sweeps(
-          root_dir = outer_cv_root,
-          regime = reg,
-          split_type = sp,
-          calibration = cal,
-          model_dir = "Global_Product_Optimized"
-        )
-      }))
-    }))
-  })
-)
-
-if (!is.null(transfer_points) && nrow(transfer_points) > 0) {
-  transfer_points <- transfer_points %>%
-    dplyr::filter(is.finite(target_risk_pct), is.finite(realised_risk_pct)) %>%
-    dplyr::mutate(
-      split_type = factor(split_type, levels = c("CV", "LOSO")),
-      calibration = factor(calibration, levels = c("Multivariate", "Univariate")),
-      regime = factor(
-        regime,
-        levels = c(
-          "With left-out",
-          "With left-out (logit)",
-          "Multivariate + KNN (k=10)",
-          "Multivariate + KNN (k=20)",
-          "Three-head + post-calib.",
-          "Two-head min-gate"
-        )
-      )
-    ) %>%
-    dplyr::filter(!is.na(regime))
-
-  p_target_vs_realised_risk_transfer <- ggplot(
-    transfer_points,
-    aes(x = target_risk_pct, y = realised_risk_pct)
-  ) +
-    geom_point(
-      aes(color = "Individual cut offs"),
-      alpha = 0.35,
-      size = 2
-    ) +
-    geom_smooth(
-      aes(color = "LOESS line"),
-      method = "loess",
-      se = FALSE,
-      linewidth = 1.3,
-      span = 0.75
-    ) +
-    facet_grid(calibration + regime ~ split_type) +
-    scale_color_manual(
-      values = c("Individual cut offs" = "#7CFC7A", "LOESS line" = "#006400"),
-      name = NULL
-    ) +
-    labs(
-      title = "Target risk transfer to heldout outer folds",
-      subtitle = "Multivariate and univariate product ensemble; x from non-testing outer-fold trainpool risk at cutoff, y from heldout-fold realized risk at same cutoff",
-      x = "Target risk from non-testing outer folds (%)",
-      y = "Realised risk on heldout fold (%)"
-    ) +
-    theme_bw() + xlim(0,10) + ylim(0,22)
-
-  print(p_target_vs_realised_risk_transfer)
-
-  p_target_vs_realised_risk_transfer_legacy_style <- ggplot(
-    transfer_points,
-    aes(x = target_risk_pct, y = realised_coverage_seen_pct)
-  ) +
-    geom_point(
-      aes(color = "Individual cut offs"),
-      alpha = 0.55,
-      size = 2.8
-    ) +
-    geom_smooth(
-      aes(color = "LOESS line"),
-      method = "loess",
-      se = FALSE,
-      linewidth = 1.35,
-      span = 0.75
-    ) +
-    facet_grid(calibration + regime ~ split_type) +
-    scale_color_manual(
-      values = c("Individual cut offs" = "#F5A623", "LOESS line" = "#E10600"),
-      name = NULL
-    ) +
-    labs(
-      title = "Target risk vs realised seen-class coverage",
-      subtitle = "Legacy styling: orange individual cutoffs with red LOESS line; multivariate + univariate",
-      x = "Target risk from non-testing outer folds (%)",
-      y = "Realised coverage seen classes on heldout fold (%)"
-    ) +
-    theme_bw() +
-    theme(
-      legend.position = "bottom",
-      panel.grid.minor = element_blank()
-    ) + xlim(0,10) 
-
-  print(p_target_vs_realised_risk_transfer_legacy_style)
-}
-```
 
 # Left out predictions analysis
 

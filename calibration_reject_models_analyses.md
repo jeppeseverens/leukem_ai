@@ -3,143 +3,7 @@ title: "Nested target-risk calibration (OOD-aware)"
 output: html_document
 ---
 
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
-suppressPackageStartupMessages({
-  library(dplyr)
-  library(tidyr)
-  library(readr)
-  library(ggplot2)
-  library(ggridges)
-  library(patchwork)
-})
-# Facet column order: LOSO then CV (left to right).
-SPLIT_TYPE_LEVELS <- c("LOSO", "CV")
-# Facet row order: collapsed then full (top to bottom).
-LABEL_DISPLAY_LEVELS <- c("Collapsed", "Full subtypes")
 
-label_set_to_display <- function(x) {
-  factor(
-    dplyr::recode(
-      as.character(x),
-      full_subtypes = "Full subtypes",
-      collapsed_classes = "Collapsed"
-    ),
-    levels = LABEL_DISPLAY_LEVELS
-  )
-}
-
-# Convert internal class ids into manuscript-friendly labels.
-pretty_class_label <- function(x) {
-  raw <- as.character(x)
-  cleaned <- raw %>%
-    gsub("\\.+", " ", ., perl = TRUE) %>%
-    gsub("\\s+", " ", ., perl = TRUE) %>%
-    trimws()
-
-  out <- dplyr::recode(
-    cleaned,
-    "APL t 15 17 PML RARA" = "PML::RARA",
-    "AML with mutated TP53" = "mutated TP53",
-    "AML with t 8 21 RUNX1 RUNX1T1" = "RUNX1::RUNX1T1",
-    "AML with inv 16 t 16 16 CBFB MYH11" = "CBFB::MYH11",
-    "AML with t 9 11 MLLT3 KMT2A" = "MLLT3::KMT2A",
-    "other KMT2A" = "Other KMT2A-r.",
-    "AML with t 6 9 DEK NUP214" = "DEK::NUP214",
-    "AML with t 9 22 BCR ABL1" = "BCR::ABL1",
-    "NUP98 NSD1" = "NUP98::NSD1",
-    "AML with mutated NPM1" = "mutated NPM1",
-    "AML with in frame bZIP CEBPA" = "in-frame bZIP CEBPA",
-    "MDS r" = "MDS-related",
-    "AML with MDS related gene mutations" = "MDS-related, gene mutations",
-    "AML with MDS related cytogenetic abnormalities" = "MDS-related, cytogenetic abn.",
-    "MECOM" = "MECOM rearrangements",
-    "GATA2 MECOM" = "GATA2;MECOM",
-    "MECOM other" = "MECOM, other",
-    "AML NOS" = "AML, NOS",
-    "PRDM16 RPN1" = "PRDM16::RPN1",
-    "NPM1 MLF1" = "NPM1::MLF1",
-    "AML with other rare recurring translocations" = "Other rare translocations",
-    "KAT6A CREBBP" = "KAT6A::CREBBP",
-    "RBM15 MRTF1" = "RBM15::MRTF1",
-    "NUP98 KDM5A" = "NUP98::KDM5A",
-    "NUP98 DDX10" = "NUP98::DDX10",
-    "NUP98 HOXA9" = "NUP98::HOXA9",
-    "NUP98 HOXD13" = "NUP98::HOXD13",
-    "NUP98 PHF23" = "NUP98::PHF23",
-    "ETV6 MNX1" = "ETV6::MNX1",
-    "PICALM MLLT10" = "PICALM::MLLT10",
-    "FUS ERG" = "FUS::ERG",
-    "RUNX1 CBFA2T3" = "RUNX1::CBFA2T3",
-    "CBFA2T3 GLIS2" = "CBFA2T3::GLIS2",
-    "MYB GATA1" = "MYB::GATA1",
-    "CBFA2T3 GLIS3" = "CBFA2T3::GLIS3",
-    "RUNX1 CBFA2T2" = "RUNX1::CBFA2T2" ,
-    .default = cleaned
-  )
-
-  # Enforce KMT2A fusion formatting with '::' for any remaining specific partners.
-  # Keep the grouped bucket label unchanged.
-  out <- vapply(out, function(lbl) {
-    if (identical(lbl, "Other KMT2A-r.")) return(lbl)
-    if (!grepl("^KMT2A\\b", lbl)) return(lbl)
-    parts <- strsplit(lbl, "\\s+", perl = TRUE)[[1]]
-    if (length(parts) < 2L) return(lbl)
-    paste(c("KMT2A", parts[-1]), collapse = "::")
-  }, FUN.VALUE = character(1))
-
-  # Stable plotting order: core recurrent classes first, then rarer fusions.
-  base_order <- c(
-    "PML::RARA",
-    "RUNX1::RUNX1T1",
-    "CBFB::MYH11",
-    "MLLT3::KMT2A",
-    "Other KMT2A-r.",
-    "DEK::NUP214",
-    "MECOM rearrangements",
-    "GATA2;MECOM",
-    "MECOM, other",
-    "Other rare translocations",
-    
-    "PRDM16::RPN1",
-    "NPM1::MLF1",
-    "KAT6A::CREBBP",
-    "RBM15::MRTF1",
-    "NUP98::NSD1",
-    "NUP98::KDM5A",
-    "NUP98, other partners",
-    "ETV6::MNX1",
-    "PICALM::MLLT10",
-    "FUS::ERG",
-    "RUNX1::CBFA2T3",
-    "CBFA2T3::GLIS2",
-    "BCR::ABL1",
-    "mutated NPM1",
-    "in-frame bZIP CEBPA",
-    "MDS-related",
-    "mutated TP53",
-    "MDS-related, gene mutations",
-    "MDS-related, cytogenetic abn.",
-    "AML, NOS",
-    
-    "NUP98::DDX10",
-    "NUP98::HOXA9",
-    "NUP98::HOXD13",
-    "NUP98::PHF23"
-  )
-  kmt2a_specific <- sort(unique(out[grepl("^KMT2A::", out)]))
-  kmt2a_specific <- setdiff(kmt2a_specific, "KMT2A::MLLT3")
-  anchor_idx <- match("Other KMT2A-r.", base_order)
-  levels_order <- c(
-    base_order[seq_len(anchor_idx)],
-    kmt2a_specific,
-    base_order[(anchor_idx + 1L):length(base_order)]
-  )
-  levels_order <- c(levels_order, setdiff(sort(unique(out)), levels_order))
-  out <- factor(out, levels = levels_order)
-  out
-}
-```
 
 OOD-aware single-head rejector (`with_leftout_ood_aware`): inner CV **scores every recipe at 3%, 5%, and 10%** requested operating risk (threshold logic per anchor), **`rank_inner_scores` produces a rank at each anchor**, then the **winning RHS minimizes the sum of those three ranks** (ties: lower worst rank, then better rank at 5%, 3%, 10%, then `rhs_key`). **Outer** evaluation and primary tables still use **5%** as the requested accepted risk for thresholding on the pool and target fold. The calibration curve CSV sweeps requested risks **1–10%** (0.5% steps) **holding that fused winner’s RHS** (threshold refit only).
 
@@ -157,14 +21,15 @@ Outputs from `Rscript R/calibration_reject_models.R`:
 - `nested_target_risk_full_coverage_summary.csv` — **100% seen-class coverage** baseline (accept all): mean risk and kappa per setting for **multivariate accept-all** and **classifier-only** (OOD-aware outer folds).
 - `nested_target_risk_rejection_stratum_per_fold.csv` — per outer fold, % rejected by stratum (OOD / incorrect seen / correct seen) at **5%** with fused inner-winning RHS.
 - `nested_target_risk_rejection_stratum_summary.csv` — same counts pooled within each label set × CV/LOSO setting.
-- `nested_target_risk_rejection_stratum_loso_labels_averaged.csv` — **LOSO only**: unweighted mean of rejection % across full and collapsed label sets (reference table).
+- `nested_target_risk_rejection_stratum_loso_labels_averaged.csv` — **LOSO only**: unweighted mean of rejection % across full and collapsed label sets (manuscript sentence).
 - `nested_target_risk_rejection_stratum_pooled.csv` — all splits and label sets combined (diagnostic only).
 
 **Run the canonical script first** (from repo root):
 
 `Rscript R/calibration_reject_models.R`
 
-```{r paths}
+
+``` r
 repo_root <- if (file.exists("R/outer_cv_analysis.R")) "." else ".."
 out_dir <- file.path(repo_root, "data/out/outer_cv/calibration_feature_utility_selection_safe")
 
@@ -254,7 +119,8 @@ The summary table and heatmap below use outputs at **5%** requested accepted ris
 
 Inner-winning multivariate recipe at **5%** requested accepted risk.
 
-```{r summary_table}
+
+``` r
 summary_display <- summary_df %>%
   mutate(
     split_type = toupper(as.character(split_type)),
@@ -279,7 +145,8 @@ summary_display <- summary_df %>%
 
 Probability-only (`max_prob`) rejector at **5%** requested accepted risk.
 
-```{r summary_table_max_prob}
+
+``` r
 if (nrow(summary_max_prob_df) == 0L) {
   knitr::kable(data.frame(
     note = "No nested_target_risk_summary_max_prob.csv — rerun Rscript R/calibration_reject_models.R"
@@ -310,7 +177,8 @@ if (nrow(summary_max_prob_df) == 0L) {
 
 ### Multivariate vs max_prob (5% operating point)
 
-```{r summary_table_combined}
+
+``` r
 format_summary_row <- function(df, calibration_model_label) {
   df %>%
     mutate(
@@ -377,11 +245,27 @@ if (nrow(summary_combined_df) > 0L) {
 summary_compare_display %>% filter(split_type == "LOSO")
 ```
 
+```
+## # A tibble: 4 × 12
+##   calibration_model  label_display split_type setting_col modal_inner_winner_r…¹
+##   <chr>              <chr>         <chr>      <chr>       <chr>                 
+## 1 Best features (in… Collapsed     LOSO       LOSO | Mer… entropy;knn10_mean_d;…
+## 2 Probability only … Collapsed     LOSO       LOSO | Mer… max_prob (baseline on…
+## 3 Best features (in… Full subtypes LOSO       LOSO | Full entropy;knn10_mean_d;…
+## 4 Probability only … Full subtypes LOSO       LOSO | Full max_prob (baseline on…
+## # ℹ abbreviated name: ¹​modal_inner_winner_recipe
+## # ℹ 7 more variables: n_outer_folds <dbl>, mean_outer_coverage_seen_pct <dbl>,
+## #   sd_outer_coverage_seen_pct <dbl>, mean_outer_risk_all_accepted_pct <dbl>,
+## #   sd_outer_risk_all_accepted_pct <dbl>, mean_outer_kappa_accepted <dbl>,
+## #   sd_outer_kappa_accepted <dbl>
+```
+
 ## Publication: full-coverage baseline risk and kappa (OOD-aware)
 
 At **100% seen-class coverage** (accept all samples, rejector threshold = 0): **risk** = accepted error rate (`accept_combined` target); **kappa** = Cohen's kappa on accepted predictions vs truth. **Multivariate** rows use the inner-winning recipe per fold; **classifier-only** = ensemble predictions with no rejector. Source: `nested_target_risk_full_coverage_summary.csv`.
 
-```{r publication_full_coverage}
+
+``` r
 if (nrow(full_coverage_summary_df) == 0L) {
   knitr::kable(data.frame(
     note = "No nested_target_risk_full_coverage_summary.csv — rerun Rscript R/calibration_reject_models.R"
@@ -452,69 +336,74 @@ if (nrow(full_coverage_summary_df) == 0L) {
 }
 ```
 
+```
+## [Collapsed classes] We then evaluated the risk–coverage curve of the multivariate model and its ability to filter mispredictions. In the setting that included unseen classes to better approximate real-world application, the baseline risk at full coverage (100%) was 14.6% in the LOSO setting (kappa = 0.83) and 11.2% in the CV setting (kappa = 0.87). 
+## 
+## [Full subtypes] We then evaluated the risk–coverage curve of the multivariate model and its ability to filter mispredictions. In the setting that included unseen classes to better approximate real-world application, the baseline risk at full coverage (100%) was 16.6% in the LOSO setting (kappa = 0.81) and 13.4% in the CV setting (kappa = 0.85).
+```
+
 ## Publication: rejection by outcome stratum (LOSO, 5% operating point)
 
-**LOSO only.** At the **5%** requested accepted-risk operating point (fused inner-winning multivariate RHS per outer fold; rejected = `p_hat` below pool LOSO-OOF threshold). Manuscript sentences below are reported **separately** for collapsed and full subtype classification. Source: `nested_target_risk_rejection_stratum_summary.csv` (unweighted mean across label sets: `nested_target_risk_rejection_stratum_loso_labels_averaged.csv`).
+**LOSO only.** At the **5%** requested accepted-risk operating point (fused inner-winning multivariate RHS per outer fold; rejected = `p_hat` below pool LOSO-OOF threshold). Manuscript percentages are the **unweighted mean** of rejection rates from **full subtypes** and **collapsed classes** LOSO rows. Source: `nested_target_risk_rejection_stratum_loso_labels_averaged.csv` (see `nested_target_risk_rejection_stratum_summary.csv` for per-label LOSO detail).
 
-```{r publication_rejection_stratum}
-publication_rejection_sentence <- function(df, label_set_key, label_label) {
-  row <- df %>% filter(split_type == "loso", label_set == label_set_key)
-  if (nrow(row) != 1L) {
-    return(sprintf("(%s: LOSO rejection stratum incomplete)", label_label))
-  }
-  sprintf(
-    paste0(
-      "[%s] At this target 5%% error rate for the LOSO setting, we found that ",
-      "%.1f%% of samples from unseen classes and %.1f%% of misclassified samples ",
-      "were rejected, compared with %.1f%% of correctly classified samples from seen classes."
-    ),
-    label_label,
-    row$pct_rejected_ood[[1]],
-    row$pct_rejected_incorrect_seen[[1]],
-    row$pct_rejected_correct_seen[[1]]
-  )
-}
 
-if (nrow(rejection_stratum_summary_df) == 0L) {
+``` r
+if (nrow(rejection_stratum_loso_avg_df) == 0L) {
   knitr::kable(data.frame(
     note = paste(
-      "No nested_target_risk_rejection_stratum_summary.csv —",
+      "No nested_target_risk_rejection_stratum_loso_labels_averaged.csv —",
       "rerun Rscript R/calibration_reject_models.R"
     )
   ))
 } else {
-  rejection_loso_by_label <- rejection_stratum_summary_df %>%
-    filter(split_type == "loso") %>%
-    mutate(label_display = label_set_to_display(label_set)) %>%
+  loso_avg_display <- rejection_stratum_loso_avg_df %>%
     select(
-      label_display, n_outer_folds,
+      split_type, requested_target_risk_pct, n_outer_folds, n_label_sets_averaged,
       pct_rejected_ood, pct_rejected_incorrect_seen, pct_rejected_correct_seen
-    ) %>%
-    arrange(label_display)
-  knitr::kable(rejection_loso_by_label, digits = 1)
+    )
+  knitr::kable(loso_avg_display, digits = 1)
 
-  if (nrow(rejection_stratum_loso_avg_df) > 0L) {
-    loso_avg_display <- rejection_stratum_loso_avg_df %>%
+  if (nrow(rejection_stratum_summary_df) > 0L) {
+    rejection_loso_by_label <- rejection_stratum_summary_df %>%
+      filter(split_type == "loso") %>%
+      mutate(label_display = label_set_to_display(label_set)) %>%
       select(
-        split_type, requested_target_risk_pct, n_outer_folds, n_label_sets_averaged,
+        label_display, n_outer_folds,
         pct_rejected_ood, pct_rejected_incorrect_seen, pct_rejected_correct_seen
       )
     knitr::kable(
-      loso_avg_display,
+      rejection_loso_by_label,
       digits = 1,
-      caption = "Unweighted mean across collapsed and full (reference only)"
+      caption = "LOSO per label set (inputs to the unweighted average above)"
     )
   }
 
-  loso_tbl <- rejection_stratum_summary_df %>% filter(split_type == "loso")
-  cat(publication_rejection_sentence(loso_tbl, "collapsed_classes", "Collapsed classes"), "\n\n")
-  cat(publication_rejection_sentence(loso_tbl, "full_subtypes", "Full subtypes"), "\n")
+  row <- rejection_stratum_loso_avg_df %>% slice(1)
+  cat(
+    sprintf(
+      paste0(
+        "At this target 5%% error rate for the LOSO setting, we found that averaged ",
+        "across full and collapsed classification, %.1f%% of samples from unseen classes ",
+        "and %.1f%% of misclassified samples were rejected, compared with %.1f%% of ",
+        "correctly classified samples from seen classes."
+      ),
+      row$pct_rejected_ood[[1]],
+      row$pct_rejected_incorrect_seen[[1]],
+      row$pct_rejected_correct_seen[[1]]
+    ),
+    "\n"
+  )
 }
+```
+
+```
+## At this target 5% error rate for the LOSO setting, we found that averaged across full and collapsed classification, 70.6% of samples from unseen classes and 72.4% of misclassified samples were rejected, compared with 13.7% of correctly classified samples from seen classes.
 ```
 
 ## Outer-fold detail
 
-```{r per_fold}
+
+``` r
 if (nrow(per_fold_df) == 0) {
   data.frame(note = "No per-fold CSV")
 } else {
@@ -532,11 +421,33 @@ if (nrow(per_fold_df) == 0) {
 }
 ```
 
+```
+## # A tibble: 24 × 12
+##    label_set         split_type target_fold       scenario_key     scenario_name
+##    <chr>             <chr>      <chr>             <chr>            <chr>        
+##  1 collapsed_classes CV         0                 with_leftout_oo… Single-head …
+##  2 collapsed_classes CV         1                 with_leftout_oo… Single-head …
+##  3 collapsed_classes CV         2                 with_leftout_oo… Single-head …
+##  4 collapsed_classes CV         3                 with_leftout_oo… Single-head …
+##  5 collapsed_classes CV         4                 with_leftout_oo… Single-head …
+##  6 collapsed_classes LOSO       100LUMC           with_leftout_oo… Single-head …
+##  7 collapsed_classes LOSO       AAML03P1          with_leftout_oo… Single-head …
+##  8 collapsed_classes LOSO       AAML0531          with_leftout_oo… Single-head …
+##  9 collapsed_classes LOSO       AAML1031          with_leftout_oo… Single-head …
+## 10 collapsed_classes LOSO       BEATAML1.0-COHORT with_leftout_oo… Single-head …
+## # ℹ 14 more rows
+## # ℹ 7 more variables: outer_coverage_seen <dbl>,
+## #   outer_coverage_seen_median <dbl>, outer_risk_all_accepted <dbl>,
+## #   outer_risk_all_accepted_median <dbl>, outer_kappa_accepted <dbl>,
+## #   outer_kappa_accepted_median <dbl>, inner_winner_optional_features <chr>
+```
+
 ## Inner grid: top candidates (inner_rank <= 15)
 
 Full grid is in `nested_target_risk_inner_scores_ranked.csv`. Below: first outer target fold in each **(label_set, split_type)** group, top 15 inner ranks.
 
-```{r inner_top}
+
+``` r
 if (nrow(inner_scores_df) == 0) {
   knitr::kable(data.frame(note = "No inner_scores_ranked CSV; run calibration_reject_models.R"))
 } else {
@@ -557,11 +468,77 @@ if (nrow(inner_scores_df) == 0) {
 }
 ```
 
+
+
+|label_set         |split_type |target_fold |scenario_key           | inner_rank|inner_selection_tier | recipe_optional_count| dist_to_target| mean_coverage| sd_coverage| mean_risk|   sd_risk|rhs_key                                                                                                             |
+|:-----------------|:----------|:-----------|:----------------------|----------:|:--------------------|---------------------:|--------------:|-------------:|-----------:|---------:|---------:|:-------------------------------------------------------------------------------------------------------------------|
+|collapsed_classes |cv         |0           |with_leftout_ood_aware |          1|target_band          |                     5|      0.0019973|     0.9571918|   0.0230111| 0.0480027| 0.0080034|max_prob;margin;entropy;knn10_mean_d;knn10_min_d;knn10_q90_d                                                        |
+|collapsed_classes |cv         |0           |with_leftout_ood_aware |          2|target_band          |                     5|      0.0003349|     0.9571918|   0.0245456| 0.0496651| 0.0082177|max_prob;margin;entropy;knn10_min_d;knn10_q90_d;conformal_set_size_90                                               |
+|collapsed_classes |cv         |0           |with_leftout_ood_aware |          3|target_band          |                     4|      0.0019973|     0.9571918|   0.0230111| 0.0480027| 0.0080034|max_prob;margin;entropy;knn10_mean_d;knn10_q90_d                                                                    |
+|collapsed_classes |cv         |0           |with_leftout_ood_aware |          4|target_band          |                     2|      0.0003691|     0.9577626|   0.0275554| 0.0496309| 0.0066113|max_prob;entropy;knn10_q90_d                                                                                        |
+|collapsed_classes |cv         |0           |with_leftout_ood_aware |          5|target_band          |                     4|      0.0003620|     0.9583333|   0.0242608| 0.0496380| 0.0073546|max_prob;entropy;knn10_mean_d;knn10_q90_d;conformal_set_size_90                                                     |
+|collapsed_classes |cv         |0           |with_leftout_ood_aware |          6|target_band          |                     6|      0.0008889|     0.9583333|   0.0227070| 0.0491111| 0.0067852|max_prob;margin;entropy;knn10_mean_d;knn10_min_d;knn10_q90_d;conformal_set_size_90                                  |
+|collapsed_classes |cv         |0           |with_leftout_ood_aware |          7|target_band          |                     5|      0.0008889|     0.9583333|   0.0227070| 0.0491111| 0.0067852|max_prob;margin;entropy;knn10_mean_d;knn10_q90_d;conformal_set_size_90                                              |
+|collapsed_classes |cv         |0           |with_leftout_ood_aware |          8|target_band          |                     2|      0.0003149|     0.9566210|   0.0280243| 0.0496851| 0.0065821|max_prob;entropy;knn10_mean_d                                                                                       |
+|collapsed_classes |cv         |0           |with_leftout_ood_aware |          9|target_band          |                     3|      0.0014151|     0.9560502|   0.0248970| 0.0485849| 0.0079242|max_prob;margin;entropy;knn10_min_d                                                                                 |
+|collapsed_classes |cv         |0           |with_leftout_ood_aware |         10|target_band          |                     3|      0.0009402|     0.9577626|   0.0269819| 0.0490598| 0.0070476|max_prob;margin;entropy;knn10_q90_d                                                                                 |
+|collapsed_classes |cv         |0           |with_leftout_ood_aware |         11|target_band          |                     4|      0.0000571|     0.9503425|   0.0212852| 0.0499429| 0.0057135|max_prob;margin;knn10_mean_d;knn10_q90_d;conformal_set_size_90                                                      |
+|collapsed_classes |cv         |0           |with_leftout_ood_aware |         12|target_band          |                     5|      0.0003739|     0.9571918|   0.0276733| 0.0496261| 0.0106201|max_prob;margin;entropy;top1_prob_variance_across_models;knn10_mean_d;knn10_q90_d                                   |
+|collapsed_classes |cv         |0           |with_leftout_ood_aware |         13|target_band          |                     7|      0.0009459|     0.9571918|   0.0277360| 0.0490541| 0.0104548|max_prob;margin;entropy;top1_prob_variance_across_models;knn10_mean_d;knn10_min_d;knn10_q90_d;conformal_set_size_90 |
+|collapsed_classes |cv         |0           |with_leftout_ood_aware |         14|target_band          |                     5|      0.0000571|     0.9503425|   0.0212852| 0.0499429| 0.0057135|max_prob;margin;knn10_mean_d;knn10_min_d;knn10_q90_d;conformal_set_size_90                                          |
+|collapsed_classes |cv         |0           |with_leftout_ood_aware |         15|target_band          |                     4|      0.0007192|     0.9520548|   0.0210079| 0.0492808| 0.0066560|max_prob;margin;knn10_min_d;knn10_q90_d;conformal_set_size_90                                                       |
+|collapsed_classes |loso       |100LUMC     |with_leftout_ood_aware |          1|target_band          |                     3|      0.0014627|     0.8985682|   0.0425255| 0.0485373| 0.0314627|max_prob;entropy;knn10_min_d;conformal_set_size_90                                                                  |
+|collapsed_classes |loso       |100LUMC     |with_leftout_ood_aware |          2|outside_band         |                     4|      0.0002845|     0.8993869|   0.0552874| 0.0502845| 0.0304853|max_prob;margin;entropy;knn10_mean_d;knn10_q90_d                                                                    |
+|collapsed_classes |loso       |100LUMC     |with_leftout_ood_aware |          3|outside_band         |                     6|      0.0003273|     0.9004203|   0.0510182| 0.0503273| 0.0291603|max_prob;margin;entropy;knn10_mean_d;knn10_min_d;knn10_q90_d;conformal_set_size_90                                  |
+|collapsed_classes |loso       |100LUMC     |with_leftout_ood_aware |          4|outside_band         |                     5|      0.0002179|     0.9037204|   0.0474520| 0.0502179| 0.0295132|max_prob;margin;entropy;knn10_min_d;knn10_q90_d;conformal_set_size_90                                               |
+|collapsed_classes |loso       |100LUMC     |with_leftout_ood_aware |          5|outside_band         |                     5|      0.0007573|     0.9045907|   0.0469509| 0.0507573| 0.0300301|max_prob;margin;entropy;knn10_mean_d;knn10_min_d;conformal_set_size_90                                              |
+|collapsed_classes |loso       |100LUMC     |with_leftout_ood_aware |          6|outside_band         |                     5|      0.0011768|     0.9056061|   0.0492017| 0.0511768| 0.0301824|max_prob;margin;entropy;knn10_mean_d;knn10_min_d;knn10_q90_d                                                        |
+|collapsed_classes |loso       |100LUMC     |with_leftout_ood_aware |          7|outside_band         |                     5|      0.0004920|     0.8992926|   0.0530416| 0.0504920| 0.0299824|max_prob;margin;entropy;knn10_mean_d;knn10_q90_d;conformal_set_size_90                                              |
+|collapsed_classes |loso       |100LUMC     |with_leftout_ood_aware |          8|target_band          |                     5|      0.0012879|     0.8458560|   0.1300640| 0.0487121| 0.0336256|max_prob;entropy;top1_prob_variance_across_models;knn10_mean_d;knn10_min_d;knn10_q90_d                              |
+|collapsed_classes |loso       |100LUMC     |with_leftout_ood_aware |          9|outside_band         |                     2|      0.0009413|     0.9046954|   0.0508746| 0.0509413| 0.0291681|max_prob;margin;entropy                                                                                             |
+|collapsed_classes |loso       |100LUMC     |with_leftout_ood_aware |         10|outside_band         |                     3|      0.0013006|     0.9060882|   0.0521340| 0.0513006| 0.0295423|max_prob;margin;entropy;knn10_min_d                                                                                 |
+|collapsed_classes |loso       |100LUMC     |with_leftout_ood_aware |         11|outside_band         |                     4|      0.0009462|     0.9076031|   0.0456670| 0.0509462| 0.0299006|max_prob;margin;entropy;knn10_min_d;knn10_q90_d                                                                     |
+|collapsed_classes |loso       |100LUMC     |with_leftout_ood_aware |         12|outside_band         |                     3|      0.0014748|     0.9010621|   0.0524549| 0.0514748| 0.0295018|max_prob;margin;entropy;conformal_set_size_90                                                                       |
+|collapsed_classes |loso       |100LUMC     |with_leftout_ood_aware |         13|outside_band         |                     3|      0.0018706|     0.9064253|   0.0498543| 0.0518706| 0.0288210|max_prob;margin;entropy;knn10_q90_d                                                                                 |
+|collapsed_classes |loso       |100LUMC     |with_leftout_ood_aware |         14|outside_band         |                     3|      0.0018898|     0.9060541|   0.0498423| 0.0518898| 0.0288189|max_prob;margin;entropy;knn10_mean_d                                                                                |
+|collapsed_classes |loso       |100LUMC     |with_leftout_ood_aware |         15|outside_band         |                     4|      0.0009185|     0.9076689|   0.0469647| 0.0509185| 0.0298878|max_prob;margin;entropy;knn10_mean_d;knn10_min_d                                                                    |
+|full_subtypes     |cv         |0           |with_leftout_ood_aware |          1|target_band          |                     6|      0.0005473|     0.8692922|   0.0503794| 0.0494527| 0.0161907|max_prob;margin;entropy;top1_prob_variance_across_models;knn10_mean_d;knn10_min_d;knn10_q90_d                       |
+|full_subtypes     |cv         |0           |with_leftout_ood_aware |          2|target_band          |                     2|      0.0001188|     0.8738584|   0.0408148| 0.0498812| 0.0163684|max_prob;knn10_mean_d;knn10_q90_d                                                                                   |
+|full_subtypes     |cv         |0           |with_leftout_ood_aware |          3|target_band          |                     7|      0.0017756|     0.8664384|   0.0540442| 0.0482244| 0.0171937|max_prob;margin;entropy;top1_prob_variance_across_models;knn10_mean_d;knn10_min_d;knn10_q90_d;conformal_set_size_90 |
+|full_subtypes     |cv         |0           |with_leftout_ood_aware |          4|target_band          |                     1|      0.0015473|     0.8647260|   0.0581296| 0.0484527| 0.0151544|max_prob;conformal_set_size_90                                                                                      |
+|full_subtypes     |cv         |0           |with_leftout_ood_aware |          5|target_band          |                     2|      0.0004120|     0.8595890|   0.0600157| 0.0495880| 0.0198223|max_prob;knn10_min_d;knn10_q90_d                                                                                    |
+|full_subtypes     |cv         |0           |with_leftout_ood_aware |          6|target_band          |                     3|      0.0001084|     0.8738584|   0.0403007| 0.0498916| 0.0164121|max_prob;knn10_mean_d;knn10_min_d;knn10_q90_d                                                                       |
+|full_subtypes     |cv         |0           |with_leftout_ood_aware |          7|outside_band         |                     6|      0.0002201|     0.8675799|   0.0488606| 0.0502201| 0.0166077|max_prob;margin;top1_prob_variance_across_models;knn10_mean_d;knn10_min_d;knn10_q90_d;conformal_set_size_90         |
+|full_subtypes     |cv         |0           |with_leftout_ood_aware |          8|target_band          |                     2|      0.0001858|     0.8584475|   0.0646835| 0.0498142| 0.0171209|max_prob;knn10_q90_d;conformal_set_size_90                                                                          |
+|full_subtypes     |cv         |0           |with_leftout_ood_aware |          9|target_band          |                     2|      0.0009704|     0.8607306|   0.0606350| 0.0490296| 0.0182564|max_prob;knn10_mean_d;conformal_set_size_90                                                                         |
+|full_subtypes     |cv         |0           |with_leftout_ood_aware |         10|outside_band         |                     2|      0.0006448|     0.8618721|   0.0574115| 0.0506448| 0.0130439|max_prob;top1_prob_variance_across_models;conformal_set_size_90                                                     |
+|full_subtypes     |cv         |0           |with_leftout_ood_aware |         11|outside_band         |                     2|      0.0010298|     0.8607306|   0.0612905| 0.0510298| 0.0162774|max_prob;top1_prob_variance_across_models;knn10_q90_d                                                               |
+|full_subtypes     |cv         |0           |with_leftout_ood_aware |         12|outside_band         |                     2|      0.0001831|     0.8624429|   0.0561221| 0.0501831| 0.0189718|max_prob;margin;knn10_min_d                                                                                         |
+|full_subtypes     |cv         |0           |with_leftout_ood_aware |         13|target_band          |                     5|      0.0010615|     0.8721461|   0.0587428| 0.0489385| 0.0193727|max_prob;margin;entropy;knn10_mean_d;knn10_q90_d;conformal_set_size_90                                              |
+|full_subtypes     |cv         |0           |with_leftout_ood_aware |         14|outside_band         |                     0|      0.0001409|     0.8664384|   0.0580136| 0.0501409| 0.0164710|max_prob                                                                                                            |
+|full_subtypes     |cv         |0           |with_leftout_ood_aware |         15|target_band          |                     1|      0.0000700|     0.8704338|   0.0579799| 0.0499300| 0.0164916|max_prob;margin                                                                                                     |
+|full_subtypes     |loso       |100LUMC     |with_leftout_ood_aware |          1|outside_band         |                     4|      0.0035523|     0.8258182|   0.0985680| 0.0535523| 0.0365015|max_prob;entropy;knn10_mean_d;knn10_q90_d;conformal_set_size_90                                                     |
+|full_subtypes     |loso       |100LUMC     |with_leftout_ood_aware |          2|outside_band         |                     5|      0.0032627|     0.8231599|   0.1042839| 0.0532627| 0.0366048|max_prob;entropy;knn10_mean_d;knn10_min_d;knn10_q90_d;conformal_set_size_90                                         |
+|full_subtypes     |loso       |100LUMC     |with_leftout_ood_aware |          3|outside_band         |                     3|      0.0042050|     0.8296820|   0.0955793| 0.0542050| 0.0387803|max_prob;entropy;knn10_mean_d;knn10_q90_d                                                                           |
+|full_subtypes     |loso       |100LUMC     |with_leftout_ood_aware |          4|outside_band         |                     5|      0.0056409|     0.8203748|   0.0966940| 0.0556409| 0.0398846|max_prob;margin;entropy;knn10_mean_d;knn10_min_d;conformal_set_size_90                                              |
+|full_subtypes     |loso       |100LUMC     |with_leftout_ood_aware |          5|outside_band         |                     5|      0.0054427|     0.8240317|   0.0907749| 0.0554427| 0.0396528|max_prob;margin;entropy;knn10_mean_d;knn10_q90_d;conformal_set_size_90                                              |
+|full_subtypes     |loso       |100LUMC     |with_leftout_ood_aware |          6|outside_band         |                     5|      0.0051467|     0.8210458|   0.0940682| 0.0551467| 0.0394674|max_prob;margin;entropy;knn10_min_d;knn10_q90_d;conformal_set_size_90                                               |
+|full_subtypes     |loso       |100LUMC     |with_leftout_ood_aware |          7|outside_band         |                     3|      0.0057795|     0.8230483|   0.1036476| 0.0557795| 0.0405636|max_prob;entropy;knn10_mean_d;conformal_set_size_90                                                                 |
+|full_subtypes     |loso       |100LUMC     |with_leftout_ood_aware |          8|outside_band         |                     4|      0.0059281|     0.8256869|   0.0999176| 0.0559281| 0.0392378|max_prob;entropy;knn10_min_d;knn10_q90_d;conformal_set_size_90                                                      |
+|full_subtypes     |loso       |100LUMC     |with_leftout_ood_aware |          9|outside_band         |                     4|      0.0064900|     0.8263317|   0.0991160| 0.0564900| 0.0399744|max_prob;entropy;knn10_mean_d;knn10_min_d;conformal_set_size_90                                                     |
+|full_subtypes     |loso       |100LUMC     |with_leftout_ood_aware |         10|outside_band         |                     6|      0.0064389|     0.8245705|   0.0931606| 0.0564389| 0.0406774|max_prob;margin;entropy;knn10_mean_d;knn10_min_d;knn10_q90_d;conformal_set_size_90                                  |
+|full_subtypes     |loso       |100LUMC     |with_leftout_ood_aware |         11|outside_band         |                     4|      0.0074385|     0.8236265|   0.0930927| 0.0574385| 0.0418419|max_prob;margin;entropy;knn10_q90_d;conformal_set_size_90                                                           |
+|full_subtypes     |loso       |100LUMC     |with_leftout_ood_aware |         12|outside_band         |                     2|      0.0065078|     0.8268273|   0.0948041| 0.0565078| 0.0409576|max_prob;entropy;knn10_min_d                                                                                        |
+|full_subtypes     |loso       |100LUMC     |with_leftout_ood_aware |         13|outside_band         |                     4|      0.0068091|     0.8281583|   0.0878882| 0.0568091| 0.0410782|max_prob;margin;entropy;knn10_mean_d;knn10_q90_d                                                                    |
+|full_subtypes     |loso       |100LUMC     |with_leftout_ood_aware |         14|outside_band         |                     4|      0.0080450|     0.6677810|   0.1830281| 0.0419550| 0.0400592|max_prob;entropy;top1_prob_variance_across_models;knn10_q90_d;conformal_set_size_90                                 |
+|full_subtypes     |loso       |100LUMC     |with_leftout_ood_aware |         15|outside_band         |                     4|      0.0034304|     0.8282237|   0.0959866| 0.0534304| 0.0385042|max_prob;entropy;knn10_mean_d;knn10_min_d;knn10_q90_d                                                               |
+
 ## Feature selection frequency heatmap
 
 Rows: optional features (excluding baseline `max_prob`). Columns: **CV/LOSO | label set**. Cell: fraction of outer folds where the inner-winning recipe included the feature.
 
-```{r heatmap, fig.width = 11, fig.height = 8}
+
+``` r
 if (nrow(heatmap_df) == 0) {
   data.frame(note = "No heatmap CSV; run calibration_reject_models.R")
 } else {
@@ -622,11 +599,14 @@ if (nrow(heatmap_df) == 0) {
 p_features_hm
 ```
 
+![plot of chunk heatmap](figure/heatmap-1.png)
+
 ## Requested vs realized risk and coverage (1–10% targets, 0.5% steps)
 
 Same spirit as the deployable operating-point curves in `analyse_results.Rmd`. **Inner RHS is the fused winner** (best sum of ranks across inner grids at 3%, 5%, 10%); x-axis requested risks run **from 1% to 10% in 0.5% steps**; for each point the outer threshold is chosen from pool LOSO-OOF at that risk; ribbons use fold-wise SE (95% normal approximation). Source: `nested_target_risk_calibration_curve.csv`.
 
-```{r calibration_curves, fig.width = 10, fig.height = 9}
+
+``` r
 if (nrow(calibration_curve_df) == 0L) {
   knitr::kable(data.frame(note = "No nested_target_risk_calibration_curve.csv — rerun Rscript R/calibration_reject_models.R"))
 } else {
@@ -679,11 +659,14 @@ if (nrow(calibration_curve_df) == 0L) {
 }
 ```
 
+![plot of chunk calibration_curves](figure/calibration_curves-1.png)![plot of chunk calibration_curves](figure/calibration_curves-2.png)
+
 ### By label set only (CV green, LOSO purple)
 
 Same mean + 95% CI as above; **one panel per label set**, CV and LOSO overlaid.
 
-```{r calibration_curves_by_label, fig.width = 9, fig.height = 5}
+
+``` r
 if (nrow(calibration_curve_df) == 0L) {
   knitr::kable(data.frame(note = "No nested_target_risk_calibration_curve.csv — rerun Rscript R/calibration_reject_models.R"))
 } else {
@@ -764,11 +747,14 @@ p1 <- p_nested_by_label_requested_vs_realized_risk/p_nested_by_label_requested_v
 p1
 ```
 
+![plot of chunk calibration_curves_by_label](figure/calibration_curves_by_label-1.png)
+
 ### Per outer fold
 
 Same setup as above; one line per **target_fold** (no ribbons). Source: `nested_target_risk_calibration_curve_per_fold.csv`.
 
-```{r calibration_curves_per_fold, fig.width = 10, fig.height = 9}
+
+``` r
 if (nrow(calibration_curve_per_fold_df) == 0L) {
   knitr::kable(data.frame(
     note = "No nested_target_risk_calibration_curve_per_fold.csv — rerun Rscript R/calibration_reject_models.R"
@@ -828,11 +814,14 @@ if (nrow(calibration_curve_per_fold_df) == 0L) {
 }
 ```
 
+![plot of chunk calibration_curves_per_fold](figure/calibration_curves_per_fold-1.png)![plot of chunk calibration_curves_per_fold](figure/calibration_curves_per_fold-2.png)
+
 ### Mean line with per-fold points
 
 Black line = cross-fold mean (`nested_target_risk_calibration_curve.csv`); grey points = individual outer folds (`nested_target_risk_calibration_curve_per_fold.csv`).
 
-```{r calibration_curves_mean_plus_points, fig.width = 10, fig.height = 9}
+
+``` r
 if (nrow(calibration_curve_df) == 0L || nrow(calibration_curve_per_fold_df) == 0L) {
   knitr::kable(data.frame(
     note = "Need both calibration curve CSVs — rerun Rscript R/calibration_reject_models.R"
@@ -900,11 +889,14 @@ if (nrow(calibration_curve_df) == 0L || nrow(calibration_curve_per_fold_df) == 0
 }
 ```
 
+![plot of chunk calibration_curves_mean_plus_points](figure/calibration_curves_mean_plus_points-1.png)![plot of chunk calibration_curves_mean_plus_points](figure/calibration_curves_mean_plus_points-2.png)
+
 ## Best features vs max_prob only
 
 Same risk sweep (**1–10%**, 0.5% steps). **Red** = fused inner-best recipe; **blue** = `max_prob` only. Ribbons/error bars = 95% CI across outer folds. Source: `nested_target_risk_calibration_compare.csv`.
 
-```{r calibration_compare_best_vs_maxprob, fig.width = 10, fig.height = 10}
+
+``` r
 if (nrow(calibration_compare_df) == 0L) {
   knitr::kable(data.frame(
     note = "No nested_target_risk_calibration_compare.csv — rerun Rscript R/calibration_reject_models.R"
@@ -988,7 +980,11 @@ if (nrow(calibration_compare_df) == 0L) {
     theme(legend.position = "bottom")
   print(p_compare_risk_vs_coverage)
 }
+```
 
+![plot of chunk calibration_compare_best_vs_maxprob](figure/calibration_compare_best_vs_maxprob-1.png)![plot of chunk calibration_compare_best_vs_maxprob](figure/calibration_compare_best_vs_maxprob-2.png)
+
+``` r
 p_sub_1 <- p_compare_requested_vs_realized_risk + p_compare_risk_vs_coverage
 ```
 
@@ -996,7 +992,8 @@ p_sub_1 <- p_compare_requested_vs_realized_risk + p_compare_risk_vs_coverage
 
 From `nested_target_risk_calibration_compare.csv`: OLS **realized risk (%) ~ requested risk (%)** at each point on the 1–10% sweep (cross-fold means). **β = 1** is perfect calibration; smaller **|β − 1|** is better.
 
-```{r calibration_risk_slope}
+
+``` r
 if (nrow(calibration_compare_df) == 0L) {
   knitr::kable(data.frame(
     note = "No nested_target_risk_calibration_compare.csv — rerun Rscript R/calibration_reject_models.R"
@@ -1071,7 +1068,11 @@ if (nrow(calibration_compare_df) == 0L) {
   ylim(0,2)
   print(p_slope_beta)
 }
+```
 
+![plot of chunk calibration_risk_slope](figure/calibration_risk_slope-1.png)
+
+``` r
 p2 <- p_slope_beta
 ```
 
@@ -1087,7 +1088,8 @@ Each sample is bucketed into (plot order: Incorrect → OOD → Correct):
 We plot the predicted accept probability (`p_hat`) for **LOSO only**, facetted by label set
 in this order: **Full subtypes**, then **Collapsed (merged)**.
 
-```{r prob_distributions_correct_incorrect_ood, fig.width = 10, fig.height = 9}
+
+``` r
 source(file.path(repo_root, "R/utility_functions.R"))
 
 per_fold_path <- file.path(
@@ -1321,7 +1323,7 @@ if (!file.exists(per_fold_path)) {
           length = unit(0.04, "npc"),
           linewidth = 0.25
         ) +
-        facet_grid(. ~ label_display) +
+        facet_grid(label_display ~ .) +
         scale_x_continuous(limits = c(0, 1), expand = expansion(mult = c(0.02, 0))) +
         scale_fill_manual(values = outcome_colors, guide = "none") +
         scale_color_manual(
@@ -1348,109 +1350,12 @@ if (!file.exists(per_fold_path)) {
     }
   }
 }
+```
 
+![plot of chunk prob_distributions_correct_incorrect_ood](figure/prob_distributions_correct_incorrect_ood-1.png)![plot of chunk prob_distributions_correct_incorrect_ood](figure/prob_distributions_correct_incorrect_ood-2.png)![plot of chunk prob_distributions_correct_incorrect_ood](figure/prob_distributions_correct_incorrect_ood-3.png)![plot of chunk prob_distributions_correct_incorrect_ood](figure/prob_distributions_correct_incorrect_ood-4.png)
+
+``` r
 p3 <- p_ridges
-```
-
-## OOD and error detection performance (AUROC / AUPR)
-
-Quantify how well the multivariate accept probability separates samples that should be rejected
-from those that should be accepted (LOSO). Two tasks per label set: (1) OOD detection,
-out-of-distribution (`is_seen == 0`) vs in-distribution; (2) error detection, should-reject
-(incorrect OR OOD) vs should-accept (correct AND seen). The rejection score is `1 - p_hat`
-(higher = more likely to reject). AUROC is the Mann-Whitney statistic; AUPR is average precision.
-
-```{r ood_detection_auroc}
-if (!exists("prob_split_df") || nrow(prob_split_df) == 0L) {
-  knitr::kable(data.frame(
-    note = "Run prob_distributions_correct_incorrect_ood chunk first to build prob_split_df."
-  ))
-} else {
-  auroc <- function(score, pos) {
-    pos <- as.logical(pos)
-    n_pos <- sum(pos); n_neg <- sum(!pos)
-    if (n_pos == 0L || n_neg == 0L) return(NA_real_)
-    r <- rank(score)
-    (sum(r[pos]) - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg)
-  }
-  average_precision <- function(score, pos) {
-    pos <- as.logical(pos)
-    if (sum(pos) == 0L) return(NA_real_)
-    ord <- order(score, decreasing = TRUE)
-    tp <- cumsum(pos[ord])
-    precision <- tp / seq_along(tp)
-    recall <- tp / sum(pos)
-    sum(precision * c(recall[1], diff(recall)))
-  }
-
-  ood_metrics <- do.call(rbind, lapply(levels(prob_split_df$label_display), function(ld) {
-    d <- prob_split_df[prob_split_df$label_display == ld & !is.na(prob_split_df$p_hat), ]
-    if (nrow(d) == 0L) return(NULL)
-    reject_score <- 1 - d$p_hat
-    is_ood <- d$is_seen == 0L
-    should_reject <- (d$correct == 0L) | (d$is_seen == 0L)
-    data.frame(
-      label_set = ld,
-      task = c("OOD detection (OOD vs in-distribution)", "Error detection (reject vs accept)"),
-      n = nrow(d),
-      n_positive = c(sum(is_ood), sum(should_reject)),
-      AUROC = c(auroc(reject_score, is_ood), auroc(reject_score, should_reject)),
-      AUPR = c(average_precision(reject_score, is_ood), average_precision(reject_score, should_reject)),
-      row.names = NULL
-    )
-  }))
-  cat("OOD / error detection (LOSO, multivariate accept probability):\n")
-  print(ood_metrics, row.names = FALSE)
-  knitr::kable(ood_metrics, digits = 3)
-}
-```
-
-```{r ood_detection_roc, fig.width = 9, fig.height = 4.5}
-if (exists("prob_split_df") && nrow(prob_split_df) > 0L) {
-  # ROC points (FPR, TPR) across all thresholds for a score/label pair.
-  roc_points <- function(score, pos) {
-    pos <- as.logical(pos)
-    ord <- order(score, decreasing = TRUE)
-    tp <- cumsum(pos[ord]); fp <- cumsum(!pos[ord])
-    tpr <- tp / sum(pos); fpr <- fp / sum(!pos)
-    data.frame(fpr = c(0, fpr), tpr = c(0, tpr))
-  }
-
-  task_defs <- list(
-    "OOD detection" = function(d) d$is_seen == 0L,
-    "Error detection" = function(d) (d$correct == 0L) | (d$is_seen == 0L)
-  )
-
-  roc_df <- do.call(rbind, lapply(levels(prob_split_df$label_display), function(ld) {
-    d <- prob_split_df[prob_split_df$label_display == ld & !is.na(prob_split_df$p_hat), ]
-    if (nrow(d) == 0L) return(NULL)
-    do.call(rbind, lapply(names(task_defs), function(tk) {
-      pos <- task_defs[[tk]](d)
-      if (sum(pos) == 0L || sum(!pos) == 0L) return(NULL)
-      pts <- roc_points(1 - d$p_hat, pos)
-      pts$label_set <- ld
-      pts$task <- tk
-      pts$auroc <- auroc(1 - d$p_hat, pos)
-      pts
-    }))
-  }))
-
-  roc_df$label_auc <- sprintf("%s (AUROC %.2f)", roc_df$label_set, roc_df$auroc)
-
-  p_roc <- ggplot(roc_df, aes(x = fpr, y = tpr, color = label_auc)) +
-    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "grey60") +
-    geom_step(linewidth = 0.8, direction = "hv") +
-    facet_wrap(~ task) +
-    coord_equal() +
-    labs(
-      title = "OOD and error detection ROC (LOSO)",
-      x = "False positive rate", y = "True positive rate", color = NULL
-    ) +
-    theme_bw() +
-    theme(legend.position = "right")
-  print(p_roc)
-  ggsave("../writing/figures_new/ood_error_detection_roc.png", p_roc, width = 9, height = 4.5, dpi = 300)
-}
 ```
 
 
@@ -1458,7 +1363,8 @@ if (exists("prob_split_df") && nrow(prob_split_df) > 0L) {
 
 Seen-class (`is_seen == 1`) multivariate accept probability (`p_hat`) by class on the x-axis, split by correctness (Correct vs Incorrect).
 
-```{r prob_distributions_seen_class_by_correctness, fig.width = 12, fig.height = 9}
+
+``` r
 if (!exists("prob_split_df") || nrow(prob_split_df) == 0L) {
   knitr::kable(data.frame(
     note = "Run prob_distributions_correct_incorrect_ood chunk first to build prob_split_df."
@@ -1509,11 +1415,14 @@ if (!exists("prob_split_df") || nrow(prob_split_df) == 0L) {
 }
 ```
 
+![plot of chunk prob_distributions_seen_class_by_correctness](figure/prob_distributions_seen_class_by_correctness-1.png)
+
 ### Unseen-class boxplots by class (OOD only)
 
 Unseen-class (`is_seen == 0`) multivariate accept probability (`p_hat`) by class on the x-axis (no correctness grouping).
 
-```{r prob_distributions_unseen_class_only, fig.width = 12, fig.height = 9}
+
+``` r
 if (!exists("prob_split_df") || nrow(prob_split_df) == 0L) {
   knitr::kable(data.frame(
     note = "Run prob_distributions_correct_incorrect_ood chunk first to build prob_split_df."
@@ -1557,7 +1466,10 @@ ood_class_df$class_label <- relevel(ood_class_df$class_label, "AML, NOS")
 }
 ```
 
-```{r}
+![plot of chunk prob_distributions_unseen_class_only](figure/prob_distributions_unseen_class_only-1.png)
+
+
+``` r
 base <- "../writing/figures_new/figure_rej"
 dir.create(base)
 
@@ -1569,7 +1481,7 @@ ggsave(paste0(base, "/rc_curve.svg"),p_nested_by_label_requested_vs_coverage, he
 ggsave(paste0(base, "/beta_slope.svg"),p2, height = 4, width = 3)
 
 
-ggsave(paste0(base, "/probs.svg"),p3, height = 3, width = 7)
+ggsave(paste0(base, "/probs.svg"),p3, height = 4.5, width = 4)
 
 ggsave(paste0(base, "/seen_box.svg"),p_seen_class_box, height = 4.5, width = 6)
 
@@ -1578,6 +1490,5 @@ ggsave(paste0(base, "/ood_box.svg"),p_ood_class_box, height = 4.5, width = 6)
 ggsave(paste0(base, "/rc_curve_multi_vs_1.svg"),p_compare_risk_vs_coverage, height = 4, width = 6)
 
 ggsave(paste0(base, "/hm_features.svg"),p_features_hm, height = 4, width = 6)
-
 ```
 

@@ -281,9 +281,8 @@ main_train_test_analysis <- function(merge_classes = FALSE){
     prob_df$sample_indices <- sample_indices
     prob_df$is_leftout <- TRUE
 
-    if (merge_classes) {
-      prob_df <- merge_classes_in_matrix(prob_df, merge_prob_method = "sum")
-    }
+    # Keep left-out rows fully uncollapsed so OOD subtypes are not folded into
+    # merged classes such as other.KMT2A.
     prob_df
   }
 
