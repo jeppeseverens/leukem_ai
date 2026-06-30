@@ -931,3 +931,6 @@ inner_cv_results_unmerged <- main_inner_cv(merge_classes = FALSE)
 
 cat("=== Running Inner CV Analysis (Merged MDS/KMT2A/MECOM - Summed Method) ===\n")
 inner_cv_results_merged_summed <- main_inner_cv(merge_classes = TRUE, merge_prob_method = "sum")
+
+cat("=== Running Inner CV Analysis (Merged MDS/KMT2A/MECOM - Max-prob Method) ===\n")
+inner_cv_results_merged_maxprob <- main_inner_cv(merge_classes = TRUE, merge_prob_method = "max")

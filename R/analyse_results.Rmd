@@ -31,8 +31,10 @@ outer_cv_root <- mv_root
 ```{r}
 inner_unmerged <- readRDS("../data/out/inner_cv/inner_cv_results_10feb2026_eta2_unmerged_eta2.rds")
 inner_merged <- readRDS("../data/out/inner_cv/inner_cv_results_10feb2026_eta2_merged_summed_eta2.rds")
+inner_merged_maxprob <- readRDS("../data/out/inner_cv/inner_cv_results_10feb2026_eta2_merged_maxprob_eta2.rds")
 outer_unmerged <-  readRDS("../data/out/outer_cv/outer_cv_analysis_outputs_unmerged_maxprob/outer_cv_results.rds")
 outer_merged <- readRDS("../data/out/outer_cv/outer_cv_analysis_outputs_merged_summed/outer_cv_results.rds")
+outer_merged_maxprob <- readRDS("../data/out/outer_cv/outer_cv_analysis_outputs_merged_maxprob/outer_cv_results.rds")
 ```
 
 ```{r}
@@ -1171,9 +1173,6 @@ results_per_fold <- results_per_fold %>%
   mutate(mean_kappa = mean(kappa)) %>%
   ungroup()
 
-results_per_fold$kappa[results_per_fold$model == "DNN"] <- results_per_fold$kappa[results_per_fold$model == "DNN"] - 0.01
-results_per_fold$kappa[results_per_fold$model == "SVM"] <- results_per_fold$kappa[results_per_fold$model == "SVM"] - 0.005
-
 poe_model_order <- c("XGBoost", "DNN", "SVM", "Ensemble")
 cv_order <- poe_model_order
 
@@ -1238,15 +1237,6 @@ results_per_fold_table <- rbind(
   get_results_per_fold(outer_unmerged, "Full subtypes", models_poe),
   get_results_per_fold(outer_merged, "Collapsed classes", models_poe)
 )
-results_per_fold_table$model <- clean_boxplot_model_names(results_per_fold_table$model)
-results_per_fold_table$kappa[results_per_fold_table$model == "DNN"] <-
-  results_per_fold_table$kappa[results_per_fold_table$model == "DNN"] - 0.01
-results_per_fold_table$kappa[results_per_fold_table$model == "SVM"] <-
-  results_per_fold_table$kappa[results_per_fold_table$model == "SVM"] - 0.005
-results_per_fold_table$accuracy[results_per_fold_table$model == "DNN"] <-
-  results_per_fold_table$accuracy[results_per_fold_table$model == "DNN"] - 0.01
-results_per_fold_table$accuracy[results_per_fold_table$model == "SVM"] <-
-  results_per_fold_table$accuracy[results_per_fold_table$model == "SVM"] - 0.005
 
 performance_table <- build_performance_table(results_per_fold_table, cv_order)
 
@@ -1377,6 +1367,181 @@ save_kable(
   performance_table_both_inner_kable,
   "../writing/tables_new/table2_perf_both_ensembles_inner_cv.png",
   zoom = 2
+)
+```
+
+## Collapsed merge method: summed vs max prob
+
+When MDS/KMT2A/MECOM family members are collapsed, member probabilities can be combined
+by **summing** (then renormalizing) or by taking the **maximum** per family. Both variants
+are run through inner and outer CV; this section compares overall kappa (all models and
+ensembles) on the collapsed label set.
+
+```{r collapsed_merge_method_comparison}
+COLLAPSED_SUMMED <- "Collapsed (summed)"
+COLLAPSED_MAXPROB <- "Collapsed (max prob)"
+
+# --- Inner CV ---
+inner_collapsed_merge_folds <- dplyr::bind_rows(
+  get_inner_cv_results_per_fold(inner_merged, COLLAPSED_SUMMED, "cv"),
+  get_inner_cv_results_per_fold(inner_merged, COLLAPSED_SUMMED, "loso"),
+  get_inner_cv_results_per_fold(inner_merged_maxprob, COLLAPSED_MAXPROB, "cv"),
+  get_inner_cv_results_per_fold(inner_merged_maxprob, COLLAPSED_MAXPROB, "loso")
+) %>%
+  dplyr::mutate(model = clean_boxplot_model_names(model))
+
+inner_collapsed_merge_summary <- inner_collapsed_merge_folds %>%
+  dplyr::group_by(type, model, label_set) %>%
+  dplyr::summarise(
+    mean_kappa = mean(kappa, na.rm = TRUE),
+    sd_kappa = sd(kappa, na.rm = TRUE),
+    mean_accuracy = mean(accuracy, na.rm = TRUE),
+    sd_accuracy = sd(accuracy, na.rm = TRUE),
+    n_folds = dplyr::n(),
+    .groups = "drop"
+  ) %>%
+  tidyr::pivot_wider(
+    names_from = label_set,
+    values_from = c(mean_kappa, sd_kappa, mean_accuracy, sd_accuracy, n_folds),
+    names_glue = "{label_set}__{.value}"
+  ) %>%
+  dplyr::mutate(
+    delta_kappa_max_minus_sum = .data[[paste0(COLLAPSED_MAXPROB, "__mean_kappa")]] -
+      .data[[paste0(COLLAPSED_SUMMED, "__mean_kappa")]],
+    delta_accuracy_max_minus_sum = .data[[paste0(COLLAPSED_MAXPROB, "__mean_accuracy")]] -
+      .data[[paste0(COLLAPSED_SUMMED, "__mean_accuracy")]]
+  ) %>%
+  dplyr::arrange(type, dplyr::desc(delta_kappa_max_minus_sum))
+
+inner_collapsed_merge_display <- inner_collapsed_merge_summary %>%
+  dplyr::transmute(
+    type,
+    model,
+    kappa_summed = sprintf(
+      "%.3f +/- %.3f",
+      .data[[paste0(COLLAPSED_SUMMED, "__mean_kappa")]],
+      .data[[paste0(COLLAPSED_SUMMED, "__sd_kappa")]]
+    ),
+    kappa_maxprob = sprintf(
+      "%.3f +/- %.3f",
+      .data[[paste0(COLLAPSED_MAXPROB, "__mean_kappa")]],
+      .data[[paste0(COLLAPSED_MAXPROB, "__sd_kappa")]]
+    ),
+    delta_kappa = sprintf("%+.3f", delta_kappa_max_minus_sum),
+    accuracy_summed = sprintf(
+      "%.3f +/- %.3f",
+      .data[[paste0(COLLAPSED_SUMMED, "__mean_accuracy")]],
+      .data[[paste0(COLLAPSED_SUMMED, "__sd_accuracy")]]
+    ),
+    accuracy_maxprob = sprintf(
+      "%.3f +/- %.3f",
+      .data[[paste0(COLLAPSED_MAXPROB, "__mean_accuracy")]],
+      .data[[paste0(COLLAPSED_MAXPROB, "__sd_accuracy")]]
+    ),
+    delta_accuracy = sprintf("%+.3f", delta_accuracy_max_minus_sum)
+  )
+
+knitr::kable(
+  inner_collapsed_merge_display,
+  caption = "Inner CV collapsed labels: summed vs max-prob merge (mean +/- SD; delta = max - sum)"
+)
+
+write.csv(
+  inner_collapsed_merge_display,
+  "../writing/tables_new/collapsed_merge_method_inner_cv.csv",
+  row.names = FALSE
+)
+
+# --- Outer CV ---
+outer_collapsed_merge_folds <- dplyr::bind_rows(
+  get_results_per_fold(outer_merged, COLLAPSED_SUMMED, models_both),
+  get_results_per_fold(outer_merged_maxprob, COLLAPSED_MAXPROB, models_both)
+) %>%
+  dplyr::mutate(model = clean_boxplot_model_names(model))
+
+outer_collapsed_merge_summary <- outer_collapsed_merge_folds %>%
+  dplyr::group_by(type, model, label_set) %>%
+  dplyr::summarise(
+    mean_kappa = mean(kappa, na.rm = TRUE),
+    sd_kappa = sd(kappa, na.rm = TRUE),
+    mean_accuracy = mean(accuracy, na.rm = TRUE),
+    sd_accuracy = sd(accuracy, na.rm = TRUE),
+    n_folds = dplyr::n(),
+    .groups = "drop"
+  ) %>%
+  tidyr::pivot_wider(
+    names_from = label_set,
+    values_from = c(mean_kappa, sd_kappa, mean_accuracy, sd_accuracy, n_folds),
+    names_glue = "{label_set}__{.value}"
+  ) %>%
+  dplyr::mutate(
+    delta_kappa_max_minus_sum = .data[[paste0(COLLAPSED_MAXPROB, "__mean_kappa")]] -
+      .data[[paste0(COLLAPSED_SUMMED, "__mean_kappa")]],
+    delta_accuracy_max_minus_sum = .data[[paste0(COLLAPSED_MAXPROB, "__mean_accuracy")]] -
+      .data[[paste0(COLLAPSED_SUMMED, "__mean_accuracy")]]
+  ) %>%
+  dplyr::arrange(type, dplyr::desc(delta_kappa_max_minus_sum))
+
+outer_collapsed_merge_display <- outer_collapsed_merge_summary %>%
+  dplyr::transmute(
+    type,
+    model,
+    kappa_summed = sprintf(
+      "%.3f +/- %.3f",
+      .data[[paste0(COLLAPSED_SUMMED, "__mean_kappa")]],
+      .data[[paste0(COLLAPSED_SUMMED, "__sd_kappa")]]
+    ),
+    kappa_maxprob = sprintf(
+      "%.3f +/- %.3f",
+      .data[[paste0(COLLAPSED_MAXPROB, "__mean_kappa")]],
+      .data[[paste0(COLLAPSED_MAXPROB, "__sd_kappa")]]
+    ),
+    delta_kappa = sprintf("%+.3f", delta_kappa_max_minus_sum),
+    accuracy_summed = sprintf(
+      "%.3f +/- %.3f",
+      .data[[paste0(COLLAPSED_SUMMED, "__mean_accuracy")]],
+      .data[[paste0(COLLAPSED_SUMMED, "__sd_accuracy")]]
+    ),
+    accuracy_maxprob = sprintf(
+      "%.3f +/- %.3f",
+      .data[[paste0(COLLAPSED_MAXPROB, "__mean_accuracy")]],
+      .data[[paste0(COLLAPSED_MAXPROB, "__sd_accuracy")]]
+    ),
+    delta_accuracy = sprintf("%+.3f", delta_accuracy_max_minus_sum)
+  )
+
+knitr::kable(
+  outer_collapsed_merge_display,
+  caption = "Outer CV collapsed labels: summed vs max-prob merge (mean +/- SD; delta = max - sum)"
+)
+
+write.csv(
+  outer_collapsed_merge_display,
+  "../writing/tables_new/collapsed_merge_method_outer_cv.csv",
+  row.names = FALSE
+)
+
+# Ensemble-only summary (PoE vs simple on each merge rule).
+ensemble_collapsed_merge <- dplyr::bind_rows(
+  compare_global_ensembles(outer_merged, COLLAPSED_SUMMED),
+  compare_global_ensembles(outer_merged_maxprob, COLLAPSED_MAXPROB)
+) %>%
+  dplyr::arrange(type, ensemble_rule, label_set)
+
+knitr::kable(
+  ensemble_collapsed_merge %>%
+    dplyr::mutate(
+      mean_kappa = sprintf("%.3f +/- %.3f", mean_kappa, sd_kappa),
+      mean_accuracy = sprintf("%.3f +/- %.3f", mean_accuracy, sd_accuracy)
+    ) %>%
+    dplyr::select(label_set, type, ensemble_rule, mean_kappa, mean_accuracy, n_folds),
+  caption = "Outer CV ensembles on collapsed labels: merge-rule comparison"
+)
+
+write.csv(
+  ensemble_collapsed_merge,
+  "../writing/tables_new/collapsed_merge_method_outer_ensemble.csv",
+  row.names = FALSE
 )
 ```
 
@@ -1785,7 +1950,7 @@ fix_names <- function(x){
 make_cm_fig <- function(res_obj, type, label_set) {
   # All per-class summaries for a given result object (full vs collapsed)
   per_class <- res_obj$per_class_summaries[[type]]
-  per_class <- per_class[per_class$Model == "Global_Product_Optimized", ]
+  per_class <- per_class[per_class$Model == "svm", ]
   rownames(per_class) <- gsub("Class: ", "", per_class$Class)
 
   # Apply pretty names to per-class row labels
@@ -1817,8 +1982,8 @@ per_class <- apply(per_class, 2, function(x) round(x, 2))
 
   # Confusion matrices across folds for the same result object
   conf_table <- list()
-  for (fold in names(res_obj$detailed_performance[[type]]$Global_Product_Optimized)) {
-      conf_table[[fold]] <- res_obj$detailed_performance[[type]]$Global_Product_Optimized[[fold]]$confusion_matrix$table
+  for (fold in names(res_obj$detailed_performance[[type]]$svm)) {
+      conf_table[[fold]] <- res_obj$detailed_performance[[type]]$svm[[fold]]$confusion_matrix$table
   }
 
   # Get all unique classes across all folds
@@ -2012,7 +2177,7 @@ library(gridExtra)
 # Panel A: F1 Scores Comparison (Full vs Merged), CV and LOSO
 # Extract F1 scores for full and merged classes (CV)
 f1_full <- outer_unmerged$per_class_summaries$cv %>%
-  filter(Model == "Global_Product_Optimized") %>%
+  filter(Model == "svm") %>%
   mutate(Class = gsub("Class: ", "", Class),
          Class = fix_names(Class),
          Type = "Full",
@@ -2021,7 +2186,7 @@ f1_full <- outer_unmerged$per_class_summaries$cv %>%
   select(Class, F1, Type, Validation)
 
 f1_merged <- outer_merged$per_class_summaries$cv %>%
-  filter(Model == "Global_Product_Optimized") %>%
+  filter(Model == "svm") %>%
   mutate(Class = gsub("Class: ", "", Class),
          Class = fix_names(Class),
          Type = "Collapsed",
@@ -2031,7 +2196,7 @@ f1_merged <- outer_merged$per_class_summaries$cv %>%
 
 # LOSO F1 summaries (same structure as CV)
 f1_full_loso <- outer_unmerged$per_class_summaries$loso %>%
-  filter(Model == "Global_Product_Optimized") %>%
+  filter(Model == "svm") %>%
   mutate(Class = gsub("Class: ", "", Class),
          Class = fix_names(Class),
          Type = "Full",
@@ -2040,7 +2205,7 @@ f1_full_loso <- outer_unmerged$per_class_summaries$loso %>%
   select(Class, F1, Type, Validation)
 
 f1_merged_loso <- outer_merged$per_class_summaries$loso %>%
-  filter(Model == "Global_Product_Optimized") %>%
+  filter(Model == "svm") %>%
   mutate(Class = gsub("Class: ", "", Class),
          Class = fix_names(Class),
          Type = "Collapsed",
@@ -2050,7 +2215,7 @@ f1_merged_loso <- outer_merged$per_class_summaries$loso %>%
 
 # Combine CV and LOSO for comparison
 f1_comparison <- bind_rows(f1_full, f1_merged, f1_full_loso, f1_merged_loso)
-#f1_comparison$F1[f1_comparison$Class == "MDS-related, cytogenetic abnormalities"] <- 0
+f1_comparison$F1[is.na(f1_comparison$F1)] <- 0
 # Define merge mapping for connecting lines (full -> merged class)
 merge_mapping <- list(
   "Other KMT2A rearrangements" = c("KMT2A::ELL", "KMT2A::MLLT10", "KMT2A::MLLT4", "KMT2A::SEPT6"),
@@ -2531,7 +2696,7 @@ ggsave(
 # Function to create faceted confusion matrices per fold
 make_faceted_cm <- function(type) {
   # Get all folds for this type
-  folds <- names(outer_merged$detailed_performance[[type]]$Global_Product_Optimized)
+  folds <- names(outer_merged$detailed_performance[[type]]$svm)
   # Per class
   per_class_list <- list()
   # Collect confusion matrices for all folds
