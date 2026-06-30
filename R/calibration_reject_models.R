@@ -1,8 +1,7 @@
 # =============================================================================
 # Selection-Safe Calibration Feature Utility Analysis (Model Comparison)
 # =============================================================================
-# SVM-only: max-prob and ridge (in-model ± KNN10),
-# single-head plus two-head min.
+# SVM + DNN: single-head max-prob and single-head ridge (in-model features only).
 # =============================================================================
 
 suppressPackageStartupMessages({
@@ -78,12 +77,14 @@ parse_feature_terms <- function(feature_terms_key) {
   }
 }
 
-# One row per SVM rejector recipe (single-head max-prob, single-head ridge in-model).
-svm_recipe_rows <- function(ensemble_key, ensemble_label, base_model) {
+# One row per base-model rejector recipe (single-head max-prob, single-head ridge in-model).
+RIDGE_IN_MODEL_FEATURE_TERMS_KEY <- paste(IN_MODEL_FEATURE_TERMS, collapse = ";")
+
+rejector_recipe_rows <- function(ensemble_key, ensemble_label, base_model) {
   tibble::tribble(
-    ~recipe_key,      ~rejector_method, ~feature_terms_key,                                ~recipe_rejector_key, ~recipe_label_single,
-    "maxprob",        "maxprob",        NA_character_,                                     "single_head",        "Single-head max-prob",
-    "ridge_in_model", "ridge",          "max_prob;margin;entropy;conformal_set_size_90",   "ridge_in_model",     "Single-head ridge (in-model)"
+    ~recipe_key,      ~rejector_method, ~feature_terms_key,                              ~recipe_rejector_key, ~recipe_label_single,
+    "maxprob",        "maxprob",        NA_character_,                                   "single_head",        "Single-head max-prob",
+    "ridge_in_model", "ridge",          RIDGE_IN_MODEL_FEATURE_TERMS_KEY,              "ridge_in_model",     "Single-head ridge (in-model)"
   ) %>%
     mutate(
       ensemble_key = ensemble_key,
@@ -91,6 +92,45 @@ svm_recipe_rows <- function(ensemble_key, ensemble_label, base_model) {
       base_model = base_model,
       feature_terms = lapply(feature_terms_key, parse_feature_terms)
     )
+}
+
+# Fail fast if job grid drifts from the intended SVM/DNN single-head recipes.
+validate_nested_jobs_config <- function(jobs) {
+  expected_recipes <- c("maxprob", "ridge_in_model")
+  expected_ensembles <- c("svm", "dnn")
+  expected_base_models <- c("svm", "neural_net")
+  bad_recipe <- setdiff(unique(jobs$recipe_key), expected_recipes)
+  if (length(bad_recipe) > 0L) {
+    stop(sprintf("Unexpected recipe_key values: %s", paste(bad_recipe, collapse = ", ")))
+  }
+  bad_mode <- setdiff(unique(jobs$nested_rejector_mode), "single_head")
+  if (length(bad_mode) > 0L) {
+    stop(sprintf("Only single_head nested runs are supported (found: %s).", paste(bad_mode, collapse = ", ")))
+  }
+  bad_ensemble <- setdiff(unique(jobs$ensemble_key), expected_ensembles)
+  if (length(bad_ensemble) > 0L) {
+    stop(sprintf("Unexpected ensemble_key values: %s", paste(bad_ensemble, collapse = ", ")))
+  }
+  bad_base <- setdiff(unique(jobs$base_model), expected_base_models)
+  if (length(bad_base) > 0L) {
+    stop(sprintf("Unexpected base_model values: %s", paste(bad_base, collapse = ", ")))
+  }
+  ridge_rows <- jobs %>% filter(.data$recipe_key == "ridge_in_model")
+  bad_ridge_terms <- ridge_rows %>%
+    filter(.data$feature_terms_key != RIDGE_IN_MODEL_FEATURE_TERMS_KEY)
+  if (nrow(bad_ridge_terms) > 0L) {
+    stop("ridge_in_model jobs must use in-model feature terms only (no KNN10).")
+  }
+  maxprob_rows <- jobs %>% filter(.data$recipe_key == "maxprob")
+  bad_maxprob_terms <- maxprob_rows %>% filter(!is.na(.data$feature_terms_key))
+  if (nrow(bad_maxprob_terms) > 0L) {
+    stop("maxprob jobs must not specify feature_terms_key.")
+  }
+  expected_n <- length(expected_ensembles) * length(expected_recipes)
+  if (nrow(jobs) != expected_n) {
+    stop(sprintf("Expected %d nested jobs, got %d.", expected_n, nrow(jobs)))
+  }
+  invisible(jobs)
 }
 
 export_config_key <- function(ensemble_key, recipe_rejector_key, export_rejector_key) {
@@ -144,15 +184,17 @@ export_specs_for_nested_job <- function(job_row) {
   }
 }
 
-# Nested jobs: SVM recipes (single-head only).
+# Nested jobs: SVM + DNN recipes (single-head max-prob and ridge in-model only).
 NESTED_JOBS <- bind_rows(
-  svm_recipe_rows("svm", "SVM", "svm")
+  rejector_recipe_rows("svm", "SVM", "svm"),
+  rejector_recipe_rows("dnn", "DNN (neural net)", "neural_net")
 ) %>%
   crossing(nested_rejector_mode = c("single_head")) %>%
   mutate(
     feature_terms = lapply(feature_terms_key, parse_feature_terms),
     job_key = paste(ensemble_key, recipe_key, nested_rejector_mode, sep = "|")
   )
+validate_nested_jobs_config(NESTED_JOBS)
 
 # Flat export manifest for startup log / CSV manifest.
 CALIBRATION_EXPORTS <- bind_rows(lapply(seq_len(nrow(NESTED_JOBS)), function(i) {
@@ -284,7 +326,7 @@ tag_calibration_run_export <- function(df, job_row, export_spec) {
     )
 }
 
-# Per outer-fold inner winners + cross-fold summary for inner CV log-loss comparison.
+# Per outer-fold inner winners + cross-fold summary for inner CV log-loss / AUROC comparison.
 build_inner_logloss_tables <- function(inner_scores_df) {
   empty_summary <- data.frame(
     job_key = character(),
@@ -301,8 +343,12 @@ build_inner_logloss_tables <- function(inner_scores_df) {
     mean_inner_logloss = numeric(),
     sd_inner_logloss = numeric(),
     mean_inner_sd_logloss = numeric(),
+    mean_inner_auroc = numeric(),
+    sd_inner_auroc = numeric(),
+    mean_inner_sd_auroc = numeric(),
     inner_winner_alpha = numeric(),
     rank_mean_logloss = integer(),
+    rank_mean_auroc = integer(),
     stringsAsFactors = FALSE
   )
   empty_per_fold <- data.frame(
@@ -318,6 +364,8 @@ build_inner_logloss_tables <- function(inner_scores_df) {
     target_fold = character(),
     mean_logloss = numeric(),
     sd_logloss = numeric(),
+    mean_auroc = numeric(),
+    sd_auroc = numeric(),
     alpha = numeric(),
     feature_terms_key = character(),
     stringsAsFactors = FALSE
@@ -325,12 +373,12 @@ build_inner_logloss_tables <- function(inner_scores_df) {
   if (nrow(inner_scores_df) == 0L) {
     return(list(summary = empty_summary, per_fold = empty_per_fold))
   }
-  if (!all(c("inner_rank", "mean_logloss") %in% names(inner_scores_df))) {
-    stop("inner_scores_df missing inner_rank or mean_logloss columns.")
+  if (!all(c("inner_rank", "mean_logloss", "mean_auroc") %in% names(inner_scores_df))) {
+    stop("inner_scores_df missing inner_rank, mean_logloss, or mean_auroc columns.")
   }
 
   per_fold <- inner_scores_df %>%
-    filter(.data$inner_rank == 1L, is.finite(.data$mean_logloss)) %>%
+    filter(.data$inner_rank == 1L, is.finite(.data$mean_logloss), is.finite(.data$mean_auroc)) %>%
     transmute(
       job_key = if ("job_key" %in% names(.)) as.character(.data$job_key) else NA_character_,
       config_key = as.character(.data$config_key),
@@ -344,6 +392,8 @@ build_inner_logloss_tables <- function(inner_scores_df) {
       target_fold = as.character(.data$target_fold),
       mean_logloss = as.numeric(.data$mean_logloss),
       sd_logloss = if ("sd_logloss" %in% names(.)) as.numeric(.data$sd_logloss) else NA_real_,
+      mean_auroc = as.numeric(.data$mean_auroc),
+      sd_auroc = if ("sd_auroc" %in% names(.)) as.numeric(.data$sd_auroc) else NA_real_,
       alpha = if ("alpha" %in% names(.)) as.numeric(.data$alpha) else NA_real_,
       feature_terms_key = if ("feature_terms_key" %in% names(.)) as.character(.data$feature_terms_key) else NA_character_
     )
@@ -362,12 +412,19 @@ build_inner_logloss_tables <- function(inner_scores_df) {
       mean_inner_logloss = mean(.data$mean_logloss, na.rm = TRUE),
       sd_inner_logloss = stats::sd(.data$mean_logloss, na.rm = TRUE),
       mean_inner_sd_logloss = mean(.data$sd_logloss, na.rm = TRUE),
+      mean_inner_auroc = mean(.data$mean_auroc, na.rm = TRUE),
+      sd_inner_auroc = stats::sd(.data$mean_auroc, na.rm = TRUE),
+      mean_inner_sd_auroc = mean(.data$sd_auroc, na.rm = TRUE),
       inner_winner_alpha = stats::median(.data$alpha, na.rm = TRUE),
       .groups = "drop"
     ) %>%
     group_by(.data$label_set, .data$split_type, .data$nested_rejector_mode) %>%
     arrange(.data$mean_inner_logloss, .data$config_key) %>%
     mutate(rank_mean_logloss = dplyr::row_number()) %>%
+    ungroup() %>%
+    group_by(.data$label_set, .data$split_type, .data$nested_rejector_mode) %>%
+    arrange(dplyr::desc(.data$mean_inner_auroc), .data$config_key) %>%
+    mutate(rank_mean_auroc = dplyr::row_number()) %>%
     ungroup() %>%
     arrange(.data$label_set, .data$split_type, .data$nested_rejector_mode, .data$rank_mean_logloss)
 

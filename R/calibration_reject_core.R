@@ -1770,13 +1770,28 @@ inner_cv_strict_rejector <- function(
   }
 }
 
-# Inner CV log-loss: fit on pool\\val, score val (no thresholding).
+# Aggregate per-inner-fold log-loss and AUROC (fail if any fold is non-finite).
+summarize_inner_cv_logloss_auroc <- function(ll, auc) {
+  if (any(!is.finite(ll)) || any(!is.finite(auc))) return(list(ok = FALSE))
+  list(
+    ok = TRUE,
+    mean_logloss = mean(ll),
+    median_logloss = stats::median(ll),
+    sd_logloss = stats::sd(ll),
+    mean_auroc = mean(auc),
+    median_auroc = stats::median(auc),
+    sd_auroc = stats::sd(auc)
+  )
+}
+
+# Inner CV log-loss + AUROC: fit on pool\\val, score val (no thresholding).
 inner_cv_logloss_singlehead <- function(
   pool_fold_dfs, y_col, rhs_terms, pool_rule, test_rule, min_rows = 20L
 ) {
   ids <- names(pool_fold_dfs)
   if (length(ids) < 3L) return(list(ok = FALSE))
   ll <- numeric(length(ids))
+  auc <- numeric(length(ids))
   for (iv in seq_along(ids)) {
     val_id <- ids[[iv]]
     train_ids <- setdiff(ids, val_id)
@@ -1797,15 +1812,12 @@ inner_cv_logloss_singlehead <- function(
     if (is.null(pred_te)) return(list(ok = FALSE))
     row_te <- which(keep_te)[pred_te$row_id]
     y_te <- as.numeric(te_u[[y_col]][row_te])
-    ll[iv] <- calc_binary_logloss(y_te, pred_te$p_hat)
-    if (!is.finite(ll[iv])) return(list(ok = FALSE))
+    p_te <- pred_te$p_hat
+    ll[iv] <- calc_binary_logloss(y_te, p_te)
+    auc[iv] <- calc_binary_auroc(y_te, p_te)
+    if (!is.finite(ll[iv]) || !is.finite(auc[iv])) return(list(ok = FALSE))
   }
-  list(
-    ok = TRUE,
-    mean_logloss = mean(ll),
-    median_logloss = stats::median(ll),
-    sd_logloss = stats::sd(ll)
-  )
+  summarize_inner_cv_logloss_auroc(ll, auc)
 }
 
 inner_cv_logloss_twohead <- function(
@@ -1824,6 +1836,7 @@ inner_cv_logloss_twohead <- function(
   ids <- names(pool_fold_dfs)
   if (length(ids) < 3L) return(list(ok = FALSE))
   ll <- numeric(length(ids))
+  auc <- numeric(length(ids))
   for (iv in seq_along(ids)) {
     val_id <- ids[[iv]]
     train_ids <- setdiff(ids, val_id)
@@ -1846,15 +1859,12 @@ inner_cv_logloss_twohead <- function(
     if (is.null(pred_te)) return(list(ok = FALSE))
     row_te <- which(keep_te)[pred_te$row_id]
     y_te <- as.numeric(te_u[[y_col]][row_te])
-    ll[iv] <- calc_binary_logloss(y_te, pred_te$p_hat)
-    if (!is.finite(ll[iv])) return(list(ok = FALSE))
+    p_te <- pred_te$p_hat
+    ll[iv] <- calc_binary_logloss(y_te, p_te)
+    auc[iv] <- calc_binary_auroc(y_te, p_te)
+    if (!is.finite(ll[iv]) || !is.finite(auc[iv])) return(list(ok = FALSE))
   }
-  list(
-    ok = TRUE,
-    mean_logloss = mean(ll),
-    median_logloss = stats::median(ll),
-    sd_logloss = stats::sd(ll)
-  )
+  summarize_inner_cv_logloss_auroc(ll, auc)
 }
 
 inner_cv_logloss_rejector <- function(
@@ -1878,6 +1888,7 @@ inner_cv_logloss_enet <- function(
   ids <- names(pool_fold_dfs)
   if (length(ids) < 3L) return(list(ok = FALSE))
   ll <- numeric(length(ids))
+  auc <- numeric(length(ids))
   for (iv in seq_along(ids)) {
     val_id <- ids[[iv]]
     train_ids <- setdiff(ids, val_id)
@@ -1898,15 +1909,12 @@ inner_cv_logloss_enet <- function(
     if (is.null(pred_te)) return(list(ok = FALSE))
     row_te <- pred_te$row_id
     y_te <- as.numeric(te_u[[y_col]][row_te])
-    ll[iv] <- calc_binary_logloss(y_te, pred_te$p_hat)
-    if (!is.finite(ll[iv])) return(list(ok = FALSE))
+    p_te <- pred_te$p_hat
+    ll[iv] <- calc_binary_logloss(y_te, p_te)
+    auc[iv] <- calc_binary_auroc(y_te, p_te)
+    if (!is.finite(ll[iv]) || !is.finite(auc[iv])) return(list(ok = FALSE))
   }
-  list(
-    ok = TRUE,
-    mean_logloss = mean(ll),
-    median_logloss = stats::median(ll),
-    sd_logloss = stats::sd(ll)
-  )
+  summarize_inner_cv_logloss_auroc(ll, auc)
 }
 
 # Fail if any ALL_FEATURE_TERMS column is missing, non-finite, or constant (no silent grid reduction).
@@ -3168,6 +3176,10 @@ finalize_outer_fold_winner <- function(
         row$inner_mean_logloss <- win$mean_logloss
         row$inner_sd_logloss <- win$sd_logloss
       }
+      if (all(c("mean_auroc") %in% names(win))) {
+        row$inner_mean_auroc <- win$mean_auroc
+        row$inner_sd_auroc <- win$sd_auroc
+      }
       if (all(c("mean_coverage", "mean_risk") %in% names(win))) {
         row$inner_mean_coverage_seen <- win$mean_coverage
         row$inner_mean_risk_all_accepted <- win$mean_risk
@@ -3247,6 +3259,9 @@ evaluate_outer_fold_maxprob_only <- function(
     mean_logloss = ll$mean_logloss,
     median_logloss = ll$median_logloss,
     sd_logloss = ll$sd_logloss,
+    mean_auroc = ll$mean_auroc,
+    median_auroc = ll$median_auroc,
+    sd_auroc = ll$sd_auroc,
     inner_rank = 1L,
     inner_selection_tier = "fixed",
     recipe_optional_count = NA_integer_,
