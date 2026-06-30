@@ -6,7 +6,7 @@ cd /Users/jsevere2/leukem_ai
 
 source .venv/bin/activate
 
-echo "Starting MAD-global ablation outer CV experiments..."
+echo "Starting MAD-global ablation outer CV experiments (no KNN, no left-out predictions)..."
 echo "=================================="
 
 FS_METHOD="mad_global"
@@ -27,7 +27,7 @@ run_outer_cv() {
         --fold_type "$fold_type" \
         --best_params_path "$best_params_file" \
         --fs_method "$FS_METHOD" \
-        --include_leftout
+        --skip_knn
 
     echo "Completed: $model_type - $multi_type - $fold_type"
     echo ""

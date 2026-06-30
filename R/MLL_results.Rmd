@@ -1,0 +1,729 @@
+---
+title: "MLL Lab validation cohort"
+output: html_document
+date: "`r format(Sys.Date())`"
+---
+
+Run first from repo root:
+
+```bash
+source .venv/bin/activate
+python python/predict_new_samples.py \
+  --input_file data/MLL_lab/STAR_AML_MLLlab.csv \
+  --output_dir data/out/predictions \
+  --cutoff_source both \
+  --threshold_method both \
+  --rejector_mode all \
+  --max_accepted_risk_pct 5
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(purrr)
+  library(knitr)
+  library(kableExtra)
+  library(caret)
+})
+```
+
+```{r paths_helpers}
+repo_root <- if (file.exists("R/utility_functions.R")) "." else ".."
+source(file.path(repo_root, "R/mll_label_standardization.R"))
+mapping <- MLL_ICC_MAPPING
+
+mll_input_stem <- "STAR_AML_MLLlab"
+mll_metadata_path <- file.path(repo_root, "data/MLL_lab/20231017_SampleMetadata.csv")
+mll_pred_dir <- file.path(
+  repo_root,
+  "data/out/predictions",
+  paste0(mll_input_stem, "_predictions")
+)
+
+# Filename suffix from predict_new_samples.py:
+# {pred_suffix}_{rejector_key}[_deploy_loso][_pooled_oof][_risk5p0]
+
+MLL_THRESHOLD_METHODS <- tibble::tribble(
+  ~threshold_method,     ~threshold_tag,   ~threshold_label,
+  "jackknife_adjusted",  "",               "Jackknife-adjusted",
+  "pooled_oof",          "_pooled_oof",    "Pooled OOF",
+  "ucb_95",              "_ucb_95",        "UCB (95%, one-sided)"
+)
+
+MLL_LABEL_SETS <- tibble::tribble(
+  ~label_set_key,     ~pred_suffix,     ~label_display,    ~target_risk_pct, ~risk_tag,
+  "merged_summed",    "merged_summed",  "Collapsed",       5.0,              "_risk5p0",
+  "merged_maxprob",   "merged_maxprob", "Collapsed (max)", 5.0,              "_risk5p0",
+  "unmerged_maxprob", "unmerged",       "Full subtypes",   5.0,              "_risk5p0"
+)
+
+MLL_PRED_CONFIGS <- tidyr::crossing(
+  MLL_LABEL_SETS,
+  tibble::tribble(
+    ~rejector_key,                              ~rejector_label,
+    "svm_single_head",                          "SVM maxprob single-head",
+    "svm_ridge_in_model",                       "SVM ridge in-model"
+  ),
+  tibble::tribble(
+    ~cutoff_source,     ~calibration_label, ~cutoff_tag,
+    "selection_loso",   "Selection LOSO",   "",
+    "deploy_loso",      "Deploy LOSO",      "_deploy_loso"
+  ),
+  MLL_THRESHOLD_METHODS
+) %>%
+  mutate(
+    pred_filename = paste0(
+      mll_input_stem,
+      "_SVM_predictions_",
+      pred_suffix, "_", rejector_key, cutoff_tag, threshold_tag, risk_tag,
+      ".csv"
+    ),
+    pred_path = file.path(mll_pred_dir, pred_filename)
+  )
+
+build_mll_label_vocabulary <- function(label_set_key, label_display) {
+  ref_path <- resolve_mll_pred_path(
+    label_set_key, "svm_single_head", "selection_loso"
+  )
+  pred_df <- read.csv(ref_path, stringsAsFactors = FALSE)
+
+  truth_vocab <- mll_meta %>%
+    mutate(
+      std_label = standardize_mll_truth(truth_raw, label_set_key),
+      display_label = map_mll_to_display(std_label)
+    ) %>%
+    count(truth_raw, std_label, display_label, name = "n_truth")
+
+  pred_vocab <- pred_df %>%
+    mutate(
+      pred_raw = as.character(prediction),
+      std_label = standardize_mll_prediction(prediction, label_set_key),
+      display_label = map_mll_to_display(std_label)
+    ) %>%
+    count(pred_raw, std_label, display_label, name = "n_pred")
+
+  std_union <- sort(unique(c(truth_vocab$std_label, pred_vocab$std_label)))
+  summary_tbl <- tibble::tibble(std_label = std_union) %>%
+    left_join(
+      truth_vocab %>%
+        group_by(std_label, display_label) %>%
+        summarise(n_truth = sum(n_truth), .groups = "drop"),
+      by = "std_label"
+    ) %>%
+    left_join(
+      pred_vocab %>%
+        group_by(std_label, display_label) %>%
+        summarise(n_pred = sum(n_pred), .groups = "drop") %>%
+        select(std_label, n_pred),
+      by = "std_label"
+    ) %>%
+    mutate(
+      label_set = label_display,
+      n_truth = tidyr::replace_na(n_truth, 0L),
+      n_pred = tidyr::replace_na(n_pred, 0L),
+      in_truth = n_truth > 0L,
+      in_pred = n_pred > 0L,
+      vocabulary_status = dplyr::case_when(
+        in_truth & in_pred ~ "Both",
+        in_truth & !in_pred ~ "Truth only",
+        !in_truth & in_pred ~ "Prediction only",
+        TRUE ~ "Neither"
+      ),
+      display_label = dplyr::coalesce(display_label, map_mll_to_display(std_label))
+    ) %>%
+    arrange(
+      match(vocabulary_status, c("Truth only", "Prediction only", "Both")),
+      desc(n_truth + n_pred),
+      std_label
+    )
+
+  list(
+    summary = summary_tbl,
+    truth_detail = truth_vocab %>% mutate(label_set = label_display),
+    pred_detail = pred_vocab %>% mutate(label_set = label_display)
+  )
+}
+
+as_logical_flag <- function(x) {
+  if (is.logical(x)) return(x)
+  tolower(trimws(as.character(x))) %in% c("true", "t", "1", "yes", "y")
+}
+
+compute_kappa_safe <- function(truth, pred) {
+  keep <- !is.na(truth) & !is.na(pred)
+  truth <- as.character(truth[keep])
+  pred <- as.character(pred[keep])
+  if (length(truth) < 2L) return(NA_real_)
+  lv <- sort(unique(c(truth, pred)))
+  if (length(lv) < 2L) return(NA_real_)
+  cm <- confusionMatrix(
+    factor(pred, levels = lv),
+    factor(truth, levels = lv)
+  )
+  as.numeric(cm$overall["Kappa"])
+}
+
+resolve_mll_pred_path <- function(
+    cfg_label_set_key,
+    cfg_rejector_key,
+    cfg_cutoff_source = "selection_loso",
+    cfg_threshold_method = "jackknife_adjusted",
+    cfg_target_risk_pct = 5.0) {
+  row <- MLL_PRED_CONFIGS %>%
+    filter(
+      .data$label_set_key == cfg_label_set_key,
+      .data$rejector_key == cfg_rejector_key,
+      .data$cutoff_source == cfg_cutoff_source,
+      .data$threshold_method == cfg_threshold_method,
+      .data$target_risk_pct == cfg_target_risk_pct
+    )
+  if (nrow(row) != 1L) {
+    stop(sprintf(
+      "Unknown MLL prediction config: %s / %s / %s / %s (target=%s)",
+      cfg_label_set_key, cfg_rejector_key, cfg_cutoff_source,
+      cfg_threshold_method, cfg_target_risk_pct
+    ))
+  }
+  row$pred_path[[1]]
+}
+```
+
+# Validation cohort analysis (MLL Lab)
+
+## Load metadata and prediction outputs
+
+```{r load_data}
+if (!file.exists(mll_metadata_path)) {
+  stop("Missing MLL metadata: ", mll_metadata_path)
+}
+if (!dir.exists(mll_pred_dir)) {
+  stop(
+    "Missing prediction directory: ", mll_pred_dir,
+    ". Run predict_new_samples.py with --cutoff_source both --threshold_method both ",
+    "--rejector_mode all --max_accepted_risk_pct 5."
+  )
+}
+
+missing_preds <- MLL_PRED_CONFIGS %>%
+  filter(!file.exists(.data$pred_path)) %>%
+  select(pred_filename, pred_path)
+if (nrow(missing_preds) > 0L) {
+  stop(
+    "Missing prediction file(s). Re-run predict_new_samples.py:\n",
+    paste0("  - ", missing_preds$pred_path, collapse = "\n")
+  )
+}
+
+MLL_lab <- read.csv(mll_metadata_path, sep = ";", stringsAsFactors = FALSE)
+mll_meta <- MLL_lab %>%
+  transmute(
+    sample_name = as.character(MLL_ID),
+    truth_raw = ICC_2022
+  ) %>%
+  filter(!is.na(truth_raw), nzchar(truth_raw))
+
+# Classes absent from training (exclude from seen-coverage denominator).
+mll_unseen_classes <- c("AML..NOS")
+
+read_mll_prediction_metrics <- function(
+    cfg_label_set_key,
+    cfg_rejector_key,
+    cfg_cutoff_source,
+    cfg_threshold_method,
+    cfg_target_risk_pct) {
+  cfg <- MLL_PRED_CONFIGS %>%
+    filter(
+      .data$label_set_key == cfg_label_set_key,
+      .data$rejector_key == cfg_rejector_key,
+      .data$cutoff_source == cfg_cutoff_source,
+      .data$threshold_method == cfg_threshold_method,
+      .data$target_risk_pct == cfg_target_risk_pct
+    )
+  pred_df <- read.csv(cfg$pred_path[[1]], stringsAsFactors = FALSE) %>%
+    mutate(
+      sample_name = as.character(sample_name),
+      pred_label = standardize_mll_prediction(prediction, cfg_label_set_key),
+      passed_cutoff = as_logical_flag(prediction_passed_cutoff)
+    ) %>%
+    left_join(mll_meta, by = "sample_name") %>%
+    mutate(truth_label = standardize_mll_truth(truth_raw, cfg_label_set_key)) %>%
+    filter(!is.na(truth_label), !is.na(pred_label))
+
+  if (nrow(pred_df) == 0L) return(NULL)
+
+  pred_acc <- pred_df %>% filter(passed_cutoff)
+  seen_mask <- !(pred_df$truth_label %in% mll_unseen_classes)
+
+  tibble::tibble(
+    threshold_method = cfg_threshold_method,
+    threshold_label = cfg$threshold_label[[1]],
+    label_set_key = cfg_label_set_key,
+    label_display = cfg$label_display[[1]],
+    rejector_key = cfg_rejector_key,
+    rejector_label = cfg$rejector_label[[1]],
+    cutoff_source = cfg_cutoff_source[[1]],
+    calibration_label = cfg$calibration_label[[1]],
+    target_risk_pct = cfg$target_risk_pct[[1]],
+    pred_path = cfg$pred_path[[1]],
+    n_samples = nrow(pred_df),
+    n_accepted = nrow(pred_acc),
+    coverage_pct = 100 * mean(pred_df$passed_cutoff, na.rm = TRUE),
+    seen_coverage_pct = if (any(seen_mask, na.rm = TRUE)) {
+      100 * mean(pred_df$passed_cutoff[seen_mask], na.rm = TRUE)
+    } else {
+      NA_real_
+    },
+    accepted_error_rate_pct = if (nrow(pred_acc) > 0L) {
+      100 * mean(pred_acc$truth_label != pred_acc$pred_label, na.rm = TRUE)
+    } else {
+      NA_real_
+    },
+    kappa_without_rejection = compute_kappa_safe(pred_df$truth_label, pred_df$pred_label),
+    kappa_with_rejection = compute_kappa_safe(pred_acc$truth_label, pred_acc$pred_label)
+  )
+}
+
+mll_metrics <- purrr::pmap_dfr(
+  MLL_PRED_CONFIGS %>%
+    select(
+      label_set_key, rejector_key, cutoff_source,
+      threshold_method, target_risk_pct
+    ),
+  function(label_set_key, rejector_key, cutoff_source, threshold_method, target_risk_pct) {
+    read_mll_prediction_metrics(
+      label_set_key, rejector_key, cutoff_source,
+      threshold_method, target_risk_pct
+    )
+  }
+)
+
+knitr::kable(
+  mll_metrics %>%
+    select(
+      threshold_label, calibration_label, label_display,
+      rejector_label, target_risk_pct, n_samples, n_accepted
+    ) %>%
+    mutate(
+      label_display = as.character(label_display),
+      target_risk_pct = sprintf("%.1f%%", target_risk_pct)
+    ),
+  caption = "Loaded MLL prediction runs (threshold x calibration track x rejector)"
+)
+```
+
+## Label vocabulary: MLL truth vs model prediction classes
+
+Standardized labels use the same rules as training (`merge_true_labels` for collapsed classes; full ICC names for unmerged). KMT2A::MLLT3 fusion order is harmonized to the training canonical string. Model rare-fusion classes (e.g. `CBFA2T3..GLIS2`, `KAT6A..CREBBP`) are bucketed to `AML.other.rare.transloc` to match MLL ICC truth. Non-MLLT3 KMT2A model fusions (e.g. `KMT2A..ELL`) are bucketed to Other KMT2A (`AML.otherKMT2A` unmerged; `other.KMT2A` collapsed).
+
+```{r label_vocabulary}
+mll_label_vocab_collapsed <- build_mll_label_vocabulary("merged_summed", "Collapsed")
+mll_label_vocab_unmerged <- build_mll_label_vocabulary("unmerged_maxprob", "Full subtypes")
+
+mll_label_vocab_summary <- bind_rows(
+  mll_label_vocab_collapsed$summary,
+  mll_label_vocab_unmerged$summary
+)
+
+mll_label_vocab_mismatches <- mll_label_vocab_summary %>%
+  filter(.data$vocabulary_status != "Both")
+
+knitr::kable(
+  mll_label_vocab_summary %>%
+    select(
+      label_set, vocabulary_status, display_label, std_label, n_truth, n_pred
+    ),
+  caption = "Standardized label vocabulary on MLL (truth metadata vs primary model predictions)"
+)
+
+if (nrow(mll_label_vocab_mismatches) > 0L) {
+  knitr::kable(
+    mll_label_vocab_mismatches %>%
+      select(label_set, vocabulary_status, display_label, std_label, n_truth, n_pred),
+    caption = "Labels present in only truth or only predictions (potential naming / OOD gaps)"
+  )
+}
+
+knitr::kable(
+  mll_label_vocab_collapsed$truth_detail %>%
+    select(truth_raw, std_label, display_label, n_truth) %>%
+    arrange(desc(n_truth)),
+  caption = "Collapsed label set: ICC truth codes mapped to model label space"
+)
+
+knitr::kable(
+  mll_label_vocab_collapsed$pred_detail %>%
+    select(pred_raw, std_label, display_label, n_pred) %>%
+    arrange(desc(n_pred)),
+  caption = "Collapsed label set: raw model prediction classes"
+)
+
+knitr::kable(
+  mll_label_vocab_unmerged$truth_detail %>%
+    select(truth_raw, std_label, display_label, n_truth) %>%
+    arrange(desc(n_truth)),
+  caption = "Full subtypes: ICC truth codes mapped to model label space"
+)
+
+knitr::kable(
+  mll_label_vocab_unmerged$pred_detail %>%
+    select(pred_raw, std_label, display_label, n_pred) %>%
+    arrange(desc(n_pred)),
+  caption = "Full subtypes: raw model prediction classes"
+)
+
+dir.create(file.path(repo_root, "writing/tables_new"), recursive = TRUE, showWarnings = FALSE)
+write.csv(
+  mll_label_vocab_summary,
+  file.path(repo_root, "writing/tables_new/mll_label_vocabulary_summary.csv"),
+  row.names = FALSE
+)
+write.csv(
+  bind_rows(
+    mll_label_vocab_collapsed$truth_detail %>% mutate(source = "truth"),
+    mll_label_vocab_collapsed$pred_detail %>% mutate(source = "prediction")
+  ),
+  file.path(repo_root, "writing/tables_new/mll_label_vocabulary_collapsed_detail.csv"),
+  row.names = FALSE
+)
+write.csv(
+  bind_rows(
+    mll_label_vocab_unmerged$truth_detail %>% mutate(source = "truth"),
+    mll_label_vocab_unmerged$pred_detail %>% mutate(source = "prediction")
+  ),
+  file.path(repo_root, "writing/tables_new/mll_label_vocabulary_unmerged_detail.csv"),
+  row.names = FALSE
+)
+```
+
+## Table 2: MLL lab cohort distribution
+
+```{r table2, results='asis'}
+MLL_lab_df <- mll_meta %>%
+  transmute(
+    Subtype = map_truth_to_canonical(truth_raw, mapping),
+    Cohort = "MLL Munich"
+  )
+
+MLL_lab_counts <- as.data.frame(table(MLL_lab_df$Subtype))
+colnames(MLL_lab_counts) <- c("Subtype", "MLL Munich")
+MLL_lab_counts <- MLL_lab_counts[order(-MLL_lab_counts$`MLL Munich`), ]
+
+MLL_lab_counts$Subtype <- as.character(MLL_lab_counts$Subtype)
+MLL_lab_counts$Subtype <- gsub("\\.", " ", MLL_lab_counts$Subtype)
+MLL_lab_counts$Subtype <- gsub("AML with inv 16  t 16 16  CBFB  MYH11", "CBFB::MYH11", MLL_lab_counts$Subtype)
+MLL_lab_counts$Subtype <- gsub("APL  t 15 17  PML  RARA", "PML::RARA", MLL_lab_counts$Subtype)
+MLL_lab_counts$Subtype <- gsub("AML with t 6 9  DEK  NUP214", "DEK::NUP214", MLL_lab_counts$Subtype)
+MLL_lab_counts$Subtype <- gsub("AML with mutated NPM1", "Mutated NPM1", MLL_lab_counts$Subtype)
+MLL_lab_counts$Subtype <- gsub("AML with t 8 21  RUNX1  RUNX1T1", "RUNX1::RUNX1T1", MLL_lab_counts$Subtype)
+MLL_lab_counts$Subtype <- gsub("AML with in frame bZIP CEBPA", "CEBPA bZIP in-frame", MLL_lab_counts$Subtype)
+MLL_lab_counts$Subtype <- gsub("AML with t 9 11  MLLT3  KMT2A", "KMT2A::MLLT3", MLL_lab_counts$Subtype)
+MLL_lab_counts$Subtype <- gsub("MDS", "MDS-related", MLL_lab_counts$Subtype)
+
+total_row <- data.frame(
+  Subtype = "Total",
+  `MLL Munich` = sum(MLL_lab_counts$`MLL Munich`),
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+MLL_lab_counts_with_total <- rbind(MLL_lab_counts, total_row)
+
+mll_table <- kable(
+  MLL_lab_counts_with_total,
+  format = "html",
+  caption = "Table 2: Distribution of leukemia subtypes in MLL lab cohort",
+  row.names = FALSE,
+  escape = FALSE
+) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "condensed"),
+    full_width = FALSE,
+    position = "left"
+  ) %>%
+  row_spec(nrow(MLL_lab_counts_with_total), bold = TRUE, background = "#e6f2ff")
+
+mll_table
+dir.create(file.path(repo_root, "writing/tables_new"), recursive = TRUE, showWarnings = FALSE)
+save_kable(mll_table, file.path(repo_root, "writing/tables_new/table2.png"), zoom = 2)
+```
+
+## MLL performance by calibration track, label set, and rejector
+
+Deployed cutoffs at **5%** target risk (collapsed and full subtypes). Metrics on samples with ICC truth labels.
+
+```{r performance_table}
+mll_perf_table <- mll_metrics %>%
+  mutate(
+    target_risk_pct = sprintf("%.1f%%", target_risk_pct),
+    accepted_error_rate_pct = round(accepted_error_rate_pct, 2),
+    coverage_pct = round(coverage_pct, 2),
+    seen_coverage_pct = round(seen_coverage_pct, 2),
+    kappa_without_rejection = round(kappa_without_rejection, 3),
+    kappa_with_rejection = round(kappa_with_rejection, 3)
+  ) %>%
+  select(
+    threshold_label,
+    calibration_label,
+    label_display,
+    rejector_label,
+    target_risk_pct,
+    accepted_error_rate_pct,
+    coverage_pct,
+    seen_coverage_pct,
+    kappa_without_rejection,
+    kappa_with_rejection,
+    n_samples,
+    n_accepted
+  ) %>%
+  arrange(threshold_label, label_display, rejector_label, calibration_label)
+
+knitr::kable(
+  mll_perf_table,
+  align = c("l", "l", "l", "l", "r", "r", "r", "r", "r", "r", "r", "r"),
+  col.names = c(
+    "Cutoff method",
+    "Calibration",
+    "Label set",
+    "Rejector",
+    "Target risk",
+    "Accepted error (%)",
+    "Coverage (%)",
+    "Seen coverage (%)",
+    "Kappa (all)",
+    "Kappa (accepted)",
+    "N",
+    "N accepted"
+  ),
+  caption = "MLL lab performance: SVM classifier + SVM rejectors at 5% target risk"
+)
+
+dir.create(file.path(repo_root, "writing/tables_new"), recursive = TRUE, showWarnings = FALSE)
+write.csv(
+  mll_perf_table,
+  file.path(repo_root, "writing/tables_new/mll_perf_table.csv"),
+  row.names = FALSE
+)
+write.csv(
+  mll_perf_table,
+  file.path(repo_root, "writing/tables_new/mll_calibration_track_svm_comparison.csv"),
+  row.names = FALSE
+)
+```
+
+## Side-by-side delta (deploy-loso minus selection-loso)
+
+```{r calibration_delta}
+mll_calibration_delta <- mll_metrics %>%
+  select(
+    threshold_method, threshold_label,
+    label_set_key, label_display, target_risk_pct,
+    rejector_key, rejector_label, cutoff_source,
+    accepted_error_rate_pct, coverage_pct, seen_coverage_pct,
+    kappa_without_rejection, kappa_with_rejection, n_accepted
+  ) %>%
+  tidyr::pivot_wider(
+    names_from = cutoff_source,
+    values_from = c(
+      accepted_error_rate_pct, coverage_pct, seen_coverage_pct,
+      kappa_without_rejection, kappa_with_rejection, n_accepted
+    )
+  ) %>%
+  mutate(
+    delta_accepted_error_pct = accepted_error_rate_pct_deploy_loso - accepted_error_rate_pct_selection_loso,
+    delta_coverage_pct = coverage_pct_deploy_loso - coverage_pct_selection_loso,
+    delta_seen_coverage_pct = seen_coverage_pct_deploy_loso - seen_coverage_pct_selection_loso,
+    delta_kappa_accepted = kappa_with_rejection_deploy_loso - kappa_with_rejection_selection_loso,
+    delta_n_accepted = n_accepted_deploy_loso - n_accepted_selection_loso
+  ) %>%
+  select(
+    threshold_label, label_display, target_risk_pct, rejector_label,
+    accepted_error_rate_pct_selection_loso, accepted_error_rate_pct_deploy_loso, delta_accepted_error_pct,
+    coverage_pct_selection_loso, coverage_pct_deploy_loso, delta_coverage_pct,
+    kappa_with_rejection_selection_loso, kappa_with_rejection_deploy_loso, delta_kappa_accepted,
+    n_accepted_selection_loso, n_accepted_deploy_loso, delta_n_accepted
+  ) %>%
+  mutate(target_risk_pct = sprintf("%.1f%%", target_risk_pct)) %>%
+  arrange(threshold_label, label_display, rejector_label)
+
+knitr::kable(
+  mll_calibration_delta %>%
+    mutate(across(where(is.numeric), ~round(.x, 3))),
+  caption = "Deploy-loso vs selection-loso on MLL (positive delta = deploy-loso higher; per threshold method)"
+)
+
+write.csv(
+  mll_calibration_delta,
+  file.path(repo_root, "writing/tables_new/mll_calibration_track_svm_delta.csv"),
+  row.names = FALSE
+)
+```
+
+## Side-by-side delta (pooled OOF minus jackknife-adjusted)
+
+Selection-loso cutoffs; same rejector.
+
+```{r threshold_delta}
+mll_threshold_delta <- mll_metrics %>%
+  filter(.data$cutoff_source == "selection_loso") %>%
+  select(
+    label_display, target_risk_pct, rejector_label, threshold_method,
+    accepted_error_rate_pct, coverage_pct, seen_coverage_pct,
+    kappa_with_rejection, n_accepted
+  ) %>%
+  tidyr::pivot_wider(
+    names_from = threshold_method,
+    values_from = c(
+      accepted_error_rate_pct, coverage_pct, seen_coverage_pct,
+      kappa_with_rejection, n_accepted
+    )
+  ) %>%
+  mutate(
+    delta_accepted_error_pct = accepted_error_rate_pct_pooled_oof - accepted_error_rate_pct_jackknife_adjusted,
+    delta_coverage_pct = coverage_pct_pooled_oof - coverage_pct_jackknife_adjusted,
+    delta_kappa_accepted = kappa_with_rejection_pooled_oof - kappa_with_rejection_jackknife_adjusted,
+    delta_n_accepted = n_accepted_pooled_oof - n_accepted_jackknife_adjusted
+  ) %>%
+  select(
+    label_display, target_risk_pct, rejector_label,
+    accepted_error_rate_pct_jackknife_adjusted, accepted_error_rate_pct_pooled_oof, delta_accepted_error_pct,
+    coverage_pct_jackknife_adjusted, coverage_pct_pooled_oof, delta_coverage_pct,
+    kappa_with_rejection_jackknife_adjusted, kappa_with_rejection_pooled_oof, delta_kappa_accepted,
+    n_accepted_jackknife_adjusted, n_accepted_pooled_oof, delta_n_accepted
+  ) %>%
+  mutate(target_risk_pct = sprintf("%.1f%%", target_risk_pct)) %>%
+  arrange(label_display, rejector_label)
+
+knitr::kable(
+  mll_threshold_delta %>%
+    mutate(across(where(is.numeric), ~round(.x, 3))),
+  caption = "Pooled-OOF minus jackknife-adjusted cutoffs on MLL (positive delta = pooled OOF higher)"
+)
+
+write.csv(
+  mll_threshold_delta,
+  file.path(repo_root, "writing/tables_new/mll_threshold_method_delta.csv"),
+  row.names = FALSE
+)
+```
+
+## Confusion matrices (collapsed, both rejectors)
+
+```#{r confusion_collapsed, fig.width=12, fig.height=5}
+load_mll_pred_joined <- function(
+    label_set_key,
+    rejector_key,
+    cutoff_source = "selection_loso",
+    threshold_method = "jackknife_adjusted") {
+  pred_path <- resolve_mll_pred_path(
+    label_set_key, rejector_key, cutoff_source, threshold_method
+  )
+  read.csv(pred_path, stringsAsFactors = FALSE) %>%
+    mutate(
+      sample_name = as.character(sample_name),
+      pred_label = standardize_mll_prediction(prediction, label_set_key),
+      passed_cutoff = as_logical_flag(prediction_passed_cutoff)
+    ) %>%
+    left_join(mll_meta, by = "sample_name") %>%
+    mutate(
+      truth_label = standardize_mll_truth(truth_raw, label_set_key),
+      truth_display = map_mll_to_display(truth_label),
+      pred_display = map_mll_to_display(pred_label)
+    ) %>%
+    filter(!is.na(truth_label), !is.na(pred_label))
+}
+
+plot_confusion_heatmap <- function(df, title) {
+  if (nrow(df) == 0L) {
+    return(
+      ggplot2::ggplot() +
+        ggplot2::annotate(
+          "text", x = 0.5, y = 0.5,
+          label = "No accepted samples",
+          size = 4
+        ) +
+        ggplot2::xlim(0, 1) +
+        ggplot2::ylim(0, 1) +
+        ggplot2::theme_void() +
+        ggplot2::labs(title = title)
+    )
+  }
+
+  cm_df <- as.data.frame(
+    table(
+      Truth = df$truth_display,
+      Prediction = df$pred_display,
+      useNA = "no"
+    ),
+    stringsAsFactors = FALSE
+  )
+  names(cm_df) <- c("Truth", "Prediction", "Freq")
+  cm_df <- cm_df %>% filter(.data$Freq > 0L)
+
+  ggplot2::ggplot(cm_df, ggplot2::aes(x = .data$Prediction, y = .data$Truth, fill = .data$Freq)) +
+    ggplot2::geom_tile(color = "white") +
+    ggplot2::geom_text(ggplot2::aes(label = .data$Freq), color = "black", size = 3) +
+    ggplot2::scale_fill_gradient(low = "#f7fbff", high = "#08306b") +
+    ggplot2::theme_bw() +
+    ggplot2::theme(
+      axis.text.x = ggplot2::element_text(angle = 45, hjust = 1),
+      legend.position = "right"
+    ) +
+    ggplot2::labs(title = title, x = NULL, y = NULL, fill = "N")
+}
+
+suppressPackageStartupMessages(library(ggplot2))
+library(patchwork)
+
+cm_plots <- lapply(seq_len(nrow(mll_metrics)), function(i) {
+  row <- mll_metrics[i, ]
+  df <- load_mll_pred_joined(
+    row$label_set_key, row$rejector_key, row$cutoff_source, row$threshold_method
+  )
+  df_acc <- df %>% filter(passed_cutoff)
+  plot_confusion_heatmap(
+    df_acc,
+    sprintf(
+      "%s | %s | %s | %s (accepted only, n=%d)",
+      row$calibration_label, row$threshold_label, row$label_display, row$rejector_label, nrow(df_acc)
+    )
+  )
+})
+
+wrap_plots(cm_plots, ncol = 2)
+```
+
+## Sample-level export (primary collapsed run)
+
+Primary run: collapsed labels, SVM maxprob single-head, selection-loso cutoffs, jackknife-adjusted threshold.
+
+```{r export_primary}
+primary_path <- resolve_mll_pred_path(
+  "merged_summed", "svm_single_head", "selection_loso"
+)
+MLL_lab_pred_df_merged <- read.csv(primary_path, stringsAsFactors = FALSE)
+
+MLL_lab_sample_df <- load_mll_pred_joined(
+  "merged_summed", "svm_single_head", "selection_loso"
+) %>%
+  transmute(
+    sample_name,
+    truth_display,
+    prediction_display = pred_display,
+    passed_cutoff,
+    prediction_prob,
+    prediction_prob_calibrated,
+    correct = truth_display == pred_display
+  )
+
+write.csv(
+  MLL_lab_sample_df,
+  file.path(repo_root, "data/out/predictions/STAR_AML_MLLlab_predictions/mll_sample_summary_collapsed_svm_single_head.csv"),
+  row.names = FALSE
+)
+
+knitr::kable(
+  head(MLL_lab_sample_df, 10),
+  caption = "First 10 samples (collapsed label set, SVM maxprob single-head rejector)"
+)
+```

@@ -2,11 +2,14 @@
 """
 Prediction script for new samples using trained final models.
 
-Loads final models (NN, SVM, XGBOOST), PoE ensemble weights, ood_aware rejection GLM,
-and deployment cutoffs exported by R/calibration_reject_models_final.R.
+Loads final SVM models and rejection models exported by
+R/calibration_reject_models_final.R (single-head only):
+  - svm_single_head: max_prob GLM
+  - svm_ridge_in_model: elastic-net on in-model confidence features
 
 Usage:
     python predict_new_samples.py --input_file path/to/new_samples.csv --output_dir path/to/output/
+    python predict_new_samples.py --rejector_mode all ...
 """
 
 import pandas as pd
@@ -23,14 +26,99 @@ warnings.filterwarnings('ignore')
 # Import required modules from the project
 import sys
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-import classifiers
-import transformers
 import train_test
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
+from enet_rejector_scoring import enet_params_file_key, score_logistic_head
 
-# Final deployment uses LOSO-selected hyperparameters, weights, and cutoffs.
+# Final deployment: SVM classifier + SVM rejector recipes (R/calibration_reject_deploy_config.R).
+DEPLOY_BASE_MODEL = "svm"
+DEPLOYMENT_PREDICTOR = "SVM"
+# Final deployment uses LOSO-selected hyperparameters (model filenames).
 FINAL_FOLD_TYPE = "loso"
+
+# Rejector cutoff tracks (parallel calibration exports).
+CUTOFF_SOURCE_SELECTION = "selection_loso"
+CUTOFF_SOURCE_DEPLOY_LOSO = "deploy_loso"
+VALID_CUTOFF_SOURCES = (CUTOFF_SOURCE_SELECTION, CUTOFF_SOURCE_DEPLOY_LOSO)
+
+THRESHOLD_METHOD_JACKKNIFE = "jackknife_adjusted"
+THRESHOLD_METHOD_POOLED = "pooled_oof"
+THRESHOLD_METHOD_UCB95 = "ucb_95"
+VALID_THRESHOLD_METHODS = (
+    THRESHOLD_METHOD_JACKKNIFE,
+    THRESHOLD_METHOD_POOLED,
+    THRESHOLD_METHOD_UCB95,
+)
+
+
+def resolve_ensemble_method(ensemble_method: str) -> str:
+    """Normalize ensemble method aliases."""
+    aliases = {
+        "product": "product",
+        "product_of_experts": "product",
+        "poe": "product",
+        "weighted": "weighted",
+        "weighted_sum": "weighted",
+        "sum": "weighted",
+    }
+    if ensemble_method not in aliases:
+        raise ValueError(
+            "Unsupported ensemble method. Use one of: "
+            "product, weighted."
+        )
+    return aliases[ensemble_method]
+
+
+def resolve_cutoff_sources(cutoff_source_arg: str) -> list:
+    if cutoff_source_arg == "both":
+        return [CUTOFF_SOURCE_SELECTION, CUTOFF_SOURCE_DEPLOY_LOSO]
+    if cutoff_source_arg in VALID_CUTOFF_SOURCES:
+        return [cutoff_source_arg]
+    raise ValueError(
+        f"Invalid cutoff_source '{cutoff_source_arg}'. "
+        f"Use one of: {', '.join(VALID_CUTOFF_SOURCES)}, both."
+    )
+
+
+def resolve_threshold_methods(threshold_method_arg: str) -> list:
+    if threshold_method_arg == "both":
+        return list(VALID_THRESHOLD_METHODS)
+    if threshold_method_arg in VALID_THRESHOLD_METHODS:
+        return [threshold_method_arg]
+    raise ValueError(
+        f"Invalid threshold_method '{threshold_method_arg}'. "
+        f"Use one of: {', '.join(VALID_THRESHOLD_METHODS)}, both."
+    )
+
+
+def calibration_artifact_suffix(label_set_key: str, cutoff_source: str) -> str:
+    base = final_merge_suffix(label_set_key)
+    if cutoff_source == CUTOFF_SOURCE_DEPLOY_LOSO:
+        return f"{base}_deploy_loso"
+    return base
+
+
+def prediction_output_tag(cutoff_source: str) -> str:
+    return "_deploy_loso" if cutoff_source == CUTOFF_SOURCE_DEPLOY_LOSO else ""
+
+
+def prediction_threshold_tag(threshold_method: str) -> str:
+    """Filename suffix for non-default cutoff derivation (jackknife has no suffix)."""
+    if threshold_method == THRESHOLD_METHOD_POOLED:
+        return "_pooled_oof"
+    if threshold_method == THRESHOLD_METHOD_JACKKNIFE:
+        return ""
+    if threshold_method == THRESHOLD_METHOD_UCB95:
+        return "_ucb_95"
+    raise ValueError(f"Unsupported threshold_method for output naming: {threshold_method}")
+
+
+def prediction_risk_tag(max_accepted_risk_pct) -> str:
+    """Filename suffix when cutoffs are chosen from a risk-coverage curve."""
+    if max_accepted_risk_pct is None:
+        return ""
+    whole = int(max_accepted_risk_pct)
+    frac = int(round((float(max_accepted_risk_pct) - whole) * 10))
+    return f"_risk{whole}p{frac}"
 
 
 def standardize_class_names(class_names):
@@ -387,7 +475,7 @@ def load_models_and_metadata(models_dir, pipelines_dir=None):
     return models
 
 
-def load_ensemble_weights(weights_dir):
+def load_ensemble_weights(weights_dir, ensemble_method="product"):
     """
     Load ensemble weights for the global ensemble method.
     
@@ -395,15 +483,23 @@ def load_ensemble_weights(weights_dir):
     -----------
     weights_dir : str
         Path to the ensemble weights directory
+    ensemble_method : str
+        "product" uses PoE weights; "weighted" uses simple linear-average weights.
         
     Returns:
     --------
     ensemble_weights : dict
         Dictionary containing ensemble weights
     """
+    ensemble_method = resolve_ensemble_method(ensemble_method)
+    weights_filename = (
+        "global_simple_ensemble_weights_used.csv"
+        if ensemble_method == "weighted"
+        else "global_ensemble_weights_used.csv"
+    )
     ensemble_weights = {}
     
-    global_weights_path = os.path.join(weights_dir, FINAL_FOLD_TYPE, "global_ensemble_weights_used.csv")
+    global_weights_path = os.path.join(weights_dir, FINAL_FOLD_TYPE, weights_filename)
     if not os.path.exists(global_weights_path):
         raise FileNotFoundError(
             f"Global ensemble weights not found at {global_weights_path}. "
@@ -411,23 +507,23 @@ def load_ensemble_weights(weights_dir):
         )
     global_weights = pd.read_csv(global_weights_path)
     ensemble_weights["global"] = global_weights
-    print(f"Loaded global ensemble weights ({FINAL_FOLD_TYPE})")
+    print(f"Loaded global ensemble weights ({FINAL_FOLD_TYPE}, {ensemble_method})")
     return ensemble_weights
 
 
-def load_cutoffs(cutoffs_path, required=False):
+def load_cutoffs(
+    cutoffs_path,
+    required=False,
+    cutoff_source=CUTOFF_SOURCE_SELECTION,
+    threshold_method=THRESHOLD_METHOD_JACKKNIFE,
+    target_risk_pct=None,
+):
     """
-    Load prediction cutoffs for the final deployment split type.
-    
-    Parameters:
-    -----------
-    cutoffs_path : str
-        Path to the cutoffs CSV file
-        
-    Returns:
-    --------
-    cutoffs : dict
-        Dictionary containing cutoffs for each model
+    Load prediction cutoffs for a calibration track (selection_loso or deploy_loso).
+
+    The deploy_cutoffs CSV holds one pooled-OOF scalar per (source, threshold_method,
+    requested_target_risk). When target_risk_pct is given, restrict to the row whose
+    requested_target_risk matches it.
     """
     if not os.path.exists(cutoffs_path):
         msg = f"Cutoffs file not found at {cutoffs_path}"
@@ -435,20 +531,31 @@ def load_cutoffs(cutoffs_path, required=False):
             raise FileNotFoundError(msg)
         print(f"WARNING: {msg}")
         return {}
-    
+
     cutoffs_df = pd.read_csv(cutoffs_path)
-    
-    deploy_cutoffs = cutoffs_df[cutoffs_df['source'] == FINAL_FOLD_TYPE].copy()
-    
+    mask = (cutoffs_df["source"] == cutoff_source) & (
+        cutoffs_df["threshold_method"] == threshold_method
+    )
+    if target_risk_pct is not None and "requested_target_risk" in cutoffs_df.columns:
+        mask &= (
+            cutoffs_df["requested_target_risk"].astype(float)
+            - target_risk_pct / 100.0
+        ).abs() < 1e-9
+    deploy_cutoffs = cutoffs_df[mask].copy()
+
     cutoffs = {}
     for _, row in deploy_cutoffs.iterrows():
-        cutoffs[row['model']] = row['prob_cutoff']
-    
+        cutoffs[row["model"]] = row["prob_cutoff"]
+
     if required and len(cutoffs) == 0:
         raise ValueError(
-            f"No {FINAL_FOLD_TYPE} cutoffs found in required file: {cutoffs_path}"
+            f"No {cutoff_source} cutoffs with threshold_method={threshold_method} "
+            f"found in required file: {cutoffs_path}"
         )
-    print(f"Loaded cutoffs for {len(cutoffs)} models")
+    print(
+        f"Loaded cutoffs for {len(cutoffs)} models "
+        f"(source={cutoff_source}, threshold_method={threshold_method})"
+    )
     return cutoffs
 
 
@@ -484,13 +591,12 @@ def load_risk_coverage(risk_cov_path, required=False):
     return df
 
 
-def prepare_risk_curve_for_selection(risk_cov_df: pd.DataFrame) -> pd.DataFrame:
+def prepare_risk_curve_for_selection(
+    risk_cov_df: pd.DataFrame, threshold_method: str = None
+) -> pd.DataFrame:
     """
     Normalize risk-curve input to the selection schema expected by cutoff
     selection: model, prob_cutoff, mean_risk, mean_coverage (+ optional mean_kappa).
-
-    Preferred input is deploy_risk_coverage_curve_{suffix}.csv from
-    R/calibration_reject_models_final.R (model, prob_cutoff, mean_risk, mean_coverage).
     """
     required_cols = {"model", "prob_cutoff"}
     if risk_cov_df is None or risk_cov_df.empty:
@@ -502,19 +608,27 @@ def prepare_risk_curve_for_selection(risk_cov_df: pd.DataFrame) -> pd.DataFrame:
             f"{', '.join(missing)}"
         )
 
+    work = risk_cov_df
+    if threshold_method is not None and "threshold_method" in work.columns:
+        work = work[work["threshold_method"] == threshold_method].copy()
+        if work.empty:
+            raise ValueError(
+                f"No risk-coverage rows for threshold_method={threshold_method}"
+            )
+
     # If the deployable aggregated schema is already present, use it directly.
-    if {"mean_risk", "mean_coverage"}.issubset(risk_cov_df.columns):
+    if {"mean_risk", "mean_coverage"}.issubset(work.columns):
         out_cols = ["model", "prob_cutoff", "mean_risk", "mean_coverage"]
-        if "mean_kappa" in risk_cov_df.columns:
+        if "mean_kappa" in work.columns:
             out_cols.append("mean_kappa")
-        return risk_cov_df[out_cols].copy()
+        return work[out_cols].copy()
 
     # Backward-compatible fallback for raw heldout rows.
     # Hybrid selection metric:
     #   mean_risk     := 1 - accuracy            (all accepted samples)
     #   mean_coverage := coverage_known          (seen/known samples only)
-    if {"accuracy", "coverage_known"}.issubset(risk_cov_df.columns):
-        work = risk_cov_df.dropna(subset=["accuracy", "coverage_known"]).copy()
+    if {"accuracy", "coverage_known"}.issubset(work.columns):
+        work = work.dropna(subset=["accuracy", "coverage_known"]).copy()
         if work.empty:
             raise ValueError(
                 "Outer-CV risk-coverage file has no finite hybrid metrics "
@@ -522,8 +636,8 @@ def prepare_risk_curve_for_selection(risk_cov_df: pd.DataFrame) -> pd.DataFrame:
             )
         work["risk_for_selection"] = 1.0 - work["accuracy"].astype(float)
         work["coverage_for_selection"] = work["coverage_known"].astype(float)
-    elif {"accuracy", "perc_rejected"}.issubset(risk_cov_df.columns):
-        work = risk_cov_df.dropna(subset=["accuracy", "perc_rejected"]).copy()
+    elif {"accuracy", "perc_rejected"}.issubset(work.columns):
+        work = work.dropna(subset=["accuracy", "perc_rejected"]).copy()
         if work.empty:
             raise ValueError(
                 "Outer-CV risk-coverage file has no finite fallback metrics "
@@ -615,99 +729,113 @@ def choose_cutoffs_from_risk(
     return cutoffs
 
 
-def load_multivariate_params(multivariate_path):
-    """
-    Load multivariate calibration parameters for global ensemble confidence.
+MAXPROB_REJECTOR_KEYS = (
+    "svm_single_head",
+)
+RIDGE_REJECTOR_KEYS = (
+    "svm_ridge_in_model",
+)
+ALL_REJECTOR_MODES = MAXPROB_REJECTOR_KEYS + RIDGE_REJECTOR_KEYS
 
-    Parameters
-    ----------
-    multivariate_path : str
-        Path to the multivariate parameters CSV file.
+ELASTICNET_KNN_COLUMNS = ("knn10_mean_d", "knn10_min_d", "knn10_q90_d")
+PROB_MATRIX_META_COLUMNS = frozenset({"sample_name", "sample_index"})
 
-    Returns
-    -------
-    dict
-        Mapping term -> coefficient for Global_Optimized.
+
+def is_maxprob_rejector_key(rejector_key: str) -> bool:
+    return rejector_key in MAXPROB_REJECTOR_KEYS
+
+
+def is_ridge_rejector_key(rejector_key: str) -> bool:
+    return rejector_key in RIDGE_REJECTOR_KEYS
+
+
+def rejector_needs_knn10(rejector_key: str) -> bool:
+    return "knn10" in rejector_key
+
+
+def is_maxprob_single_rejector(rejector_key: str) -> bool:
+    return rejector_key == "svm_single_head"
+
+
+def is_two_head_rejector_key(rejector_key: str) -> bool:
+    return "two_head" in rejector_key
+
+
+def load_glm_params(params_path, head=None):
     """
-    if not os.path.exists(multivariate_path):
+    Load pooled GLM / glmnet rejector coefficients exported by calibration_reject_models_final.R.
+
+    Returns (params, feature_scales). feature_scales is None for max-prob GLM exports;
+    elastic-net exports include mean_x/sd_x for glmnet standardization.
+    """
+    if not os.path.exists(params_path):
         raise FileNotFoundError(
-            f"Multivariate parameters file not found at {multivariate_path}. "
+            f"GLM parameters file not found at {params_path}. "
             "Run R/calibration_reject_models_final.R after train_test_analysis.R."
         )
 
-    df = pd.read_csv(multivariate_path)
+    df = pd.read_csv(params_path)
     if df.empty:
-        raise ValueError(f"Multivariate parameters file is empty: {multivariate_path}")
+        raise ValueError(f"GLM parameters file is empty: {params_path}")
 
-    df = df[df["model"] == "Global_Optimized"].copy()
+    df = df[df["model"] == DEPLOY_BASE_MODEL].copy()
     if df.empty:
-        raise ValueError(
-            f"No Global_Optimized rows in multivariate params: {multivariate_path}"
-        )
+        raise ValueError(f"No {DEPLOY_BASE_MODEL} rows in GLM params: {params_path}")
+
+    if head is not None:
+        if "head" not in df.columns:
+            raise ValueError(
+                f"Requested head='{head}' but GLM params have no 'head' column: {params_path}"
+            )
+        df = df[df["head"] == head].copy()
+        if df.empty:
+            raise ValueError(f"No rows for head='{head}' in GLM params: {params_path}")
 
     params = {str(row["term"]): float(row["estimate"]) for _, row in df.iterrows()}
     if "(Intercept)" not in params:
-        raise ValueError(f"(Intercept) missing in multivariate params: {multivariate_path}")
-    print(f"Loaded multivariate parameters with {len(params)} terms from {multivariate_path}")
-    return params
+        raise ValueError(f"(Intercept) missing in GLM params: {params_path}")
+
+    feature_scales = None
+    if "mean_x" in df.columns and "sd_x" in df.columns:
+        feature_scales = {}
+        for _, row in df.iterrows():
+            term = str(row["term"])
+            if term == "(Intercept)":
+                continue
+            if pd.isna(row["mean_x"]) or pd.isna(row["sd_x"]):
+                raise ValueError(
+                    f"Elastic-net params missing mean_x/sd_x for term '{term}' in {params_path}. "
+                    "Re-run R/calibration_reject_models_final.R."
+                )
+            feature_scales[term] = (float(row["mean_x"]), float(row["sd_x"]))
+
+    label = f"head={head}, " if head is not None else ""
+    scale_note = f", glmnet scales for {len(feature_scales)} terms" if feature_scales else ""
+    print(f"Loaded GLM parameters ({label}{len(params)} terms{scale_note}) from {params_path}")
+    return params, feature_scales
 
 
-def resolve_calibration_method(calibration_method: str) -> str:
-    """
-    Normalize calibration method aliases.
-    """
+def resolve_rejector_mode(rejector_mode: str) -> str:
+    """Normalize deployment rejector selection."""
     aliases = {
-        "multivariate": "multivariate",
-        "multivariate_two_head": "multivariate",
-        "univariate": "univariate",
-        "univariate_two_head": "univariate",
+        "svm_single_head": "svm_single_head",
+        "svm_ridge_in_model": "svm_ridge_in_model",
+        "all": "all",
     }
-    if calibration_method not in aliases:
+    if rejector_mode not in aliases:
         raise ValueError(
-            "Unsupported calibration method. Use one of: "
-            "multivariate, univariate (legacy aliases: *_two_head)."
+            "Unsupported rejector mode. Use one of: "
+            f"{', '.join(sorted(set(aliases.keys())))}."
         )
-    return aliases[calibration_method]
+    return aliases[rejector_mode]
 
 
-def resolve_calibration_setting(calibration_setting: str) -> str:
-    """
-    Normalize calibration setting aliases.
-    """
-    aliases = {
-        "two_head": "two_head",
-        "two_head_postcal": "two_head_postcal",
-        "known_only": "known_only",
-        "known_only_logit": "known_only_logit",
-        "ood_aware": "ood_aware",
-        "ood_aware_logit": "ood_aware_logit",
-    }
-    if calibration_setting not in aliases:
-        raise ValueError(
-            "Unsupported calibration setting. Use one of: "
-            "two_head, two_head_postcal, known_only, known_only_logit, ood_aware, ood_aware_logit."
-        )
-    return aliases[calibration_setting]
-
-
-def resolve_ensemble_method(ensemble_method: str) -> str:
-    """
-    Normalize ensemble method aliases.
-    """
-    aliases = {
-        "product": "product",
-        "product_of_experts": "product",
-        "poe": "product",
-        "weighted": "weighted",
-        "weighted_sum": "weighted",
-        "sum": "weighted",
-    }
-    if ensemble_method not in aliases:
-        raise ValueError(
-            "Unsupported ensemble method. Use one of: "
-            "product, weighted."
-        )
-    return aliases[ensemble_method]
+def resolve_rejector_modes(rejector_mode: str) -> list[str]:
+    """Expand grouped rejector mode aliases."""
+    mode = resolve_rejector_mode(rejector_mode)
+    if mode == "all":
+        return list(ALL_REJECTOR_MODES)
+    return [mode]
 
 
 def final_merge_suffix(label_set_key: str) -> str:
@@ -719,50 +847,72 @@ def resolve_final_cutoffs_dir(cutoffs_root, label_set_key: str) -> str:
     return os.path.join(str(cutoffs_root), f"cutoffs_{label_set_key}")
 
 
-def resolve_final_calibration_params_path(
-    cutoffs_root,
-    label_set_key: str,
-    calibration_method: str,
-    calibration_setting: str,
+def resolve_final_glm_params_path(
+    cutoffs_root, label_set_key: str, rejector_key: str, cutoff_source: str = CUTOFF_SOURCE_SELECTION
 ) -> str:
-    """Path to ood_aware deployment GLM exported by calibration_reject_models_final.R."""
-    method = resolve_calibration_method(calibration_method)
-    setting = resolve_calibration_setting(calibration_setting)
-    if method != "multivariate":
+    """Path to rejector params exported by calibration rejector scripts."""
+    if rejector_key not in ALL_REJECTOR_MODES:
         raise ValueError(
-            "Final deployment exports multivariate ood_aware GLM only; "
-            f"got calibration_method='{calibration_method}'."
+            f"resolve_final_glm_params_path requires a concrete rejector_key, got '{rejector_key}'."
         )
-    if setting not in {"ood_aware", "ood_aware_logit"}:
-        raise ValueError(
-            "Final deployment exports ood_aware single-head GLM only; "
-            f"got calibration_setting='{calibration_setting}'. Use ood_aware (default)."
-        )
-    merge_suffix = final_merge_suffix(label_set_key)
+    merge_suffix = calibration_artifact_suffix(label_set_key, cutoff_source)
     params_dir = os.path.join(str(cutoffs_root), f"multivariate_params_{label_set_key}")
-    return os.path.join(params_dir, f"multivariate_params_{setting}{merge_suffix}.csv")
+    params_key = enet_params_file_key(rejector_key)
+    return os.path.join(params_dir, f"multivariate_params_{params_key}{merge_suffix}.csv")
 
 
 def load_final_deployment_cutoffs(
     cutoffs_root,
     label_set_key: str,
+    rejector_key: str,
     max_accepted_risk_pct=None,
+    cutoff_source: str = CUTOFF_SOURCE_SELECTION,
+    threshold_method: str = THRESHOLD_METHOD_JACKKNIFE,
 ) -> dict:
     """
     Load deployment cutoffs from final-model exports.
 
-    Default: deploy_cutoffs_{suffix}.csv (primary 5% target risk).
-    Custom risk: deploy_risk_coverage_curve_{suffix}.csv from nested final LOSO.
+    The deployed cutoff is the pooled-OOF scalar in deploy_cutoffs_{rejector}_{suffix}.csv
+    (one row per source/threshold_method/target risk). This is the value reported in the
+    deploy tables and the leave-one-study-out analogue validated by the publication LOSO
+    calibration curve. We use it whenever the requested operating point matches a target
+    risk present in that file. Only risk levels the deploy-cutoff table does not cover fall
+    back to the per-fold risk-coverage curve.
     """
-    cutoffs_dir = resolve_final_cutoffs_dir(cutoffs_root, label_set_key)
-    merge_suffix = final_merge_suffix(label_set_key)
-    if max_accepted_risk_pct is not None:
-        risk_curve_path = os.path.join(
-            cutoffs_dir, f"deploy_risk_coverage_curve{merge_suffix}.csv"
+    if rejector_key not in ALL_REJECTOR_MODES:
+        raise ValueError(
+            f"load_final_deployment_cutoffs requires a concrete rejector_key, got '{rejector_key}'."
         )
-        print(f"Loading deploy risk-coverage curve from: {risk_curve_path}")
+    cutoffs_dir = resolve_final_cutoffs_dir(cutoffs_root, label_set_key)
+    merge_suffix = calibration_artifact_suffix(label_set_key, cutoff_source)
+    deploy_cutoffs_path = os.path.join(
+        cutoffs_dir, f"deploy_cutoffs_{rejector_key}{merge_suffix}.csv"
+    )
+    if max_accepted_risk_pct is not None:
+        pooled = load_cutoffs(
+            deploy_cutoffs_path,
+            required=False,
+            cutoff_source=cutoff_source,
+            threshold_method=threshold_method,
+            target_risk_pct=max_accepted_risk_pct,
+        )
+        if pooled:
+            return pooled
+
+        # Operating point not in the deploy-cutoff table: select from the risk curve.
+        risk_curve_path = os.path.join(
+            cutoffs_dir, f"deploy_risk_coverage_curve_{rejector_key}{merge_suffix}.csv"
+        )
         risk_df = load_risk_coverage(risk_curve_path, required=True)
-        summary = prepare_risk_curve_for_selection(risk_df)
+        if "threshold_method" not in risk_df.columns:
+            raise ValueError(
+                f"Risk-coverage curve {risk_curve_path} lacks a threshold_method column; "
+                f"cannot safely select a {threshold_method} cutoff."
+            )
+        print(f"Loading deploy risk-coverage curve from: {risk_curve_path}")
+        summary = prepare_risk_curve_for_selection(
+            risk_df, threshold_method=threshold_method
+        )
         cutoffs = choose_cutoffs_from_risk(summary, max_accepted_risk_pct / 100.0)
         if not cutoffs:
             raise ValueError(
@@ -771,71 +921,33 @@ def load_final_deployment_cutoffs(
             )
         return cutoffs
 
-    deploy_cutoffs_path = os.path.join(cutoffs_dir, f"deploy_cutoffs{merge_suffix}.csv")
     print(f"Loading deployment cutoffs from: {deploy_cutoffs_path}")
-    return load_cutoffs(deploy_cutoffs_path, required=True)
-
-
-def build_knn_rejection_pipe(fs_method="eta2"):
-    """KNN reject-feature preprocessing pipe (matches run_final_train.py)."""
-    if fs_method == "eta2":
-        feature_selector = transformers.FeatureSelectionEta()
-    elif fs_method == "mad":
-        feature_selector = transformers.FeatureSelection2()
-    else:
-        raise ValueError(f"Unknown fs_method '{fs_method}'. Use 'mad' or 'eta2'.")
-    return Pipeline([
-        ("DEseq2", transformers.DESeq2RatioNormalizer()),
-        ("feature_selection", feature_selector),
-        ("scaler", StandardScaler()),
-    ])
-
-
-def load_training_reference_data(fs_method="eta2"):
-    """
-    Load filtered training cohort used for final model fitting (KNN reference space).
-    """
-    base_path = Path(__file__).resolve().parent.parent
-    data_path = base_path / "data"
-    X_all, y_all, study_all = train_test.load_data(data_path)
-    X, y, study_labels = train_test.filter_data(X_all, y_all, study_all, min_n=10)
-    y_encoded, _ = train_test.encode_labels(y)
-    print(
-        f"Training reference for KNN reject features: {X.shape[0]} samples, "
-        f"fs_method={fs_method}"
-    )
-    return {
-        "X": X,
-        "y": y_encoded,
-        "study_labels": study_labels,
-        "fs_method": fs_method,
-    }
-
-
-def compute_knn_features_for_inference(training_ref, X_new):
-    """KNN distance summaries for new samples vs full training reference."""
-    pipe = build_knn_rejection_pipe(training_ref["fs_method"])
-    return train_test.compute_knn_features_full_reference(
-        training_ref["X"],
-        training_ref["y"],
-        training_ref["study_labels"],
-        X_new,
-        pipe,
-        fs_method=training_ref["fs_method"],
+    return load_cutoffs(
+        deploy_cutoffs_path,
+        required=True,
+        cutoff_source=cutoff_source,
+        threshold_method=threshold_method,
     )
 
 
-def compute_conformal_set_size_90(prob_mat, alpha=0.10):
-    """Smallest top-k class set whose cumulative prob >= 1 - alpha (matches R)."""
-    p_sorted = np.sort(prob_mat, axis=1)[:, ::-1]
-    cum_sorted = np.cumsum(p_sorted, axis=1)
-    threshold = 1.0 - alpha
-    n_classes = prob_mat.shape[1]
-    sizes = np.empty(prob_mat.shape[0], dtype=np.float64)
-    for i, cs in enumerate(cum_sorted):
-        hit = np.where(cs >= threshold)[0]
-        sizes[i] = float(hit[0] + 1) if len(hit) > 0 else float(n_classes)
-    return sizes
+def load_final_rejector_params(params_path: str, rejector_key: str):
+    """Load rejector coefficients (max-prob GLM or ridge glmnet export)."""
+    if is_maxprob_single_rejector(rejector_key):
+        coef, scales = load_glm_params(params_path, head="accept_combined")
+        return coef, None, scales, None
+    if is_maxprob_rejector_key(rejector_key) and is_two_head_rejector_key(rejector_key):
+        correct_coef, correct_scales = load_glm_params(params_path, head="correct_given_id")
+        id_coef, id_scales = load_glm_params(params_path, head="id")
+        return correct_coef, id_coef, correct_scales, id_scales
+    if is_ridge_rejector_key(rejector_key) and not is_two_head_rejector_key(rejector_key):
+        coef, scales = load_glm_params(params_path, head="accept_combined")
+        return coef, None, scales, None
+    if is_ridge_rejector_key(rejector_key) and is_two_head_rejector_key(rejector_key):
+        correct_coef, correct_scales = load_glm_params(params_path, head="correct_given_id")
+        id_coef, id_scales = load_glm_params(params_path, head="id")
+        return correct_coef, id_coef, correct_scales, id_scales
+    raise ValueError(f"load_final_rejector_params does not support rejector_key='{rejector_key}'.")
+
 
 def predict_nn_standard(X, models, sample_names):
     """
@@ -1325,26 +1437,34 @@ def predict_ensemble_ovr(individual_predictions, individual_prob_matrices, ensem
     return results_df, prob_matrix_df
 
 
-def merge_probability_classes(prob_matrix_df):
+def merge_probability_classes(prob_matrix_df, merge_method="sum"):
     """
-    Merge specific classes in the probability matrix using summed probabilities:
-    1. Sum probabilities for all classes with 'MDS' or 'TP53' in their name -> "MDS.r"
-    2. Sum probabilities for all other KMT2A classes (excluding MLLT3 fusion) -> "other.KMT2A"
-    3. Sum probabilities for MECOM-related classes (GATA2;MECOM, MECOM other) -> "MECOM"
+    Merge subtype-family classes in the probability matrix into single columns:
+    1. classes with 'MDS' or 'TP53' in their name -> "MDS.r"
+    2. other KMT2A classes (excluding MLLT3 fusion) -> "other.KMT2A"
+    3. MECOM-related classes (GATA2;MECOM, MECOM other) -> "MECOM"
 
+    merge_method controls how member probabilities are combined:
+    - "sum": marginal probability of the family (matches R merge_prob_method="sum").
+    - "max": max member probability (matches R merge_prob_method="max").
     After merging, row probabilities are renormalized to sum to 1.
-    Matches R logic in utility_functions.R (merge_prob_method = "sum").
 
     Parameters:
     -----------
     prob_matrix_df : pd.DataFrame
         Probability matrix DataFrame with 'sample_name' column and class probability columns
+    merge_method : str
+        "sum" or "max".
 
     Returns:
     --------
     prob_matrix_df : pd.DataFrame
         Modified probability matrix with merged classes
     """
+    if merge_method not in ("sum", "max"):
+        raise ValueError(f"merge_method must be 'sum' or 'max', got '{merge_method}'")
+    combine = (lambda cols: prob_matrix_df[cols].max(axis=1)) if merge_method == "max" \
+        else (lambda cols: prob_matrix_df[cols].sum(axis=1))
     # Get all column names except 'sample_name'
     class_columns = [col for col in prob_matrix_df.columns if col != 'sample_name']
 
@@ -1367,15 +1487,15 @@ def merge_probability_classes(prob_matrix_df):
     ]
 
     if mds_classes:
-        prob_matrix_df['MDS.r'] = prob_matrix_df[mds_classes].sum(axis=1)
+        prob_matrix_df['MDS.r'] = combine(mds_classes)
         prob_matrix_df = prob_matrix_df.drop(columns=mds_classes)
 
     if other_kmt2a_classes:
-        prob_matrix_df['other.KMT2A'] = prob_matrix_df[other_kmt2a_classes].sum(axis=1)
+        prob_matrix_df['other.KMT2A'] = combine(other_kmt2a_classes)
         prob_matrix_df = prob_matrix_df.drop(columns=other_kmt2a_classes)
 
     if mecom_classes:
-        prob_matrix_df['MECOM'] = prob_matrix_df[mecom_classes].sum(axis=1)
+        prob_matrix_df['MECOM'] = combine(mecom_classes)
         prob_matrix_df = prob_matrix_df.drop(columns=mecom_classes)
 
     # Renormalize so each row sums to 1 (class columns only)
@@ -1405,21 +1525,19 @@ def apply_cutoffs(predictions_dict, cutoffs):
         Updated dictionary with cutoff information
     """
     print("Applying probability cutoffs...")
-    
-    # Final deployment path is ensemble-only.
-    cutoff_mapping = {"Global_Ensemble": "Global_Optimized"}
+
+    cutoff_mapping = {DEPLOYMENT_PREDICTOR: DEPLOY_BASE_MODEL}
 
     for model_name, df in predictions_dict.items():
-        if model_name != "Global_Ensemble":
+        if model_name != DEPLOYMENT_PREDICTOR:
             continue
         cutoff_key = cutoff_mapping.get(model_name, model_name)
 
-        # Enforce multivariate-calibrated confidence only for final predictor.
         score_col = "prediction_prob_calibrated"
         if score_col not in df.columns:
             raise ValueError(
-                "Global_Ensemble requires calibrated confidence "
-                "(prediction_prob_calibrated), but it is missing."
+                f"{DEPLOYMENT_PREDICTOR} requires calibrated confidence "
+                f"({score_col}), but it is missing."
             )
 
         if cutoff_key not in cutoffs:
@@ -1433,175 +1551,230 @@ def apply_cutoffs(predictions_dict, cutoffs):
     return predictions_dict
 
 
-def _build_rejection_feature_map(
-    global_prob_df,
-    individual_prob_matrices,
-    knn_features=None,
-):
+def _score_logistic_head(feature_map, params, feature_scales=None):
+    """Score a logistic GLM or glmnet head from saved R coefficients."""
+    return score_logistic_head(feature_map, params, feature_scales=feature_scales)
+
+
+def apply_maxprob_single_head_confidence(global_pred_df, accept_params):
     """
-    Build multivariate rejection features (matches R get_rejection_features_from_matrix).
+    Max-prob single-head: P(accept_combined | max_prob).
+    Matches R maxprob_single_head on accept_combined target.
     """
-    class_cols = [c for c in global_prob_df.columns if c != "sample_name"]
-    if not class_cols:
-        return None
-
-    prob_mat = global_prob_df[class_cols].to_numpy(dtype=np.float64)
-    top1_idx = np.argmax(prob_mat, axis=1)
-    top1_prob = prob_mat[np.arange(prob_mat.shape[0]), top1_idx]
-
-    if prob_mat.shape[1] > 1:
-        part = np.partition(prob_mat, -2, axis=1)
-        top2_prob = part[:, -2]
-    else:
-        top2_prob = np.zeros(prob_mat.shape[0], dtype=np.float64)
-    margin = top1_prob - top2_prob
-
-    clipped = np.clip(prob_mat, 1e-12, 1.0)
-    entropy = -np.sum(clipped * np.log(clipped), axis=1) / np.log(max(prob_mat.shape[1], 2))
-    entropy = np.clip(entropy, 0.0, 1.0)
-
-    per_model_top1_prob = []
-    per_model_top1_class = []
-    for model_name in ("NN", "SVM", "XGBOOST"):
-        df = individual_prob_matrices.get(model_name)
-        if df is None:
-            continue
-
-        mapping = {standardize_class_names([c])[0]: c for c in df.columns if c != "sample_name"}
-        model_class_cols = [c for c in df.columns if c != "sample_name"]
-        model_top1_prob = np.zeros(prob_mat.shape[0], dtype=np.float64)
-        model_top1_cls = np.array([""] * prob_mat.shape[0], dtype=object)
-
-        for i, cls_idx in enumerate(top1_idx):
-            cls_name = class_cols[cls_idx]
-            orig_col = mapping.get(cls_name)
-            if orig_col is not None:
-                model_top1_prob[i] = float(df.iloc[i][orig_col])
-            if model_class_cols:
-                row_vals = df.iloc[i][model_class_cols].to_numpy(dtype=np.float64)
-                top_local_idx = int(np.argmax(row_vals))
-                model_top1_cls[i] = standardize_class_names([model_class_cols[top_local_idx]])[0]
-
-        per_model_top1_prob.append(model_top1_prob)
-        per_model_top1_class.append(model_top1_cls)
-
-    if len(per_model_top1_prob) >= 2:
-        top1_var = np.var(np.column_stack(per_model_top1_prob), axis=1)
-    else:
-        top1_var = np.zeros(prob_mat.shape[0], dtype=np.float64)
-
-    if per_model_top1_class:
-        ensemble_top1_class = np.array([class_cols[i] for i in top1_idx], dtype=object)
-        agree_counts = np.zeros(prob_mat.shape[0], dtype=np.float64)
-        for model_preds in per_model_top1_class:
-            agree_counts += (model_preds == ensemble_top1_class).astype(np.float64)
-        n_models_agree = agree_counts
-    else:
-        n_models_agree = np.zeros(prob_mat.shape[0], dtype=np.float64)
-
-    top1_clipped = np.clip(top1_prob, 1e-6, 1.0 - 1e-6)
-    feature_map = {
-        "max_prob": top1_prob,
-        "logit_max_prob": np.log(top1_clipped / (1.0 - top1_clipped)),
-        "margin": margin,
-        "entropy": entropy,
-        "n_models_agree": n_models_agree,
-        "top1_prob_variance_across_models": top1_var,
-        "conformal_set_size_90": compute_conformal_set_size_90(prob_mat),
-    }
-
-    if knn_features:
-        for col in train_test.KNN_DISTANCE_COLUMNS:
-            vals = knn_features.get(col)
-            if vals is not None:
-                feature_map[col] = np.asarray(vals, dtype=np.float64)
-
-    return feature_map
+    max_prob = global_pred_df["prediction_prob"].to_numpy(dtype=np.float64)
+    feature_map = {"max_prob": max_prob}
+    p_accept = _score_logistic_head(feature_map, accept_params)
+    global_pred_df = global_pred_df.copy()
+    global_pred_df["prediction_prob_calibrated"] = p_accept
+    return global_pred_df
 
 
-def _score_logistic_head(feature_map, params):
-    """
-    Score a logistic regression head from saved R GLM coefficients.
-    """
-    if not params:
-        raise ValueError("Calibration parameters are empty.")
-    if not feature_map:
-        raise ValueError("Rejection feature map is empty.")
-    n_rows = len(next(iter(feature_map.values())))
-    linear = np.full(n_rows, float(params["(Intercept)"]), dtype=np.float64)
-    for term, coef in params.items():
-        if term == "(Intercept)":
-            continue
-        if term not in feature_map:
-            raise ValueError(
-                f"Calibration model requires feature '{term}' but it was not computed."
-            )
-        linear += float(coef) * feature_map[term]
-    return 1.0 / (1.0 + np.exp(-linear))
-
-
-def apply_global_two_head_product_confidence(
+def apply_maxprob_two_head_product_confidence(
     global_pred_df,
-    global_prob_df,
-    individual_prob_matrices,
     correctness_params,
     ood_head_params,
 ):
     """
-    Apply multivariate two-head confidence: P(correct|ID) * P(ID).
+    Max-prob two-head product: P(correct|max_prob) * P(ID|max_prob).
+    Matches R maxprob_two_head_product + two_head_combine=product.
     """
-    feature_map = _build_rejection_feature_map(global_prob_df, individual_prob_matrices)
-    if feature_map is None:
-        return global_pred_df
-
+    max_prob = global_pred_df["prediction_prob"].to_numpy(dtype=np.float64)
+    feature_map = {"max_prob": max_prob}
     p_correct = _score_logistic_head(feature_map, correctness_params)
     p_id = _score_logistic_head(feature_map, ood_head_params)
+    global_pred_df = global_pred_df.copy()
     global_pred_df["prediction_prob_calibrated"] = p_correct * p_id
     global_pred_df["prediction_prob_correct_head"] = p_correct
     global_pred_df["prediction_prob_id_head"] = p_id
     return global_pred_df
 
 
-def apply_global_single_head_confidence(
+def apply_maxprob_two_head_min_confidence(
+    global_pred_df,
+    correctness_params,
+    ood_head_params,
+):
+    """Max-prob two-head min: min(P(correct|max_prob), P(ID|max_prob))."""
+    max_prob = global_pred_df["prediction_prob"].to_numpy(dtype=np.float64)
+    feature_map = {"max_prob": max_prob}
+    p_correct = _score_logistic_head(feature_map, correctness_params)
+    p_id = _score_logistic_head(feature_map, ood_head_params)
+    global_pred_df = global_pred_df.copy()
+    global_pred_df["prediction_prob_calibrated"] = np.minimum(p_correct, p_id)
+    global_pred_df["prediction_prob_correct_head"] = p_correct
+    global_pred_df["prediction_prob_id_head"] = p_id
+    return global_pred_df
+
+
+def _class_probability_matrix(prob_df):
+    """Extract class probability matrix from a prediction probability DataFrame."""
+    prob_cols = [c for c in prob_df.columns if c not in PROB_MATRIX_META_COLUMNS]
+    if not prob_cols:
+        raise ValueError("Probability matrix has no class columns.")
+    return prob_df[prob_cols].to_numpy(dtype=np.float64)
+
+
+def build_rejection_feature_map(global_pred_df, global_prob_df, base_prob_matrices):
+    """
+    Rejection features for elastic-net heads (matches R get_rejection_features_from_matrix).
+    """
+    prob_mat = _class_probability_matrix(global_prob_df)
+    n_rows, n_classes = prob_mat.shape
+    pred_indices = np.argmax(prob_mat, axis=1)
+    row_idx = np.arange(n_rows)
+    max_prob = prob_mat[row_idx, pred_indices]
+
+    prob_mod = prob_mat.copy()
+    prob_mod[row_idx, pred_indices] = -np.inf
+    second_prob = np.max(prob_mod, axis=1)
+    margin = max_prob - second_prob
+
+    prob_clipped = np.clip(prob_mat, 1e-12, None)
+    if n_classes > 1:
+        entropy = -np.sum(prob_clipped * np.log(prob_clipped), axis=1) / np.log(n_classes)
+        entropy = np.clip(entropy, 0.0, 1.0)
+    else:
+        entropy = np.zeros(n_rows, dtype=np.float64)
+
+    top1_probs = []
+    for model_name in ("SVM", "XGBOOST", "NN"):
+        prob_df = base_prob_matrices.get(model_name)
+        if prob_df is None:
+            continue
+        top1_probs.append(np.max(_class_probability_matrix(prob_df), axis=1))
+    if len(top1_probs) >= 2:
+        top1_var = np.var(np.column_stack(top1_probs), axis=1)
+        top1_var = np.maximum(0.0, top1_var)
+        top1_var[~np.isfinite(top1_var)] = 0.0
+    else:
+        top1_var = np.zeros(n_rows, dtype=np.float64)
+
+    p_sorted = np.sort(prob_mat, axis=1)[:, ::-1]
+    cumsum = np.cumsum(p_sorted, axis=1)
+    conformal_threshold = 0.9
+    conformal_size = np.empty(n_rows, dtype=np.float64)
+    for i in range(n_rows):
+        hits = np.where(cumsum[i] >= conformal_threshold)[0]
+        conformal_size[i] = float(hits[0] + 1) if len(hits) else float(n_classes)
+
+    return {
+        "max_prob": max_prob,
+        "margin": margin,
+        "entropy": entropy,
+        "top1_prob_variance_across_models": top1_var,
+        "conformal_set_size_90": conformal_size,
+    }
+
+
+def load_cohort_knn_reference(data_path=None, fs_method="eta2"):
+    """Training-cohort reference for KNN rejection features on new samples."""
+    base_path = Path(__file__).resolve().parent.parent
+    if data_path is None:
+        data_path = base_path / "data"
+    X_all, y_all, study_all = train_test.load_data(str(data_path))
+    valid_mask = train_test.filtered_cohort_mask(y_all, study_all)
+    X_cohort = X_all[valid_mask]
+    y_cohort = y_all[valid_mask]
+    study_cohort = study_all[valid_mask]
+    y_encoded, _ = train_test.encode_labels(y_cohort)
+    pipe = train_test.build_knn_rejection_pipe(fs_method=fs_method)
+    return {
+        "X_cohort": X_cohort,
+        "y_cohort": y_encoded,
+        "study_cohort": study_cohort,
+        "pipe": pipe,
+        "fs_method": fs_method,
+    }
+
+
+def compute_knn_rejection_features(X_new, cohort_knn_reference):
+    """KNN distance summaries for elastic-net rejectors."""
+    knn_feats = train_test.compute_knn_features_full_reference(
+        cohort_knn_reference["X_cohort"],
+        cohort_knn_reference["y_cohort"],
+        cohort_knn_reference["study_cohort"],
+        X_new,
+        cohort_knn_reference["pipe"],
+        fs_method=cohort_knn_reference["fs_method"],
+    )
+    return {
+        col: np.asarray(knn_feats[col], dtype=np.float64)
+        for col in ELASTICNET_KNN_COLUMNS
+    }
+
+
+def apply_enet_single_head_confidence(
+    global_pred_df, global_prob_df, base_prob_matrices, accept_params, knn_feature_map,
+    accept_scales=None,
+):
+    """Elastic-net single-head: P(accept_combined | full rejection feature set)."""
+    feature_map = build_rejection_feature_map(
+        global_pred_df, global_prob_df, base_prob_matrices
+    )
+    feature_map.update(knn_feature_map)
+    p_accept = _score_logistic_head(feature_map, accept_params, feature_scales=accept_scales)
+    global_pred_df = global_pred_df.copy()
+    global_pred_df["prediction_prob_calibrated"] = p_accept
+    return global_pred_df
+
+
+def apply_enet_two_head_confidence(
     global_pred_df,
     global_prob_df,
-    individual_prob_matrices,
-    single_head_params,
-    knn_features=None,
+    base_prob_matrices,
+    correctness_params,
+    ood_head_params,
+    knn_feature_map,
+    combine="product",
+    correctness_scales=None,
+    ood_scales=None,
 ):
-    """
-    Apply single-head confidence: P(target | features),
-    where target is either correctness (known_only*) or correctness-and-ID (ood_aware*).
-    """
-    feature_map = _build_rejection_feature_map(
-        global_prob_df, individual_prob_matrices, knn_features=knn_features
+    """Elastic-net two-head on the full rejection feature set (product or min combine)."""
+    feature_map = build_rejection_feature_map(
+        global_pred_df, global_prob_df, base_prob_matrices
     )
-    if feature_map is None:
-        return global_pred_df
-    p_target = _score_logistic_head(feature_map, single_head_params)
-    global_pred_df["prediction_prob_calibrated"] = p_target
+    feature_map.update(knn_feature_map)
+    p_correct = _score_logistic_head(
+        feature_map, correctness_params, feature_scales=correctness_scales
+    )
+    p_id = _score_logistic_head(
+        feature_map, ood_head_params, feature_scales=ood_scales
+    )
+    if combine == "product":
+        p_combined = p_correct * p_id
+    elif combine == "min":
+        p_combined = np.minimum(p_correct, p_id)
+    else:
+        raise ValueError(f"Unsupported two-head combine for elastic-net: {combine}")
+    global_pred_df = global_pred_df.copy()
+    global_pred_df["prediction_prob_calibrated"] = p_combined
+    global_pred_df["prediction_prob_correct_head"] = p_correct
+    global_pred_df["prediction_prob_id_head"] = p_id
     return global_pred_df
 
 
-def apply_two_head_postcalibration(global_pred_df, postcal_params):
-    """
-    Apply a final logistic recalibration on top of two-head product score.
-    """
-    if not postcal_params:
-        raise ValueError("two_head_postcal requires post-calibration parameters.")
-    if "prediction_prob_calibrated" not in global_pred_df.columns:
-        raise ValueError("two_head_postcal requires prediction_prob_calibrated from two_head score.")
-
-    eps = 1e-6
-    raw_score = np.clip(global_pred_df["prediction_prob_calibrated"].to_numpy(dtype=np.float64), eps, 1 - eps)
-    logit_score = np.log(raw_score / (1.0 - raw_score))
-    intercept = float(postcal_params.get("(Intercept)", 0.0))
-    slope = float(postcal_params.get("logit_score", 1.0))
-    linear = intercept + slope * logit_score
-    calibrated = 1.0 / (1.0 + np.exp(-linear))
-    global_pred_df["prediction_prob_two_head_raw"] = raw_score
-    global_pred_df["prediction_prob_calibrated"] = calibrated
-    return global_pred_df
+def apply_enet_two_head_product_confidence(
+    global_pred_df,
+    global_prob_df,
+    base_prob_matrices,
+    correctness_params,
+    ood_head_params,
+    knn_feature_map,
+    correctness_scales=None,
+    ood_scales=None,
+):
+    """Elastic-net two-head product on the full rejection feature set."""
+    return apply_enet_two_head_confidence(
+        global_pred_df,
+        global_prob_df,
+        base_prob_matrices,
+        correctness_params,
+        ood_head_params,
+        knn_feature_map,
+        combine="product",
+        correctness_scales=correctness_scales,
+        ood_scales=ood_scales,
+    )
 
 
 def save_predictions(predictions_dict, prob_matrices_dict, output_dir, input_filename_prefix, merge_suffix=""):
@@ -1644,164 +1817,174 @@ def run_predictions(
     X,
     sample_names,
     models,
-    ensemble_weights,
     cutoffs,
-    multivariate_params=None,
-    ood_head_params=None,
-    postcal_params=None,
-    calibration_method="multivariate",
-    calibration_setting="two_head",
-    ensemble_method="product",
+    rejector_params,
+    rejector_key,
+    id_head_params=None,
     merge_classes=False,
-    training_ref=None,
+    merge_method="sum",
+    cohort_knn_reference=None,
+    rejector_scales=None,
+    id_head_scales=None,
 ):
-    """
-    Run prediction pipeline for a single version (merged or unmerged).
-    
-    Parameters:
-    -----------
-    X : np.ndarray
-        Input data (samples x genes)
-    sample_names : list
-        Sample identifiers
-    models : dict
-        Dictionary containing loaded models
-    ensemble_weights : dict
-        Dictionary containing ensemble weights
-    cutoffs : dict
-        Dictionary containing cutoffs for each model
-    multivariate_params : dict
-        Coefficients for the correctness head, P(correct | ID, features)
-    ood_head_params : dict
-        Coefficients for the OOD head, P(ID | features)
-    postcal_params : dict
-        Coefficients for optional post-calibration on two-head product score
-    calibration_method : str
-        Confidence model family. Supported:
-        - multivariate (default)
-        - univariate
-    calibration_setting : str
-        Calibration target setting. Supported:
-        - two_head
-        - two_head_postcal
-        - known_only
-        - known_only_logit
-        - ood_aware
-        - ood_aware_logit
-    ensemble_method : str
-        Ensemble aggregation method. Supported:
-        - product (product-of-experts)
-        - weighted (weighted sum)
-    merge_classes : bool
-        Whether to merge classes in probability matrices
-    training_ref : dict, optional
-        Filtered training cohort for KNN reject features (required for final GLM)
-        
-    Returns:
-    --------
-    predictions : dict
-        Dictionary of prediction DataFrames
-    prob_matrices : dict
-        Dictionary of probability matrix DataFrames
-    """
+    """Run SVM deployment predictions with one rejector recipe."""
     print(f"\n{'='*60}")
-    print(f"Running predictions ({'MERGED' if merge_classes else 'UNMERGED'} classes)")
+    print(f"Running SVM predictions ({'MERGED' if merge_classes else 'UNMERGED'} classes)")
+    print(f"Rejector: {rejector_key}")
     print(f"{'='*60}")
-    
-    # Build individual model probabilities only as ensemble experts.
+
+    if "SVM" not in models:
+        raise ValueError("SVM model is required for deployment.")
+
     predictions = {}
     prob_matrices = {}
-    
-    # Individual model predictions
-    if 'NN' in models:
-        predictions['NN'], prob_matrices['NN'] = predict_nn_standard(X, models, sample_names)
-    
-    if 'SVM' in models:
-        predictions['SVM'], prob_matrices['SVM'] = predict_ovr_models(X, models, 'SVM', sample_names)
-    
-    if 'XGBOOST' in models:
-        predictions['XGBOOST'], prob_matrices['XGBOOST'] = predict_ovr_models(X, models, 'XGBOOST', sample_names)
-    
-    # Apply class merging to expert probability matrices if requested.
+    predictions[DEPLOYMENT_PREDICTOR], prob_matrices[DEPLOYMENT_PREDICTOR] = predict_ovr_models(
+        X, models, "SVM", sample_names
+    )
+
     if merge_classes:
-        for model_name in prob_matrices.keys():
-            prob_matrices[model_name] = merge_probability_classes(prob_matrices[model_name].copy())
-    
-    ensemble_method = resolve_ensemble_method(ensemble_method)
+        prob_matrices[DEPLOYMENT_PREDICTOR] = merge_probability_classes(
+            prob_matrices[DEPLOYMENT_PREDICTOR].copy(), merge_method=merge_method
+        )
 
-    # Ensemble predictions
-    if 'global' in ensemble_weights:
-        if ensemble_method == "product":
-            predictions['Global_Ensemble'], prob_matrices['Global_Ensemble'] = predict_ensemble_global(
-                predictions, prob_matrices, ensemble_weights, sample_names
-            )
-        else:
-            predictions['Global_Ensemble'], prob_matrices['Global_Ensemble'] = predict_ensemble_weighted_global(
-                predictions, prob_matrices, ensemble_weights, sample_names
-            )
+    if not rejector_params:
+        raise ValueError("Rejector parameters are required.")
+
+    deploy_pred = predictions[DEPLOYMENT_PREDICTOR]
+    deploy_prob = prob_matrices[DEPLOYMENT_PREDICTOR]
+    svm_only_probs = {DEPLOYMENT_PREDICTOR: deploy_prob}
+
+    if is_maxprob_single_rejector(rejector_key):
+        deploy_pred = apply_maxprob_single_head_confidence(deploy_pred, rejector_params)
+    elif rejector_key == "svm_two_head_min":
+        if not id_head_params:
+            raise ValueError("ID-head parameters are required for svm_two_head_min.")
+        deploy_pred = apply_maxprob_two_head_min_confidence(
+            deploy_pred, rejector_params, id_head_params
+        )
+    elif is_ridge_rejector_key(rejector_key) and not is_two_head_rejector_key(rejector_key):
+        knn_map = {}
+        if rejector_needs_knn10(rejector_key):
+            if cohort_knn_reference is None:
+                raise ValueError(f"cohort_knn_reference is required for {rejector_key}.")
+            knn_map = compute_knn_rejection_features(X, cohort_knn_reference)
+        deploy_pred = apply_enet_single_head_confidence(
+            deploy_pred, deploy_prob, svm_only_probs, rejector_params, knn_map,
+            accept_scales=rejector_scales,
+        )
+    elif is_ridge_rejector_key(rejector_key) and rejector_key.endswith("_two_head_min"):
+        if not id_head_params:
+            raise ValueError(f"ID-head parameters are required for {rejector_key}.")
+        knn_map = {}
+        if rejector_needs_knn10(rejector_key):
+            if cohort_knn_reference is None:
+                raise ValueError(f"cohort_knn_reference is required for {rejector_key}.")
+            knn_map = compute_knn_rejection_features(X, cohort_knn_reference)
+        deploy_pred = apply_enet_two_head_confidence(
+            deploy_pred, deploy_prob, svm_only_probs, rejector_params, id_head_params,
+            knn_map, combine="min",
+            correctness_scales=rejector_scales, ood_scales=id_head_scales,
+        )
     else:
-        raise ValueError("Global ensemble weights are required for prediction.")
+        raise ValueError(f"Unsupported rejector_key in run_predictions: {rejector_key}")
 
-    # Apply class merging to ensemble probability matrices if requested
-    if merge_classes and 'Global_Ensemble' in prob_matrices:
-        prob_matrices['Global_Ensemble'] = merge_probability_classes(prob_matrices['Global_Ensemble'].copy())
-    
-    calibration_method = resolve_calibration_method(calibration_method)
-    calibration_setting = resolve_calibration_setting(calibration_setting)
-
-    # Apply selected calibration to global ensemble only.
-    if not multivariate_params:
-        raise ValueError(
-            "Calibration parameters are required for final "
-            "ensemble predictions."
-        )
-    if calibration_setting in {"two_head", "two_head_postcal"}:
-        if not ood_head_params:
-            raise ValueError(
-                f"OOD-head parameters are required for {calibration_setting} ensemble predictions."
-            )
-        print(
-            f"Applying {calibration_method}/{calibration_setting} confidence to "
-            f"{ensemble_method} global ensemble..."
-        )
-        predictions["Global_Ensemble"] = apply_global_two_head_product_confidence(
-            predictions["Global_Ensemble"],
-            prob_matrices["Global_Ensemble"],
-            prob_matrices,
-            multivariate_params,
-            ood_head_params,
-        )
-        if calibration_setting == "two_head_postcal":
-            predictions["Global_Ensemble"] = apply_two_head_postcalibration(
-                predictions["Global_Ensemble"],
-                postcal_params,
-            )
-    else:
-        if training_ref is None:
-            raise ValueError(
-                "training_ref is required for final ood_aware calibration "
-                "(KNN reject features need the training reference cohort)."
-            )
-        knn_features = compute_knn_features_for_inference(training_ref, X)
-        print(
-            f"Applying {calibration_method}/{calibration_setting} confidence to "
-            f"{ensemble_method} global ensemble..."
-        )
-        predictions["Global_Ensemble"] = apply_global_single_head_confidence(
-            predictions["Global_Ensemble"],
-            prob_matrices["Global_Ensemble"],
-            prob_matrices,
-            multivariate_params,
-            knn_features=knn_features,
-        )
-
-    # Apply cutoffs to predictions (uses calibrated prob if present)
+    predictions[DEPLOYMENT_PREDICTOR] = deploy_pred
     predictions = apply_cutoffs(predictions, cutoffs)
 
-    # Final deployment output is ensemble-only.
-    ensemble_only_predictions = {"Global_Ensemble": predictions["Global_Ensemble"]}
-    ensemble_only_prob_matrices = {"Global_Ensemble": prob_matrices["Global_Ensemble"]}
-    return ensemble_only_predictions, ensemble_only_prob_matrices
+    return (
+        {DEPLOYMENT_PREDICTOR: predictions[DEPLOYMENT_PREDICTOR]},
+        {DEPLOYMENT_PREDICTOR: deploy_prob},
+    )
+
+
+def run_predictions_for_label_set(
+    X,
+    sample_names,
+    models,
+    label_set_key,
+    label_merge_suffix,
+    cutoffs_root,
+    rejector_keys,
+    merge_classes,
+    max_accepted_risk_pct,
+    output_dir,
+    input_filename,
+    cohort_knn_reference=None,
+    cutoff_sources=None,
+    threshold_methods=None,
+    merge_method="sum",
+):
+    """Run one label set (merged/unmerged) for each rejector, cutoff source, and threshold method."""
+    if cutoff_sources is None:
+        cutoff_sources = [CUTOFF_SOURCE_SELECTION]
+    if threshold_methods is None:
+        threshold_methods = [THRESHOLD_METHOD_JACKKNIFE]
+
+    for cutoff_source in cutoff_sources:
+        print(f"\n=== Cutoff source: {cutoff_source} ===")
+        source_tag = prediction_output_tag(cutoff_source)
+        for threshold_method in threshold_methods:
+            threshold_tag = prediction_threshold_tag(threshold_method)
+            print(f"\n--- Threshold method: {threshold_method} ---")
+            for rejector_key in rejector_keys:
+                print(f"\n--- Rejector pipeline: {rejector_key}{source_tag}{threshold_tag} ---")
+                params_path = resolve_final_glm_params_path(
+                    cutoffs_root,
+                    label_set_key,
+                    rejector_key=rejector_key,
+                    cutoff_source=cutoff_source,
+                )
+                print(f"Loading rejector parameters from: {params_path}")
+                rejector_params, id_head_params, rejector_scales, id_head_scales = load_final_rejector_params(
+                    params_path, rejector_key=rejector_key
+                )
+                if is_ridge_rejector_key(rejector_key) and rejector_scales is None:
+                    raise ValueError(
+                        f"Ridge params at {params_path} lack mean_x/sd_x columns. "
+                        "Re-run calibration rejector export."
+                    )
+                if (
+                    is_ridge_rejector_key(rejector_key)
+                    and is_two_head_rejector_key(rejector_key)
+                    and id_head_scales is None
+                ):
+                    raise ValueError(
+                        f"Ridge ID-head params at {params_path} lack mean_x/sd_x columns."
+                    )
+
+                cutoffs = load_final_deployment_cutoffs(
+                    cutoffs_root,
+                    label_set_key,
+                    rejector_key=rejector_key,
+                    max_accepted_risk_pct=max_accepted_risk_pct,
+                    cutoff_source=cutoff_source,
+                    threshold_method=threshold_method,
+                )
+
+                knn_ref = cohort_knn_reference if rejector_needs_knn10(rejector_key) else None
+                predictions, prob_matrices = run_predictions(
+                    X,
+                    sample_names,
+                    models,
+                    cutoffs,
+                    rejector_params,
+                    rejector_key,
+                    id_head_params,
+                    merge_classes=merge_classes,
+                    merge_method=merge_method,
+                    cohort_knn_reference=knn_ref,
+                    rejector_scales=rejector_scales,
+                    id_head_scales=id_head_scales,
+                )
+
+                risk_tag = prediction_risk_tag(max_accepted_risk_pct)
+                save_predictions(
+                    predictions,
+                    prob_matrices,
+                    output_dir,
+                    input_filename,
+                    merge_suffix=f"{label_merge_suffix}_{rejector_key}{source_tag}{threshold_tag}{risk_tag}",
+                )
 
 
 def main():
@@ -1821,21 +2004,32 @@ def main():
              "If set, selects cutoff from deploy_risk_coverage_curve_{suffix}.csv."
     )
     parser.add_argument(
-        "--fs_method",
-        default="eta2",
-        choices=["eta2", "mad"],
-        help="Feature selection for KNN reject features (must match run_all_final.sh).",
+        "--cutoff_source",
+        default="selection_loso",
+        choices=["selection_loso", "deploy_loso", "both"],
+        help="Which calibration track to use for rejector cutoffs/coefs. "
+             "'both' runs selection-loso and deploy-loso (Option B) for side-by-side comparison.",
     )
     parser.add_argument(
-        "--calibration_method",
-        default="multivariate",
-        help="Calibration method for confidence scoring. Supported: "
-             "multivariate (default), univariate."
+        "--rejector_mode",
+        default="all",
+        choices=[
+            "svm_single_head",
+            "svm_ridge_in_model",
+            "all",
+        ],
+        help="SVM rejector recipe(s): single-head max-prob or single-head ridge "
+             "(in-model confidence features). all = both recipes.",
     )
     parser.add_argument(
-        "--calibration_setting",
-        default="ood_aware",
-        help="Calibration setting. Final deployment exports ood_aware (default) or ood_aware_logit."
+        "--threshold_method",
+        default="jackknife_adjusted",
+        choices=["jackknife_adjusted", "pooled_oof", "ucb_95", "both"],
+        help="Cutoff derivation on pooled OOF scores. "
+             "'jackknife_adjusted' (default) applies jackknife gap correction; "
+             "'pooled_oof' uses raw pooled-OOF threshold; "
+             "'ucb_95' uses one-sided 95% Wilson upper bound control; "
+             "'both' writes separate prediction files for each.",
     )
     parser.add_argument(
         "--ensemble_method",
@@ -1881,126 +2075,97 @@ def main():
     print(f"Weights base directory: {args.weights_dir}")
     print(f"Cutoffs base directory: {args.cutoffs_file}")
     print(f"Pipelines directory: {pipelines_dir}")
-    print(f"Calibration method: {resolve_calibration_method(args.calibration_method)}")
-    print(f"Calibration setting: {resolve_calibration_setting(args.calibration_setting)}")
-    print(f"Ensemble method: {resolve_ensemble_method(args.ensemble_method)}")
-    print(f"KNN reject fs_method: {args.fs_method}")
+    rejector_keys = resolve_rejector_modes(args.rejector_mode)
+    cutoff_sources = resolve_cutoff_sources(args.cutoff_source)
+    threshold_methods = resolve_threshold_methods(args.threshold_method)
+    print(f"Deployment classifier: {DEPLOYMENT_PREDICTOR}")
+    print(f"Rejector key(s): {', '.join(rejector_keys)}")
+    print(f"Cutoff source(s): {', '.join(cutoff_sources)}")
+    print(f"Threshold method(s): {', '.join(threshold_methods)}")
     if args.max_accepted_risk_pct is not None:
         print(f"Maximum accepted risk (on accepted predictions): {args.max_accepted_risk_pct:.2f}%")
     else:
-        print("Using default deployment cutoffs (primary 5% target risk)")
+        print("Using default deployment cutoffs (5% target risk)")
+
+    needs_knn = any(rejector_needs_knn10(k) for k in rejector_keys)
+    cohort_knn_reference = load_cohort_knn_reference() if needs_knn else None
+    if needs_knn:
+        print("Loaded training-cohort KNN reference for elastic-net rejectors.")
     
     # Determine which versions to run
     run_merged = not args.unmerged_only
     run_unmerged = not args.merged_only
-    calibration_method = resolve_calibration_method(args.calibration_method)
-    calibration_setting = resolve_calibration_setting(args.calibration_setting)
-    ensemble_method = resolve_ensemble_method(args.ensemble_method)
-    
+
     if args.merged_only and args.unmerged_only:
         print("ERROR: Cannot specify both --merged_only and --unmerged_only")
         return
-    
-    # Load new samples (only need to load once)
+
     X, sample_names = load_new_samples(args.input_file)
-    
-    # Load models and metadata with pipeline cache (only need to load once)
     models = load_models_and_metadata(args.models_dir, pipelines_dir)
-    training_ref = load_training_reference_data(fs_method=args.fs_method)
-    
-    # Run predictions for unmerged version
+
     if run_unmerged:
         print("\n" + "="*60)
         print("UNMERGED VERSION")
         print("="*60)
-        
-        # Load unmerged ensemble weights (matches R: ensemble_weights_unmerged_maxprob)
-        # Structure: final_train_test/ensemble_weights_unmerged_maxprob/loso/
-        weights_dir_unmerged = os.path.join(str(args.weights_dir), "ensemble_weights_unmerged_maxprob")
-        print(f"\nLoading unmerged ensemble weights from: {weights_dir_unmerged}")
-        ensemble_weights_unmerged = load_ensemble_weights(weights_dir_unmerged)
-        
-        label_set_key = "unmerged_maxprob"
-        cutoffs_unmerged = load_final_deployment_cutoffs(
-            args.cutoffs_file,
-            label_set_key,
-            max_accepted_risk_pct=args.max_accepted_risk_pct,
-        )
-        multivariate_file_unmerged = resolve_final_calibration_params_path(
-            args.cutoffs_file,
-            label_set_key,
-            calibration_method,
-            calibration_setting,
-        )
-        print(f"\nLoading unmerged calibration parameters from: {multivariate_file_unmerged}")
-        multivariate_params_unmerged = load_multivariate_params(multivariate_file_unmerged)
-        
-        # Run predictions
-        predictions_unmerged, prob_matrices_unmerged = run_predictions(
+        run_predictions_for_label_set(
             X,
             sample_names,
             models,
-            ensemble_weights_unmerged,
-            cutoffs_unmerged,
-            multivariate_params_unmerged,
-            {},
-            {},
-            calibration_method=calibration_method,
-            calibration_setting=calibration_setting,
-            ensemble_method=ensemble_method,
+            label_set_key="unmerged_maxprob",
+            label_merge_suffix="_unmerged",
+            cutoffs_root=args.cutoffs_file,
+            rejector_keys=rejector_keys,
             merge_classes=False,
-            training_ref=training_ref,
+            max_accepted_risk_pct=args.max_accepted_risk_pct,
+            output_dir=output_dir,
+            input_filename=input_filename,
+            cohort_knn_reference=cohort_knn_reference,
+            cutoff_sources=cutoff_sources,
+            threshold_methods=threshold_methods,
         )
-        
-        # Save unmerged predictions
-        save_predictions(predictions_unmerged, prob_matrices_unmerged, output_dir, input_filename, merge_suffix="_unmerged")
-    
-    # Run predictions for merged version (summed method; matches R train_test_analysis)
+
     if run_merged:
         print("\n" + "="*60)
-        print("MERGED VERSION (Summed Method)")
+        print("MERGED VERSION")
         print("="*60)
-        
-        # Load merged ensemble weights (summed method)
-        # Structure: final_train_test/ensemble_weights_merged_summed/loso/
-        weights_dir_merged = os.path.join(str(args.weights_dir), "ensemble_weights_merged_summed")
-        print(f"\nLoading merged ensemble weights (summed) from: {weights_dir_merged}")
-        ensemble_weights_merged = load_ensemble_weights(weights_dir_merged)
-        
-        label_set_key = "merged_summed"
-        cutoffs_merged = load_final_deployment_cutoffs(
-            args.cutoffs_file,
-            label_set_key,
-            max_accepted_risk_pct=args.max_accepted_risk_pct,
-        )
-        multivariate_file_merged = resolve_final_calibration_params_path(
-            args.cutoffs_file,
-            label_set_key,
-            calibration_method,
-            calibration_setting,
-        )
-        print(f"\nLoading merged calibration parameters from: {multivariate_file_merged}")
-        multivariate_params_merged = load_multivariate_params(multivariate_file_merged)
-        
-        # Run predictions
-        predictions_merged, prob_matrices_merged = run_predictions(
+        run_predictions_for_label_set(
             X,
             sample_names,
             models,
-            ensemble_weights_merged,
-            cutoffs_merged,
-            multivariate_params_merged,
-            {},
-            {},
-            calibration_method=calibration_method,
-            calibration_setting=calibration_setting,
-            ensemble_method=ensemble_method,
+            label_set_key="merged_summed",
+            label_merge_suffix="_merged_summed",
+            cutoffs_root=args.cutoffs_file,
+            rejector_keys=rejector_keys,
             merge_classes=True,
-            training_ref=training_ref,
+            max_accepted_risk_pct=args.max_accepted_risk_pct,
+            output_dir=output_dir,
+            input_filename=input_filename,
+            cohort_knn_reference=cohort_knn_reference,
+            cutoff_sources=cutoff_sources,
+            threshold_methods=threshold_methods,
         )
-        
-        # Save merged predictions
-        save_predictions(predictions_merged, prob_matrices_merged, output_dir, input_filename, merge_suffix="_merged_summed")
+
+    if run_merged:
+        print("\n" + "="*60)
+        print("MERGED (MAX-PROB) VERSION")
+        print("="*60)
+        run_predictions_for_label_set(
+            X,
+            sample_names,
+            models,
+            label_set_key="merged_maxprob",
+            label_merge_suffix="_merged_maxprob",
+            cutoffs_root=args.cutoffs_file,
+            rejector_keys=rejector_keys,
+            merge_classes=True,
+            max_accepted_risk_pct=args.max_accepted_risk_pct,
+            output_dir=output_dir,
+            input_filename=input_filename,
+            cohort_knn_reference=cohort_knn_reference,
+            cutoff_sources=cutoff_sources,
+            threshold_methods=threshold_methods,
+            merge_method="max",
+        )
 
     print("\n" + "="*60)
     print("Prediction pipeline completed successfully!")

@@ -6,6 +6,9 @@ cd /Users/jsevere2/leukem_ai
 # Activate the Python virtual environment
 source .venv/bin/activate
 
+# train_test and project modules live under python/
+export PYTHONPATH="${PWD}/python${PYTHONPATH:+:${PYTHONPATH}}"
+
 # Remove cached pipelines so they are rebuilt from current data (get_or_create_pipeline
 # does not check if data changed, so stale pipelines would otherwise be reused)
 PIPELINES_DIR="data/out/final_models/pipelines"
@@ -21,6 +24,12 @@ echo "=================================="
 #   - "mad"  : intersecting MVGs (default)
 #   - "eta2" : eta2_subtype - eta2_study
 FS_METHOD="eta2"
+COHORT_KNN_OUT="data/out/final_train_test/cohort_knn_features_${FS_METHOD}.csv"
+
+# Full-reference KNN for known cohort rows (read by R/train_test_analysis.R pass 2).
+echo "Exporting cohort KNN features for calibration (fs_method=${FS_METHOD})..."
+python -c "import train_test; train_test.export_cohort_knn_features(output_path='${COHORT_KNN_OUT}', fs_method='${FS_METHOD}')"
+echo ""
 
 # Function to run final model training for a specific model and strategy
 run_final_model_train() {

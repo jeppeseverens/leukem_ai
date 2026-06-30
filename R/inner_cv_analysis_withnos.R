@@ -293,10 +293,12 @@ main_inner_cv <- function(merge_classes = FALSE, merge_prob_method = c("max", "s
     return(result)
   }
 
-  #' Perform global ensemble optimization (product-of-experts) using overall kappa.
-  #' Weight grid search matches outer CV application: p ∝ Π_m p_m^{w_m}.
-  perform_global_ensemble_analysis <- function(results, weights, type = "cv") {
-    perform_global_ensemble_analysis_unified(results, weights, type, has_inner_folds = TRUE)
+  #' Perform global ensemble optimization using overall kappa.
+  #' @param ensemble_rule "poe" (product-of-experts) or "simple" (linear weighted average)
+  perform_global_ensemble_analysis <- function(results, weights, type = "cv", ensemble_rule = c("poe", "simple")) {
+    perform_global_ensemble_analysis_unified(
+      results, weights, type, has_inner_folds = TRUE, ensemble_rule = ensemble_rule
+    )
   }
 
   #' Generate globally optimized ensemble probability matrices
@@ -304,9 +306,14 @@ main_inner_cv <- function(merge_classes = FALSE, merge_prob_method = c("max", "s
   #' @param weights Weight configurations for ensemble
   #' @param type Type of analysis ("cv" or "loso")
   #' @param ensemble_performance Aggregated performance results from perform_global_ensemble_analysis
+  #' @param ensemble_rule "poe" or "simple"
   #' @return List containing optimized probability matrices and weights used for each outer fold
-  generate_global_optimized_ensemble_matrices <- function(results, weights, type = "cv", ensemble_performance) {
-    cat("Generating globally optimized ensemble probability matrices...\n")
+  generate_global_optimized_ensemble_matrices <- function(
+      results, weights, type = "cv", ensemble_performance, ensemble_rule = c("poe", "simple")) {
+    ensemble_rule <- match.arg(ensemble_rule)
+    combine_probs <- global_ensemble_combine_fn(ensemble_rule)
+    rule_label <- if (ensemble_rule == "simple") "simple weighted" else "product-of-experts"
+    cat(sprintf("Generating globally optimized ensemble probability matrices (%s)...\n", rule_label))
 
     outer_folds <- names(results$probability_matrices$svm[[type]])
     optimized_matrices <- list()
@@ -361,8 +368,7 @@ main_inner_cv <- function(merge_classes = FALSE, merge_prob_method = c("max", "s
         prob_mat_NN <- as.matrix(aligned_matrices$neural_net)
         non_prob_cols <- aligned_matrices$non_prob_cols
 
-        # Product-of-experts (same rule as outer_cv_analysis.R)
-        optimized_matrix <- product_of_experts_probs(
+        optimized_matrix <- combine_probs(
           prob_mat_SVM, prob_mat_XGB, prob_mat_NN, best_weights
         )
 
@@ -495,28 +501,51 @@ main_inner_cv <- function(merge_classes = FALSE, merge_prob_method = c("max", "s
         next
       }
 
+      # Product-of-experts global ensemble
       global_ensemble_results <- perform_global_ensemble_analysis(
         list(probability_matrices = probability_matrices),
         weights,
-        analysis_type
+        analysis_type,
+        ensemble_rule = "poe"
       )
-
       global_optimized_ensemble_matrices <- generate_global_optimized_ensemble_matrices(
         list(probability_matrices = probability_matrices),
         weights,
         analysis_type,
-        global_ensemble_results
+        global_ensemble_results,
+        ensemble_rule = "poe"
       )
-
       global_optimized_ensemble_performance <- analyze_optimized_ensemble_performance(
         global_optimized_ensemble_matrices, analysis_type
+      )
+
+      # Simple weighted-average global ensemble (same weight grid, different combine rule)
+      global_simple_ensemble_results <- perform_global_ensemble_analysis(
+        list(probability_matrices = probability_matrices),
+        weights,
+        analysis_type,
+        ensemble_rule = "simple"
+      )
+      global_simple_optimized_ensemble_matrices <- generate_global_optimized_ensemble_matrices(
+        list(probability_matrices = probability_matrices),
+        weights,
+        analysis_type,
+        global_simple_ensemble_results,
+        ensemble_rule = "simple"
+      )
+      global_simple_optimized_ensemble_performance <- analyze_optimized_ensemble_performance(
+        global_simple_optimized_ensemble_matrices, analysis_type
       )
 
       results[[analysis_type]] <- list(
         global_ensemble_results = global_ensemble_results,
         global_optimized_ensemble_matrices = global_optimized_ensemble_matrices,
         global_optimized_ensemble_performance = global_optimized_ensemble_performance,
-        global_ensemble_weights_used = global_optimized_ensemble_matrices$weights_used
+        global_ensemble_weights_used = global_optimized_ensemble_matrices$weights_used,
+        global_simple_ensemble_results = global_simple_ensemble_results,
+        global_simple_optimized_ensemble_matrices = global_simple_optimized_ensemble_matrices,
+        global_simple_optimized_ensemble_performance = global_simple_optimized_ensemble_performance,
+        global_simple_ensemble_weights_used = global_simple_optimized_ensemble_matrices$weights_used
       )
     }
 
@@ -575,13 +604,15 @@ main_inner_cv <- function(merge_classes = FALSE, merge_prob_method = c("max", "s
     )
   }
 
-  # Ensemble method performance (Global only; OvR removed)
+  # Global ensemble methods (PoE and simple weighted average)
   ensemble_methods <- list(
-    "Global_Optimized" = results$global_optimized_ensemble_performance
+    "Global_Product_Optimized" = results$global_optimized_ensemble_performance,
+    "Global_Simple_Optimized" = results$global_simple_optimized_ensemble_performance
   )
 
     for (method_name in names(ensemble_methods)) {
       method_performance <- ensemble_methods[[method_name]]
+      if (is.null(method_performance)) next
       all_kappas <- c()
 
       for (outer_fold in outer_folds) {
@@ -646,10 +677,10 @@ main_inner_cv <- function(merge_classes = FALSE, merge_prob_method = c("max", "s
         next
       }
 
-      # Create results list for performance comparison (Global only)
       comparison_results <- list(
         probability_matrices = results$probability_matrices,
-        global_optimized_ensemble_performance = results[[analysis_type]]$global_optimized_ensemble_performance
+        global_optimized_ensemble_performance = results[[analysis_type]]$global_optimized_ensemble_performance,
+        global_simple_optimized_ensemble_performance = results[[analysis_type]]$global_simple_optimized_ensemble_performance
       )
 
       # Compare all ensemble methods and display mean kappa across folds
@@ -669,10 +700,10 @@ main_inner_cv <- function(merge_classes = FALSE, merge_prob_method = c("max", "s
   load_library_quietly("stringr")
   load_library_quietly("ggplot2")
 
-  # Filters
+  # Filters (with-NOS track: AML NOS kept as a trainable class)
   DATA_FILTERS <- list(
     min_samples_per_subtype = 10,
-    excluded_subtypes = c("AML NOS", "Missing data", "Multi"),
+    excluded_subtypes = c("Missing data", "Multi"),
     selected_studies = c(
       "TCGA-LAML",
       "LEUCEGENE",
@@ -684,8 +715,8 @@ main_inner_cv <- function(merge_classes = FALSE, merge_prob_method = c("max", "s
     )
   )
 
-  # Load mapping of class labels to numeric labels
-  label_mapping <- read.csv("../data/label_mapping_all.csv")
+  # Load mapping of class labels to numeric labels (NOS-inclusive, 26 classes)
+  label_mapping <- read.csv("../data/label_mapping_withnos.csv")
 
   # Load leukemia subtype data
   leukemia_subtypes <- read.csv("../data/rgas_10feb26.csv")$ICC_Subtype
@@ -716,26 +747,26 @@ main_inner_cv <- function(merge_classes = FALSE, merge_prob_method = c("max", "s
     svm = list(
       classification_type = "OvR",
       file_paths = list(
-        cv = "../data/out/inner_cv/SVM_array/cv_mad_global/",
-        loso = "../data/out/inner_cv/SVM_array/loso_mad_global/"
+        cv = "../data/out/inner_cv/SVM_array/cv_10feb26_eta2_withnos/",
+        loso = "../data/out/inner_cv/SVM_array/loso_10feb26_eta2_withnos/"
       ),
-      output_dir = "../data/out/inner_cv/inner_cv_best_params/SVM_mad_global"
+      output_dir = "../data/out/inner_cv/inner_cv_best_params/SVM_10feb26_withnos"
     ),
     xgboost = list(
       classification_type = "OvR",
       file_paths = list(
-        cv = "../data/out/inner_cv/XGBOOST_array/cv_mad_global/",
-        loso = "../data/out/inner_cv/XGBOOST_array/loso_mad_global/"
+        cv = "../data/out/inner_cv/XGBOOST_array/cv_10feb26_eta2_withnos/",
+        loso = "../data/out/inner_cv/XGBOOST_array/loso_10feb26_eta2_withnos/"
       ),
-      output_dir = "../data/out/inner_cv/inner_cv_best_params/XGBOOST_mad_global"
+      output_dir = "../data/out/inner_cv/inner_cv_best_params/XGBOOST_10feb26_withnos"
     ),
     neural_net = list(
       classification_type = "standard",
       file_paths = list(
-        cv = "../data/out/inner_cv/NN_array/cv_mad_global/",
-        loso = "../data/out/inner_cv/NN_array/loso_mad_global/"
+        cv = "../data/out/inner_cv/NN_array/cv_10feb26_eta2_withnos/",
+        loso = "../data/out/inner_cv/NN_array/loso_10feb26_eta2_withnos/"
       ),
-      output_dir = "../data/out/inner_cv/inner_cv_best_params/NN_mad_global"
+      output_dir = "../data/out/inner_cv/inner_cv_best_params/NN_10feb26_withnos"
     )
   )
 
@@ -824,11 +855,11 @@ main_inner_cv <- function(merge_classes = FALSE, merge_prob_method = c("max", "s
 
   # Determine suffix for file paths (max vs summed merge method when merged)
   if (!merge_classes) {
-    merge_suffix <- "_unmerged_madglobal"
+    merge_suffix <- "_unmerged_withnos"
   } else if (merge_prob_method == "sum") {
-    merge_suffix <- "_merged_summed_madglobal"
+    merge_suffix <- "_merged_summed_withnos"
   } else {
-    merge_suffix <- "_merged_maxprob_madglobal"
+    merge_suffix <- "_merged_maxprob_withnos"
   }
   weights_dir <- paste0("../data/out/inner_cv/ensemble_weights", merge_suffix)
   save_ensemble_weights(ensemble_results,  weights_dir)
@@ -869,13 +900,15 @@ main_inner_cv <- function(merge_classes = FALSE, merge_prob_method = c("max", "s
     probability_matrices = probability_matrices,
     filtering_statistics = filtering_statistics,
     ensemble_results = ensemble_results,
-    performance_comparisons = performance_comparisons
+    performance_comparisons = performance_comparisons,
+    per_model_results = per_model_results,  # per-fold kappa/accuracy/mcc + confusion matrices
+    per_class_results = per_class_results   # per-class caret byClass (incl. NOS F1)
   )
 
   inner_cv_results$merge_classes <- merge_classes
   inner_cv_results$merge_prob_method <- merge_prob_method
   print(inner_cv_results$performance_comparisons)
-  saveRDS(inner_cv_results, paste0("../data/out/inner_cv/inner_cv_results_mad_global", merge_suffix, ".rds"))
+  saveRDS(inner_cv_results, paste0("../data/out/inner_cv/inner_cv_results", merge_suffix, ".rds"))
 
   # Save filtering statistics to CSV for easy inspection
   if (length(filtering_statistics) > 0) {
@@ -894,9 +927,7 @@ main_inner_cv <- function(merge_classes = FALSE, merge_prob_method = c("max", "s
   return(inner_cv_results)
 }
 
-# Run unmerged, and merged (summed) for comparison
-#cat("=== Running Inner CV Analysis (Unmerged) ===\n")
+# With-NOS track: full subtypes only (unmerged). The comparison of interest is
+# full-subtype kappa with vs without NOS plus the per-class F1 of NOS.
+cat("=== Running Inner CV Analysis (With NOS, Unmerged Full Subtypes) ===\n")
 inner_cv_results_unmerged <- main_inner_cv(merge_classes = FALSE)
-
-cat("=== Running Inner CV Analysis (Merged MDS/KMT2A/MECOM - Summed Method) ===\n")
-inner_cv_results_merged_summed <- main_inner_cv(merge_classes = TRUE, merge_prob_method = "sum")

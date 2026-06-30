@@ -13,15 +13,19 @@ from sklearn.metrics import (
     cohen_kappa_score,
     matthews_corrcoef,
 )
-from sklearn.preprocessing import LabelEncoder
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.pipeline import Pipeline
 from sklearn.model_selection import StratifiedKFold
 from sklearn.base import clone
 from sklearn.neighbors import NearestNeighbors
+from pathlib import Path
 
 from joblib import Parallel, delayed
 import itertools
 import ast
 from collections import Counter
+
+import transformers
 
 # Project-wide seed for CV shuffling (StratifiedKFold, left-out assignment).
 CV_RANDOM_STATE = 1
@@ -536,7 +540,7 @@ def load_data(directory):
     return X, y, studies
 
 
-def filter_data(X, y, study_labels, min_n=20):
+def filter_data(X, y, study_labels, min_n=20, include_nos=False):
     """
     Removes samples based on class counts and selected studies.
 
@@ -544,6 +548,9 @@ def filter_data(X, y, study_labels, min_n=20):
         X (numpy.ndarray): Feature matrix.
         y (numpy.ndarray): Target labels.
         study_labels (numpy.ndarray): Study labels.
+        min_n (int): Minimum samples per class to keep the class.
+        include_nos (bool): If True, keep "AML NOS" as a trainable class
+            (still drops "Missing data" and "Multi"). Default False.
 
     Returns:
         tuple: Filtered X, y, and study_labels.
@@ -553,7 +560,8 @@ def filter_data(X, y, study_labels, min_n=20):
     unique_classes, class_counts = np.unique(y, return_counts=True)
     valid_classes = unique_classes[class_counts >= min_n]
 
-    valid_classes = [c for c in valid_classes if c != "AML NOS" and c != "Missing data" and c != "Multi"]
+    drop_classes = {"Missing data", "Multi"} if include_nos else {"AML NOS", "Missing data", "Multi"}
+    valid_classes = [c for c in valid_classes if c not in drop_classes]
 
     valid_indices_classes = np.isin(y, valid_classes)
 
@@ -774,16 +782,16 @@ def encode_labels(y):
 
 
 def restore_labels(df, label_mapping):
-    df = df.dropna()
-
     int_to_label = {v: k for k, v in label_mapping.items()}
     if "class" in df.columns:
-        # OvR case
+        # OvR case; only require class (KNN columns may be null when --skip_knn)
+        df = df.dropna(subset=["class"])
         df["class_label"] = df["class"].map(int_to_label)
         return df
 
     elif "class_0" in df.columns and "class_1" in df.columns:
         # OvO case
+        df = df.dropna(subset=["class_0", "class_1"])
         df["class_0_label"] = df["class_0"].map(int_to_label)
         df["class_1_label"] = df["class_1"].map(int_to_label)
         return df
@@ -831,6 +839,99 @@ def _append_knn_columns(result_dict, knn_features):
     for col in KNN_DISTANCE_COLUMNS:
         result_dict[col] = _knn_features_to_json(knn_features, col)
     return result_dict
+
+
+# Studies included in R train_test_analysis.R / filter_data cohort.
+FILTERED_COHORT_STUDIES = [
+    "TCGA-LAML",
+    "LEUCEGENE",
+    "BEATAML1.0-COHORT",
+    "AAML0531",
+    "AAML1031",
+    "AAML03P1",
+    "100LUMC",
+]
+
+EXCLUDED_SUBTYPES = {"AML NOS", "Missing data", "Multi"}
+
+
+def build_knn_rejection_pipe(fs_method="eta2"):
+    """KNN reject-feature preprocessing pipe (matches run_final_train.py)."""
+    if fs_method == "eta2":
+        feature_selector = transformers.FeatureSelectionEta()
+    elif fs_method == "mad":
+        feature_selector = transformers.FeatureSelection2()
+    else:
+        raise ValueError(f"Unknown fs_method '{fs_method}'. Use 'mad' or 'eta2'.")
+    return Pipeline([
+        ("DEseq2", transformers.DESeq2RatioNormalizer()),
+        ("feature_selection", feature_selector),
+        ("scaler", StandardScaler()),
+    ])
+
+
+def filtered_cohort_mask(y, study_labels, min_n=10):
+    """Boolean mask for samples kept by filter_data(min_n=min_n)."""
+    unique_classes, class_counts = np.unique(y, return_counts=True)
+    valid_classes = unique_classes[class_counts >= min_n]
+    valid_classes = [c for c in valid_classes if c not in EXCLUDED_SUBTYPES]
+    return (
+        np.isin(y, valid_classes)
+        & np.isin(study_labels, FILTERED_COHORT_STUDIES)
+    )
+
+
+def cohort_knn_features_path(fs_method="eta2", base_dir=None):
+    """Default path written by bash/run_all_final.sh for R calibration."""
+    if base_dir is None:
+        base_dir = (
+            Path(__file__).resolve().parent.parent
+            / "data"
+            / "out"
+            / "final_train_test"
+        )
+    return Path(base_dir) / f"cohort_knn_features_{fs_method}.csv"
+
+
+def export_cohort_knn_features(
+    output_path=None,
+    fs_method="eta2",
+    min_n=10,
+    data_path=None,
+):
+    """
+    Export full-reference KNN reject features for the filtered training cohort.
+
+    One row per included sample; ``indices`` are 1-based positions in the full
+    loaded cohort (matches R ``filter`` in train_test_analysis.R).
+    """
+    if data_path is None:
+        data_path = Path(__file__).resolve().parent.parent / "data"
+    if output_path is None:
+        output_path = cohort_knn_features_path(fs_method=fs_method)
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    X_all, y_all, study_all = load_data(data_path)
+    valid_mask = filtered_cohort_mask(y_all, study_all, min_n=min_n)
+    cohort_indices = np.where(valid_mask)[0] + 1
+
+    X = X_all[valid_mask]
+    y = y_all[valid_mask]
+    study = study_all[valid_mask]
+    y_encoded, _ = encode_labels(y)
+
+    pipe = build_knn_rejection_pipe(fs_method=fs_method)
+    knn_features = compute_knn_features_full_reference(
+        X, y_encoded, study, X, pipe, fs_method=fs_method
+    )
+
+    out = pd.DataFrame({"indices": cohort_indices.astype(int)})
+    for col in KNN_DISTANCE_COLUMNS:
+        out[col] = np.asarray(knn_features[col], dtype=float)
+    out.to_csv(output_path, index=False)
+    print(f"Wrote {len(out)} cohort KNN rows to {output_path}")
+    return str(output_path)
 
 
 def compute_knn_features_full_reference(
@@ -1912,8 +2013,11 @@ def run_outer_cv(
     if not n_genes_list:
         raise ValueError("No valid n_genes values found in best_params")
     
-    # Remove duplicates and sort. Ensure KNN reference space is available.
-    n_genes_list = sorted(list(set(n_genes_list + [int(knn_n_genes)])))
+    # Remove duplicates and sort; optionally include KNN reference n_genes.
+    if knn_n_genes is not None:
+        n_genes_list = sorted(list(set(n_genes_list + [int(knn_n_genes)])))
+    else:
+        n_genes_list = sorted(list(set(n_genes_list)))
     # Keep outer CV fold assignments reproducible and aligned with inner-CV setup.
     outer_cv = StratifiedKFold(
         n_splits=5, shuffle=True, random_state=CV_RANDOM_STATE
@@ -1944,7 +2048,7 @@ def run_outer_cv(
         )
 
         knn_features = None
-        if int(knn_n_genes) in processed_X:
+        if knn_n_genes is not None and int(knn_n_genes) in processed_X:
             X_train_knn, X_test_knn = processed_X[int(knn_n_genes)]
             knn_cache_dir = cache_dir or _get_reject_cache_dir()
             knn_key_payload = json.dumps(
@@ -2327,8 +2431,11 @@ def run_outer_cv_loso(
     if not n_genes_list:
         raise ValueError("No valid n_genes values found in best_params")
     
-    # Remove duplicates and sort. Ensure KNN reference space is available.
-    n_genes_list = sorted(list(set(n_genes_list + [int(knn_n_genes)])))
+    # Remove duplicates and sort; optionally include KNN reference n_genes.
+    if knn_n_genes is not None:
+        n_genes_list = sorted(list(set(n_genes_list + [int(knn_n_genes)])))
+    else:
+        n_genes_list = sorted(list(set(n_genes_list)))
 
     # Empty list to append results to
     all_results = []
@@ -2363,7 +2470,7 @@ def run_outer_cv_loso(
         )
 
         knn_features = None
-        if int(knn_n_genes) in processed_X:
+        if knn_n_genes is not None and int(knn_n_genes) in processed_X:
             X_train_knn, X_test_knn = processed_X[int(knn_n_genes)]
             knn_cache_dir = cache_dir or _get_reject_cache_dir()
             knn_key_payload = json.dumps(
@@ -2776,6 +2883,175 @@ def predict_leftout_final(
 
     raise ValueError(
         f"Left-out prediction for final train not implemented for multi_type={multi_type}"
+    )
+
+
+def predict_deploy_loso_known_cohort(
+    trained_models,
+    X_test,
+    y_test,
+    test_global_idx,
+    multi_type,
+    knn_features,
+    label_mapping,
+    holdout_study,
+):
+    """
+    Score one held-out study with final-style models fit on the other studies.
+
+    Output schema matches final_selection LOSO CSVs (inner_fold=0) for R fold-matrix
+    construction in build_deploy_loso_fold_matrices.R.
+    """
+    if len(X_test) == 0:
+        return pd.DataFrame()
+
+    y_test = np.asarray(y_test)
+    test_global_idx = np.asarray(test_global_idx)
+    inner_fold = 0
+
+    if multi_type == "standard":
+        if not trained_models:
+            raise ValueError("No trained models for deploy-loso prediction.")
+        model_info, clf = trained_models[0]
+        pipe = model_info["preprocessing_pipeline"]
+        label_encoder = model_info["label_encoder"]
+        n_genes = model_info["n_genes"]
+        out_params = dict(model_info["params"])
+        out_params["n_genes"] = n_genes
+
+        X_test_proc = pipe.transform(X_test).astype(np.float32)
+        preds_prob = clf.predict_proba(X_test_proc)
+        preds_encoded = np.argmax(preds_prob, axis=1)
+        int_to_label = {v: k for k, v in label_mapping.items()}
+        preds = np.array([int_to_label[int(p)] for p in preds_encoded])
+        classes = label_encoder.classes_
+        preds_prob_flat = np.round(preds_prob.flatten(), 4).tolist()
+
+        y_test_labels = np.array([int_to_label[int(v)] for v in y_test])
+
+        return pd.DataFrame(
+            [
+                _append_knn_columns(
+                    {
+                        "outer_fold": holdout_study,
+                        "inner_fold": inner_fold,
+                        "classes": list(classes),
+                        "params": out_params,
+                        "accuracy": accuracy_score(y_test_labels, preds),
+                        "f1_macro": f1_score(y_test_labels, preds, average="macro"),
+                        "mcc": matthews_corrcoef(y_test_labels, preds),
+                        "kappa": cohen_kappa_score(y_test_labels, preds),
+                        "y_val": y_test,
+                        "preds": preds,
+                        "preds_prob": json.dumps(preds_prob_flat),
+                        "sample_indices": test_global_idx,
+                    },
+                    knn_features,
+                )
+            ]
+        )
+
+    if multi_type == "OvR":
+        rows = []
+        for model_info, clf in trained_models:
+            class_val = model_info["class"]
+            n_genes = model_info["n_genes"]
+            out_params = dict(model_info["params"])
+            out_params["n_genes"] = n_genes
+            pipe = model_info["preprocessing_pipeline"]
+
+            X_test_proc = pipe.transform(X_test).astype(np.float32)
+            y_test_bin = (y_test == class_val).astype(np.int32)
+
+            preds_prob = clf.predict_proba(X_test_proc)
+            pos_class_index = list(clf.classes_).index(1)
+            preds_prob_pos = preds_prob[:, pos_class_index]
+            preds = (preds_prob_pos >= 0.5).astype(int)
+            preds_prob_list = np.round(preds_prob_pos, 4).tolist()
+
+            rows.append(
+                _append_knn_columns(
+                    {
+                        "outer_fold": holdout_study,
+                        "inner_fold": inner_fold,
+                        "class": class_val,
+                        "params": out_params,
+                        "accuracy": accuracy_score(y_test_bin, preds),
+                        "f1_binary": conditional_f1(y_test_bin, preds),
+                        "mcc": matthews_corrcoef(y_test_bin, preds),
+                        "kappa": cohen_kappa_score(y_test_bin, preds),
+                        "y_val": y_test_bin,
+                        "preds": preds,
+                        "preds_prob": json.dumps(preds_prob_list),
+                        "sample_indices": test_global_idx,
+                    },
+                    knn_features,
+                )
+            )
+        df = pd.DataFrame(rows)
+        return restore_labels(df, label_mapping)
+
+    raise ValueError(
+        f"Deploy-loso prediction not implemented for multi_type={multi_type}"
+    )
+
+
+def run_deploy_calibration_loso_fold(
+    X,
+    y,
+    study_labels,
+    holdout_study,
+    model,
+    pipe,
+    best_params,
+    multi_type,
+    model_type,
+    label_mapping,
+    fs_method="eta2",
+    pipelines_dir=None,
+):
+    """Train on N-1 studies, score held-out study (known cohort only)."""
+    test_mask = study_labels == holdout_study
+    train_mask = ~test_mask
+
+    X_train = X[train_mask]
+    y_train = y[train_mask]
+    study_train = study_labels[train_mask]
+    X_test = X[test_mask]
+    y_test = y[test_mask]
+    test_idx = np.where(test_mask)[0]
+
+    trained_models = train_final_models(
+        X_train,
+        y_train,
+        study_train,
+        model,
+        pipe,
+        best_params,
+        multi_type=multi_type,
+        model_type=model_type,
+        pipelines_dir=pipelines_dir,
+    )
+
+    knn_pipe = build_knn_rejection_pipe(fs_method=fs_method)
+    knn_features = compute_knn_features_full_reference(
+        X_train,
+        y_train,
+        study_train,
+        X_test,
+        knn_pipe,
+        fs_method=fs_method,
+    )
+
+    return predict_deploy_loso_known_cohort(
+        trained_models,
+        X_test,
+        y_test,
+        test_idx,
+        multi_type,
+        knn_features,
+        label_mapping,
+        holdout_study,
     )
 
 

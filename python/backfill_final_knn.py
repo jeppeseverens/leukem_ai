@@ -9,7 +9,13 @@ import train_test
 import transformers
 
 
+def _is_outer_cv_leftout_csv(csv_path: Path) -> bool:
+    return "outer_cv" in csv_path.name and "_leftout" in csv_path.name
+
+
 def _is_final_leftout_csv(csv_path: Path, df: pd.DataFrame) -> bool:
+    if _is_outer_cv_leftout_csv(csv_path):
+        return False
     if "_leftout" in csv_path.name or "_final_" in csv_path.name:
         if "outer_fold" in df.columns:
             folds = pd.unique(df["outer_fold"])
@@ -27,9 +33,9 @@ def main():
     parser.add_argument("--input_csv", required=True, help="Path to final-selection or final-leftout CSV.")
     parser.add_argument(
         "--mode",
-        choices=["auto", "selection", "leftout"],
+        choices=["auto", "selection", "leftout", "outer_leftout"],
         default="auto",
-        help="CSV type: final-selection CV folds, final left-out, or auto-detect.",
+        help="CSV type: final-selection, final left-out, outer-CV left-out, or auto-detect.",
     )
     parser.add_argument("--fold_type", default="loso", choices=["CV", "loso"], help="Fold type for selection CSVs.")
     parser.add_argument("--fs_method", default="eta2", choices=["eta2", "mad"], help="Feature selection method.")
@@ -68,15 +74,41 @@ def main():
         ]
     )
 
-    if args.mode == "leftout":
-        is_leftout = True
+    if args.mode == "outer_leftout":
+        csv_mode = "outer_leftout"
+    elif args.mode == "leftout":
+        csv_mode = "final_leftout"
     elif args.mode == "selection":
-        is_leftout = False
+        csv_mode = "selection"
+    elif _is_outer_cv_leftout_csv(input_csv):
+        csv_mode = "outer_leftout"
+    elif _is_final_leftout_csv(input_csv, df):
+        csv_mode = "final_leftout"
     else:
-        is_leftout = _is_final_leftout_csv(input_csv, df)
+        csv_mode = "selection"
 
-    print(f"Backfilling KNN (mode={'leftout' if is_leftout else 'selection'})...")
-    if is_leftout:
+    print(f"Backfilling KNN (mode={csv_mode})...")
+    if csv_mode == "outer_leftout":
+        fold_type = args.fold_type
+        if args.mode == "auto":
+            fold_type = "CV" if "_CV_" in input_csv.name else "loso"
+        out_df = train_test.backfill_knn_columns_in_outer_leftout_results(
+            leftout_results_df=df,
+            X=X,
+            y=y,
+            study_labels=study_labels,
+            X_leftout=X_leftout,
+            y_leftout=y_leftout,
+            study_leftout=study_leftout,
+            leftout_global_idx=leftout_global_idx,
+            pipe=pipe,
+            fold_type=fold_type,
+            fs_method=args.fs_method,
+            knn_n_genes=args.knn_n_genes,
+            cache_dir=args.cache_dir,
+            strict=True,
+        )
+    elif csv_mode == "final_leftout":
         out_df = train_test.backfill_knn_columns_in_final_leftout_results(
             leftout_results_df=df,
             X=X,

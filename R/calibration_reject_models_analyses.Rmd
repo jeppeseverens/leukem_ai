@@ -1,10 +1,12 @@
 ---
-title: "Nested target-risk calibration (OOD-aware)"
+title: "Nested target-risk calibration: ensemble and rejector comparison"
 output: html_document
 ---
 
+Run first from repo root: `Rscript R/calibration_reject_models.R`
+
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
 suppressPackageStartupMessages({
   library(dplyr)
   library(tidyr)
@@ -12,1572 +14,939 @@ suppressPackageStartupMessages({
   library(ggplot2)
   library(ggridges)
   library(patchwork)
+  library(scales)
 })
-# Facet column order: LOSO then CV (left to right).
+
 SPLIT_TYPE_LEVELS <- c("LOSO", "CV")
-# Facet row order: collapsed then full (top to bottom).
-LABEL_DISPLAY_LEVELS <- c("Collapsed", "Full subtypes")
+LABEL_DISPLAY_LEVELS <- c("Collapsed", "Collapsed (max)", "Full subtypes")
+OPERATING_RISK_PCTS <- c(5, 7.5, 10)
+CALIBRATION_PLOT_RISK_PCT_RANGE <- c(1, 15)
+MARCE_RISK_PCT_RANGE <- c(1, 15)
+
+filter_curve_plot_points <- function(df, loso_totals) {
+  loso_ref <- loso_totals %>%
+    rename(n_loso_folds_expected = n_loso_folds_total)
+  df %>%
+    filter(
+      requested_target_risk_pct >= CALIBRATION_PLOT_RISK_PCT_RANGE[1],
+      requested_target_risk_pct <= CALIBRATION_PLOT_RISK_PCT_RANGE[2]
+    ) %>%
+    left_join(loso_ref, by = "label_set") %>%
+    filter(is.na(n_loso_folds_expected) | n_outer_folds >= n_loso_folds_expected)
+}
 
 label_set_to_display <- function(x) {
   factor(
     dplyr::recode(
       as.character(x),
       full_subtypes = "Full subtypes",
-      collapsed_classes = "Collapsed"
+      collapsed_classes = "Collapsed",
+      collapsed_maxprob = "Collapsed (max)"
     ),
     levels = LABEL_DISPLAY_LEVELS
   )
 }
 
-# Convert internal class ids into manuscript-friendly labels.
-pretty_class_label <- function(x) {
-  raw <- as.character(x)
-  cleaned <- raw %>%
-    gsub("\\.+", " ", ., perl = TRUE) %>%
-    gsub("\\s+", " ", ., perl = TRUE) %>%
-    trimws()
-
-  out <- dplyr::recode(
-    cleaned,
-    "APL t 15 17 PML RARA" = "PML::RARA",
-    "AML with mutated TP53" = "mutated TP53",
-    "AML with t 8 21 RUNX1 RUNX1T1" = "RUNX1::RUNX1T1",
-    "AML with inv 16 t 16 16 CBFB MYH11" = "CBFB::MYH11",
-    "AML with t 9 11 MLLT3 KMT2A" = "MLLT3::KMT2A",
-    "other KMT2A" = "Other KMT2A-r.",
-    "AML with t 6 9 DEK NUP214" = "DEK::NUP214",
-    "AML with t 9 22 BCR ABL1" = "BCR::ABL1",
-    "NUP98 NSD1" = "NUP98::NSD1",
-    "AML with mutated NPM1" = "mutated NPM1",
-    "AML with in frame bZIP CEBPA" = "in-frame bZIP CEBPA",
-    "MDS r" = "MDS-related",
-    "AML with MDS related gene mutations" = "MDS-related, gene mutations",
-    "AML with MDS related cytogenetic abnormalities" = "MDS-related, cytogenetic abn.",
-    "MECOM" = "MECOM rearrangements",
-    "GATA2 MECOM" = "GATA2;MECOM",
-    "MECOM other" = "MECOM, other",
-    "AML NOS" = "AML, NOS",
-    "PRDM16 RPN1" = "PRDM16::RPN1",
-    "NPM1 MLF1" = "NPM1::MLF1",
-    "AML with other rare recurring translocations" = "Other rare translocations",
-    "KAT6A CREBBP" = "KAT6A::CREBBP",
-    "RBM15 MRTF1" = "RBM15::MRTF1",
-    "NUP98 KDM5A" = "NUP98::KDM5A",
-    "NUP98 DDX10" = "NUP98::DDX10",
-    "NUP98 HOXA9" = "NUP98::HOXA9",
-    "NUP98 HOXD13" = "NUP98::HOXD13",
-    "NUP98 PHF23" = "NUP98::PHF23",
-    "ETV6 MNX1" = "ETV6::MNX1",
-    "PICALM MLLT10" = "PICALM::MLLT10",
-    "FUS ERG" = "FUS::ERG",
-    "RUNX1 CBFA2T3" = "RUNX1::CBFA2T3",
-    "CBFA2T3 GLIS2" = "CBFA2T3::GLIS2",
-    "MYB GATA1" = "MYB::GATA1",
-    "CBFA2T3 GLIS3" = "CBFA2T3::GLIS3",
-    "RUNX1 CBFA2T2" = "RUNX1::CBFA2T2" ,
-    .default = cleaned
-  )
-
-  # Enforce KMT2A fusion formatting with '::' for any remaining specific partners.
-  # Keep the grouped bucket label unchanged.
-  out <- vapply(out, function(lbl) {
-    if (identical(lbl, "Other KMT2A-r.")) return(lbl)
-    if (!grepl("^KMT2A\\b", lbl)) return(lbl)
-    parts <- strsplit(lbl, "\\s+", perl = TRUE)[[1]]
-    if (length(parts) < 2L) return(lbl)
-    paste(c("KMT2A", parts[-1]), collapse = "::")
-  }, FUN.VALUE = character(1))
-
-  # Stable plotting order: core recurrent classes first, then rarer fusions.
-  base_order <- c(
-    "PML::RARA",
-    "RUNX1::RUNX1T1",
-    "CBFB::MYH11",
-    "MLLT3::KMT2A",
-    "Other KMT2A-r.",
-    "DEK::NUP214",
-    "MECOM rearrangements",
-    "GATA2;MECOM",
-    "MECOM, other",
-    "Other rare translocations",
-    
-    "PRDM16::RPN1",
-    "NPM1::MLF1",
-    "KAT6A::CREBBP",
-    "RBM15::MRTF1",
-    "NUP98::NSD1",
-    "NUP98::KDM5A",
-    "NUP98, other partners",
-    "ETV6::MNX1",
-    "PICALM::MLLT10",
-    "FUS::ERG",
-    "RUNX1::CBFA2T3",
-    "CBFA2T3::GLIS2",
-    "BCR::ABL1",
-    "mutated NPM1",
-    "in-frame bZIP CEBPA",
-    "MDS-related",
-    "mutated TP53",
-    "MDS-related, gene mutations",
-    "MDS-related, cytogenetic abn.",
-    "AML, NOS",
-    
-    "NUP98::DDX10",
-    "NUP98::HOXA9",
-    "NUP98::HOXD13",
-    "NUP98::PHF23"
-  )
-  kmt2a_specific <- sort(unique(out[grepl("^KMT2A::", out)]))
-  kmt2a_specific <- setdiff(kmt2a_specific, "KMT2A::MLLT3")
-  anchor_idx <- match("Other KMT2A-r.", base_order)
-  levels_order <- c(
-    base_order[seq_len(anchor_idx)],
-    kmt2a_specific,
-    base_order[(anchor_idx + 1L):length(base_order)]
-  )
-  levels_order <- c(levels_order, setdiff(sort(unique(out)), levels_order))
-  out <- factor(out, levels = levels_order)
-  out
+# Plot series scales (plot_series_levels, config_labels, config_colors) set in paths chunk.
+add_plot_series <- function(df) {
+  if (nrow(df) == 0L) return(df)
+  if (!"class_balanced_ood" %in% names(df)) {
+    return(df %>%
+      mutate(
+        plot_series_key = as.character(config_key),
+        plot_series_label = as.character(config_label)
+      ))
+  }
+  df %>%
+    mutate(
+      plot_series_key = case_when(
+        is.na(class_balanced_ood) ~ as.character(config_key),
+        class_balanced_ood ~ paste(as.character(config_key), "balanced", sep = "|"),
+        TRUE ~ paste(as.character(config_key), "unweighted", sep = "|")
+      ),
+      plot_series_label = case_when(
+        is.na(class_balanced_ood) ~ as.character(config_label),
+        class_balanced_ood ~ paste0(as.character(config_label), " | OOD wt: balanced"),
+        TRUE ~ paste0(as.character(config_label), " | OOD wt: unweighted")
+      )
+    )
 }
+
+build_plot_series_meta <- function(df) {
+  meta_cols <- c("plot_series_key", "plot_series_label", "config_key")
+  if ("class_balanced_ood" %in% names(df)) {
+    meta_cols <- c(meta_cols, "class_balanced_ood")
+  }
+  df %>%
+    add_plot_series() %>%
+    distinct(across(all_of(meta_cols))) %>%
+    mutate(
+      is_maxprob = grepl("^maxprob", config_key),
+      ood_sort = if ("class_balanced_ood" %in% names(.)) {
+        dplyr::case_when(
+          is.na(class_balanced_ood) ~ 0L,
+          class_balanced_ood ~ 1L,
+          TRUE ~ 2L
+        )
+      } else {
+        0L
+      }
+    ) %>%
+    arrange(is_maxprob, config_key, ood_sort)
+}
+
+init_plot_series_scales <- function(series_meta) {
+  plot_series_levels <<- series_meta$plot_series_key
+  config_labels <<- setNames(series_meta$plot_series_label, series_meta$plot_series_key)
+  config_colors <<- setNames(
+    scales::hue_pal(l = 65, c = 100)(nrow(series_meta)),
+    series_meta$plot_series_key
+  )
+  invisible(series_meta)
+}
+
+THRESHOLD_METHOD_LEVELS <- c("pooled_oof", "jackknife_adjusted", "ucb_95")
+THRESHOLD_METHOD_LABELS <- c(
+  "Pooled out-of-fold",
+  "Jackknife-adjusted",
+  "UCB (95%, one-sided)"
+)
+names(THRESHOLD_METHOD_LABELS) <- THRESHOLD_METHOD_LEVELS
+threshold_method_linetypes <- c("solid", "dashed", "dotdash")
+names(threshold_method_linetypes) <- THRESHOLD_METHOD_LEVELS
+
+# Final deployment rejectors (SVM-only; single-head max-prob and ridge in-model).
+DEPLOY_REJECTOR_LEVELS <- c(
+  "svm_single_head",
+  "svm_ridge_in_model"
+)
+DEPLOY_REJECTOR_LABELS <- c(
+  "SVM max-prob | Single-head",
+  "SVM ridge (in-model) | Single-head"
+)
+names(DEPLOY_REJECTOR_LABELS) <- DEPLOY_REJECTOR_LEVELS
+deploy_rejector_colors <- c("#ff7f0e", "#2ca02c")
+names(deploy_rejector_colors) <- DEPLOY_REJECTOR_LEVELS
 ```
 
-OOD-aware single-head rejector (`with_leftout_ood_aware`): inner CV **scores every recipe at 3%, 5%, and 10%** requested operating risk (threshold logic per anchor), **`rank_inner_scores` produces a rank at each anchor**, then the **winning RHS minimizes the sum of those three ranks** (ties: lower worst rank, then better rank at 5%, 3%, 10%, then `rhs_key`). **Outer** evaluation and primary tables still use **5%** as the requested accepted risk for thresholding on the pool and target fold. The calibration curve CSV sweeps requested risks **1–10%** (0.5% steps) **holding that fused winner’s RHS** (threshold refit only).
+SVM-only calibration compares two single-head rejectors: **max-prob** and **ridge (in-model confidence features)**. Threshold methods: **pooled out-of-fold**, **jackknife-adjusted**, and **UCB 95% (one-sided)**.
 
-Outputs from `Rscript R/calibration_reject_models.R`:
+**Threshold calibration (three methods, reported side by side):**
 
-- `nested_target_risk_per_fold.csv` — one row per outer target fold with outer metrics for the fused inner winner (`inner_winner_optional_features`, ranks `inner_winner_inner_rank_p03` / `_p05` / `_p10`, `inner_winner_fusion_rank_sum`). **Outer requested accepted risk = 5%** for primary reporting.
-- `nested_target_risk_summary_four_settings.csv` — aggregated by label set and CV/LOSO at **5%** (`modal_inner_winner_recipe` = most frequent exact winning recipe across folds).
-- `nested_target_risk_summary_max_prob.csv` — same aggregation at **5%** for **`max_prob` only** (no inner feature selection).
-- `nested_target_risk_summary_combined.csv` — both models in one table (`calibration_recipe` column).
-- `nested_target_risk_feature_heatmap_long.csv` — feature selection frequency by setting (**5%**).
-- `nested_target_risk_inner_scores_ranked.csv` — full inner CV grid per outer fold with `inner_rank` (**5%**).
-- `nested_target_risk_calibration_curve.csv` — mean realized outer-fold **accepted risk** and **seen-class coverage** vs requested targets **1%, 1.5%, …, 10%** (step **0.5%**), using the **fused inner-winning RHS** (same recipe across that sweep; only the outer threshold is refit per requested risk).
-- `nested_target_risk_calibration_curve_per_fold.csv` — same sweep, one curve per outer **target_fold** (no cross-fold aggregation).
-- `nested_target_risk_calibration_compare.csv` — same risk sweep for **fused inner-best features** vs **`max_prob` only** (cross-fold means; for comparison plots and slope β in the Rmd).
-- `nested_target_risk_full_coverage_summary.csv` — **100% seen-class coverage** baseline (accept all): mean risk and kappa per setting for **multivariate accept-all** and **classifier-only** (OOD-aware outer folds).
-- `nested_target_risk_rejection_stratum_per_fold.csv` — per outer fold, % rejected by stratum (OOD / incorrect seen / correct seen) at **5%** with fused inner-winning RHS.
-- `nested_target_risk_rejection_stratum_summary.csv` — same counts pooled within each label set × CV/LOSO setting.
-- `nested_target_risk_rejection_stratum_loso_labels_averaged.csv` — **LOSO only**: unweighted mean of rejection % across full and collapsed label sets (reference table).
-- `nested_target_risk_rejection_stratum_pooled.csv` — all splits and label sets combined (diagnostic only).
+- **Pooled out-of-fold** (default): pick the probability cutoff from pooled out-of-fold scores on the outer train pool.
+- **Jackknife-adjusted**: within the pool, repeatedly hold out one study, calibrate on the rest, measure realized minus requested risk on the held-out study; average that gap and subtract it from the requested risk before choosing the cutoff on the full pool.
+- **UCB (95%, one-sided)**: pick the most permissive cutoff whose one-sided 95% Wilson upper bound on accepted error is <= requested risk.
 
-**Run the canonical script first** (from repo root):
-
-`Rscript R/calibration_reject_models.R`
+Run from repo root: `Rscript R/calibration_reject_models.R`
 
 ```{r paths}
 repo_root <- if (file.exists("R/outer_cv_analysis.R")) "." else ".."
 out_dir <- file.path(repo_root, "data/out/outer_cv/calibration_feature_utility_selection_safe")
 
-summary_path <- file.path(out_dir, "nested_target_risk_summary_four_settings.csv")
-summary_max_prob_path <- file.path(out_dir, "nested_target_risk_summary_max_prob.csv")
-summary_combined_path <- file.path(out_dir, "nested_target_risk_summary_combined.csv")
-per_fold_path <- file.path(out_dir, "nested_target_risk_per_fold.csv")
-heatmap_path <- file.path(out_dir, "nested_target_risk_feature_heatmap_long.csv")
-inner_scores_path <- file.path(out_dir, "nested_target_risk_inner_scores_ranked.csv")
+summary_operating_path <- file.path(out_dir, "nested_target_risk_summary_operating.csv")
+marce_path <- file.path(out_dir, "nested_target_risk_marce.csv")
 calibration_curve_path <- file.path(out_dir, "nested_target_risk_calibration_curve.csv")
-calibration_curve_per_fold_path <- file.path(out_dir, "nested_target_risk_calibration_curve_per_fold.csv")
-calibration_compare_path <- file.path(out_dir, "nested_target_risk_calibration_compare.csv")
-full_coverage_summary_path <- file.path(out_dir, "nested_target_risk_full_coverage_summary.csv")
-rejection_stratum_summary_path <- file.path(out_dir, "nested_target_risk_rejection_stratum_summary.csv")
-rejection_stratum_loso_avg_path <- file.path(
-  out_dir, "nested_target_risk_rejection_stratum_loso_labels_averaged.csv"
-)
+calibration_fold_coverage_path <- file.path(out_dir, "nested_target_risk_calibration_fold_coverage.csv")
+per_fold_operating_path <- file.path(out_dir, "nested_target_risk_per_fold_operating.csv")
+probability_samples_path <- file.path(out_dir, "nested_target_risk_probability_samples.csv")
+inner_logloss_summary_path <- file.path(out_dir, "nested_target_risk_inner_logloss_summary.csv")
 
-if (!file.exists(summary_path)) {
-  stop(
-    "Summary CSV not found. Run:\n  Rscript R/calibration_reject_models.R\n",
-    "Expected: ", summary_path
-  )
-}
-
-summary_df <- readr::read_csv(summary_path, show_col_types = FALSE)
-summary_max_prob_df <- if (file.exists(summary_max_prob_path)) {
-  readr::read_csv(summary_max_prob_path, show_col_types = FALSE)
-} else {
-  data.frame()
-}
-summary_combined_df <- if (file.exists(summary_combined_path)) {
-  readr::read_csv(summary_combined_path, show_col_types = FALSE)
-} else {
-  data.frame()
-}
-per_fold_df <- if (file.exists(per_fold_path)) {
-  readr::read_csv(per_fold_path, show_col_types = FALSE)
-} else {
-  data.frame()
-}
-heatmap_df <- if (file.exists(heatmap_path)) {
-  readr::read_csv(heatmap_path, show_col_types = FALSE)
-} else {
-  data.frame()
-}
-inner_scores_df <- if (file.exists(inner_scores_path)) {
-  readr::read_csv(inner_scores_path, show_col_types = FALSE)
-} else {
-  data.frame()
-}
-calibration_curve_df <- if (file.exists(calibration_curve_path)) {
-  readr::read_csv(calibration_curve_path, show_col_types = FALSE)
-} else {
-  data.frame()
-}
-calibration_curve_per_fold_df <- if (file.exists(calibration_curve_per_fold_path)) {
-  readr::read_csv(calibration_curve_per_fold_path, show_col_types = FALSE)
-} else {
-  data.frame()
-}
-calibration_compare_df <- if (file.exists(calibration_compare_path)) {
-  readr::read_csv(calibration_compare_path, show_col_types = FALSE)
-} else {
-  data.frame()
-}
-full_coverage_summary_df <- if (file.exists(full_coverage_summary_path)) {
-  readr::read_csv(full_coverage_summary_path, show_col_types = FALSE)
-} else {
-  data.frame()
-}
-rejection_stratum_summary_df <- if (file.exists(rejection_stratum_summary_path)) {
-  readr::read_csv(rejection_stratum_summary_path, show_col_types = FALSE)
-} else {
-  data.frame()
-}
-rejection_stratum_loso_avg_df <- if (file.exists(rejection_stratum_loso_avg_path)) {
-  readr::read_csv(rejection_stratum_loso_avg_path, show_col_types = FALSE)
-} else {
-  data.frame()
-}
-```
-
-The summary table and heatmap below use outputs at **5%** requested accepted risk only. **Kappa** is Cohen's kappa on **accepted** samples only (pred vs truth).
-
-## Summary by setting
-
-Inner-winning multivariate recipe at **5%** requested accepted risk.
-
-```{r summary_table}
-summary_display <- summary_df %>%
-  mutate(
-    split_type = toupper(as.character(split_type)),
-    label_display = dplyr::recode(
-      as.character(label_set),
-      full_subtypes = "Full subtypes",
-      collapsed_classes = "Collapsed"
-    )
-  ) %>%
-  select(
-    label_display, split_type, setting_col,
-    scenario_key, scenario_name, modal_inner_winner_recipe,
-    n_outer_folds,
-    mean_outer_coverage_seen, sd_outer_coverage_seen,
-    mean_outer_risk_all_accepted, sd_outer_risk_all_accepted,
-    mean_outer_kappa_accepted, sd_outer_kappa_accepted
-  ) %>%
-  arrange(label_display, split_type)
-
-#View(summary_display)
-```
-
-Probability-only (`max_prob`) rejector at **5%** requested accepted risk.
-
-```{r summary_table_max_prob}
-if (nrow(summary_max_prob_df) == 0L) {
-  knitr::kable(data.frame(
-    note = "No nested_target_risk_summary_max_prob.csv — rerun Rscript R/calibration_reject_models.R"
-  ))
-} else {
-  summary_display_max_prob <- summary_max_prob_df %>%
-    mutate(
-      split_type = toupper(as.character(split_type)),
-      label_display = dplyr::recode(
-        as.character(label_set),
-        full_subtypes = "Full subtypes",
-        collapsed_classes = "Collapsed"
-      )
-    ) %>%
-    select(
-      label_display, split_type, setting_col,
-      scenario_key, scenario_name, modal_inner_winner_recipe,
-      n_outer_folds,
-      mean_outer_coverage_seen, sd_outer_coverage_seen,
-      mean_outer_risk_all_accepted, sd_outer_risk_all_accepted,
-      mean_outer_kappa_accepted, sd_outer_kappa_accepted
-    ) %>%
-    arrange(label_display, split_type)
-
-  #View(summary_display_max_prob)
-}
-```
-
-### Multivariate vs max_prob (5% operating point)
-
-```{r summary_table_combined}
-format_summary_row <- function(df, calibration_model_label) {
-  df %>%
-    mutate(
-      calibration_model = calibration_model_label,
-      split_type = toupper(as.character(split_type)),
-      label_display = dplyr::recode(
-        as.character(label_set),
-        full_subtypes = "Full subtypes",
-        collapsed_classes = "Collapsed"
-      ),
-      mean_outer_coverage_seen_pct = 100 * mean_outer_coverage_seen,
-      sd_outer_coverage_seen_pct = 100 * sd_outer_coverage_seen,
-      mean_outer_risk_all_accepted_pct = 100 * mean_outer_risk_all_accepted,
-      sd_outer_risk_all_accepted_pct = 100 * sd_outer_risk_all_accepted
-    ) %>%
-    select(
-      calibration_model, label_display, split_type, setting_col,
-      modal_inner_winner_recipe, n_outer_folds,
-      mean_outer_coverage_seen_pct, sd_outer_coverage_seen_pct,
-      mean_outer_risk_all_accepted_pct, sd_outer_risk_all_accepted_pct,
-      mean_outer_kappa_accepted, sd_outer_kappa_accepted
-    )
-}
-
-if (nrow(summary_combined_df) > 0L) {
-  summary_compare_display <- summary_combined_df %>%
-    mutate(
-      calibration_model = dplyr::recode(
-        as.character(calibration_recipe),
-        inner_best_features = "Best features (inner winner)",
-        max_prob_only = "Probability only (max_prob)"
-      ),
-      split_type = toupper(as.character(split_type)),
-      label_display = dplyr::recode(
-        as.character(label_set),
-        full_subtypes = "Full subtypes",
-        collapsed_classes = "Collapsed"
-      ),
-      mean_outer_coverage_seen_pct = 100 * mean_outer_coverage_seen,
-      sd_outer_coverage_seen_pct = 100 * sd_outer_coverage_seen,
-      mean_outer_risk_all_accepted_pct = 100 * mean_outer_risk_all_accepted,
-      sd_outer_risk_all_accepted_pct = 100 * sd_outer_risk_all_accepted
-    ) %>%
-    select(
-      calibration_model, label_display, split_type, setting_col,
-      modal_inner_winner_recipe, n_outer_folds,
-      mean_outer_coverage_seen_pct, sd_outer_coverage_seen_pct,
-      mean_outer_risk_all_accepted_pct, sd_outer_risk_all_accepted_pct,
-      mean_outer_kappa_accepted, sd_outer_kappa_accepted
-    ) %>%
-    arrange(label_display, split_type, calibration_model)
-} else if (nrow(summary_df) > 0L && nrow(summary_max_prob_df) > 0L) {
-  summary_compare_display <- dplyr::bind_rows(
-    format_summary_row(summary_df, "Best features (inner winner)"),
-    format_summary_row(summary_max_prob_df, "Probability only (max_prob)")
-  ) %>%
-    arrange(label_display, split_type, calibration_model)
-} else {
-  summary_compare_display <- data.frame(
-    note = "Need summary CSVs — rerun Rscript R/calibration_reject_models.R"
-  )
-}
-
-summary_compare_display %>% filter(split_type == "LOSO")
-```
-
-## Publication: full-coverage baseline risk and kappa (OOD-aware)
-
-At **100% seen-class coverage** (accept all samples, rejector threshold = 0): **risk** = accepted error rate (`accept_combined` target); **kappa** = Cohen's kappa on accepted predictions vs truth. **Multivariate** rows use the inner-winning recipe per fold; **classifier-only** = ensemble predictions with no rejector. Source: `nested_target_risk_full_coverage_summary.csv`.
-
-```{r publication_full_coverage}
-if (nrow(full_coverage_summary_df) == 0L) {
-  knitr::kable(data.frame(
-    note = "No nested_target_risk_full_coverage_summary.csv — rerun Rscript R/calibration_reject_models.R"
-  ))
-} else {
-  full_coverage_display <- full_coverage_summary_df %>%
-    mutate(
-      split_type = toupper(as.character(split_type)),
-      label_display = dplyr::recode(
-        as.character(label_set),
-        full_subtypes = "Full subtypes",
-        collapsed_classes = "Collapsed"
-      ),
-      baseline_kind = dplyr::recode(
-        as.character(baseline_kind),
-        multivariate_accept_all = "Multivariate (accept all)",
-        classifier_only = "Classifier only (no rejector)"
-      ),
-      risk_pct = 100 * mean_outer_risk_all_accepted,
-      sd_risk_pct = 100 * sd_outer_risk_all_accepted,
-      coverage_seen_pct = 100 * mean_outer_coverage_seen
-    ) %>%
-    select(
-      baseline_kind, label_display, split_type, setting_col, n_outer_folds,
-      risk_pct, sd_risk_pct, coverage_seen_pct,
-      mean_outer_kappa_accepted, sd_outer_kappa_accepted
-    ) %>%
-    arrange(baseline_kind, label_display, split_type)
-
-  knitr::kable(full_coverage_display, digits = 2)
-
-  publication_sentence <- function(df, label_set_key, label_label) {
-    row <- df %>%
-      filter(
-        baseline_kind == "Multivariate (accept all)",
-        label_set == label_set_key
-      )
-    if (nrow(row) != 2L) {
-      return(sprintf("(%s: full-coverage summary incomplete — need CV and LOSO rows)", label_label))
-    }
-    loso <- row %>% filter(split_type == "LOSO")
-    cv <- row %>% filter(split_type == "CV")
-    sprintf(
-      paste0(
-        "[%s] We then evaluated the risk–coverage curve of the multivariate model and its ",
-        "ability to filter mispredictions. In the setting that included unseen classes to better ",
-        "approximate real-world application, the baseline risk at full coverage (100%%) was ",
-        "%.1f%% in the LOSO setting (kappa = %.2f) and %.1f%% in the CV setting (kappa = %.2f)."
-      ),
-      label_label,
-      loso$risk_pct[[1]],
-      loso$mean_outer_kappa_accepted[[1]],
-      cv$risk_pct[[1]],
-      cv$mean_outer_kappa_accepted[[1]]
-    )
-  }
-
-  mv_tbl <- full_coverage_display %>%
-    filter(baseline_kind == "Multivariate (accept all)") %>%
-    mutate(label_set = dplyr::recode(
-      label_display,
-      "Full subtypes" = "full_subtypes",
-      "Collapsed" = "collapsed_classes"
-    ))
-
-  cat(publication_sentence(mv_tbl, "collapsed_classes", "Collapsed classes"), "\n\n")
-  cat(publication_sentence(mv_tbl, "full_subtypes", "Full subtypes"), "\n")
-}
-```
-
-## Publication: rejection by outcome stratum (LOSO, 5% operating point)
-
-**LOSO only.** At the **5%** requested accepted-risk operating point (fused inner-winning multivariate RHS per outer fold; rejected = `p_hat` below pool LOSO-OOF threshold). Manuscript sentences below are reported **separately** for collapsed and full subtype classification. Source: `nested_target_risk_rejection_stratum_summary.csv` (unweighted mean across label sets: `nested_target_risk_rejection_stratum_loso_labels_averaged.csv`).
-
-```{r publication_rejection_stratum}
-publication_rejection_sentence <- function(df, label_set_key, label_label) {
-  row <- df %>% filter(split_type == "loso", label_set == label_set_key)
-  if (nrow(row) != 1L) {
-    return(sprintf("(%s: LOSO rejection stratum incomplete)", label_label))
-  }
-  sprintf(
-    paste0(
-      "[%s] At this target 5%% error rate for the LOSO setting, we found that ",
-      "%.1f%% of samples from unseen classes and %.1f%% of misclassified samples ",
-      "were rejected, compared with %.1f%% of correctly classified samples from seen classes."
-    ),
-    label_label,
-    row$pct_rejected_ood[[1]],
-    row$pct_rejected_incorrect_seen[[1]],
-    row$pct_rejected_correct_seen[[1]]
-  )
-}
-
-if (nrow(rejection_stratum_summary_df) == 0L) {
-  knitr::kable(data.frame(
-    note = paste(
-      "No nested_target_risk_rejection_stratum_summary.csv —",
-      "rerun Rscript R/calibration_reject_models.R"
-    )
-  ))
-} else {
-  rejection_loso_by_label <- rejection_stratum_summary_df %>%
-    filter(split_type == "loso") %>%
-    mutate(label_display = label_set_to_display(label_set)) %>%
-    select(
-      label_display, n_outer_folds,
-      pct_rejected_ood, pct_rejected_incorrect_seen, pct_rejected_correct_seen
-    ) %>%
-    arrange(label_display)
-  knitr::kable(rejection_loso_by_label, digits = 1)
-
-  if (nrow(rejection_stratum_loso_avg_df) > 0L) {
-    loso_avg_display <- rejection_stratum_loso_avg_df %>%
-      select(
-        split_type, requested_target_risk_pct, n_outer_folds, n_label_sets_averaged,
-        pct_rejected_ood, pct_rejected_incorrect_seen, pct_rejected_correct_seen
-      )
-    knitr::kable(
-      loso_avg_display,
-      digits = 1,
-      caption = "Unweighted mean across collapsed and full (reference only)"
-    )
-  }
-
-  loso_tbl <- rejection_stratum_summary_df %>% filter(split_type == "loso")
-  cat(publication_rejection_sentence(loso_tbl, "collapsed_classes", "Collapsed classes"), "\n\n")
-  cat(publication_rejection_sentence(loso_tbl, "full_subtypes", "Full subtypes"), "\n")
-}
-```
-
-## Outer-fold detail
-
-```{r per_fold}
-if (nrow(per_fold_df) == 0) {
-  data.frame(note = "No per-fold CSV")
-} else {
-  per_fold_df %>%
-    mutate(split_type = toupper(as.character(split_type))) %>%
-    arrange(label_set, split_type, target_fold) %>%
-    select(
-      label_set, split_type, target_fold,
-      scenario_key, scenario_name,
-      outer_coverage_seen, outer_coverage_seen_median,
-      outer_risk_all_accepted, outer_risk_all_accepted_median,
-      outer_kappa_accepted, outer_kappa_accepted_median,
-      inner_winner_optional_features
-    )
-}
-```
-
-## Inner grid: top candidates (inner_rank <= 15)
-
-Full grid is in `nested_target_risk_inner_scores_ranked.csv`. Below: first outer target fold in each **(label_set, split_type)** group, top 15 inner ranks.
-
-```{r inner_top}
-if (nrow(inner_scores_df) == 0) {
-  knitr::kable(data.frame(note = "No inner_scores_ranked CSV; run calibration_reject_models.R"))
-} else {
-  inner_scores_df %>%
-    group_by(label_set, split_type) %>%
-    mutate(tf_chr = as.character(target_fold)) %>%
-    filter(tf_chr == min(tf_chr)) %>%
-    ungroup() %>%
-    filter(inner_rank <= 15L) %>%
-    arrange(label_set, split_type, inner_rank) %>%
-    dplyr::select(dplyr::any_of(c(
-      "label_set", "split_type", "target_fold", "scenario_key", "inner_rank",
-      "inner_selection_tier", "recipe_optional_count", "dist_to_target",
-      "mean_coverage", "sd_coverage", "mean_risk", "sd_risk",
-      "rhs_key"
-    ))) %>%
-    knitr::kable()
-}
-```
-
-## Feature selection frequency heatmap
-
-Rows: optional features (excluding baseline `max_prob`). Columns: **CV/LOSO | label set**. Cell: fraction of outer folds where the inner-winning recipe included the feature.
-
-```{r heatmap, fig.width = 11, fig.height = 8}
-if (nrow(heatmap_df) == 0) {
-  data.frame(note = "No heatmap CSV; run calibration_reject_models.R")
-} else {
-  # Human-readable labels for optional rejector features.
-  feature_pretty_map <- c(
-    margin = "Top-1 vs Top-2 margin",
-    entropy = "Prediction entropy",
-    top1_prob_variance_across_models = "Top-1 probability variance across models",
-    knn10_mean_d = "kNN (k=10) mean distance",
-    knn10_min_d = "kNN (k=10) minimum distance",
-    knn10_q90_d = "kNN (k=10) 90th percentile distance",
-    conformal_set_size_90 = "Conformal set size (90%)"
-  )
-
-  col_levels_raw <- unique(as.character(heatmap_df$setting_col))
-  # Put LOSO settings first, then CV (stable within each split).
-  col_levels <- c(
-    sort(col_levels_raw[grepl("^LOSO\\s*\\|", col_levels_raw)]),
-    sort(col_levels_raw[grepl("^CV\\s*\\|", col_levels_raw)]),
-    sort(setdiff(col_levels_raw, c(
-      col_levels_raw[grepl("^LOSO\\s*\\|", col_levels_raw)],
-      col_levels_raw[grepl("^CV\\s*\\|", col_levels_raw)]
-    )))
-  )
-  if (length(col_levels) == 0L) {
-    data.frame(note = "Empty heatmap levels")
-  } else {
-    feature_levels <- sort(unique(as.character(heatmap_df$feature)))
-    feature_levels_pretty <- vapply(
-      feature_levels,
-      function(f) dplyr::recode(f, !!!feature_pretty_map, .default = f),
-      FUN.VALUE = character(1)
-    )
-
-    h <- heatmap_df %>%
-      tidyr::complete(feature, setting_col = col_levels, fill = list(frac_outer_folds_selected = 0)) %>%
-      mutate(
-        setting_col = factor(setting_col, levels = col_levels),
-        feature_pretty = dplyr::recode(as.character(feature), !!!feature_pretty_map, .default = as.character(feature)),
-        feature_pretty = factor(feature_pretty, levels = feature_levels_pretty)
-      )
-
-    p_features_hm <- ggplot(h, aes(x = setting_col, y = feature_pretty, fill = frac_outer_folds_selected)) +
-      geom_tile(color = "white", linewidth = 0.3) +
-      scale_fill_gradient(limits = c(0, 1), low = "white", high = "#2171b5", name = "Fold fraction") +
-      theme_bw() +
-      theme(
-        axis.text.x = element_text(angle = 55, hjust = 1, size = 7),
-        panel.grid = element_blank()
-      ) +
-      labs(
-        title = "Selected features in best inner recipe",
-        x = NULL,
-        y = NULL
-      )
+for (p in c(
+  summary_operating_path, marce_path, calibration_curve_path, probability_samples_path
+)) {
+  if (!file.exists(p)) {
+    stop("Missing ", p, ". Run: Rscript R/calibration_reject_models.R")
   }
 }
-p_features_hm
-```
 
-## Requested vs realized risk and coverage (1–10% targets, 0.5% steps)
+summary_operating_df <- read_csv(summary_operating_path, show_col_types = FALSE) %>%
+  filter(requested_target_risk_pct %in% OPERATING_RISK_PCTS) %>%
+  add_plot_series()
 
-Same spirit as the deployable operating-point curves in `analyse_results.Rmd`. **Inner RHS is the fused winner** (best sum of ranks across inner grids at 3%, 5%, 10%); x-axis requested risks run **from 1% to 10% in 0.5% steps**; for each point the outer threshold is chosen from pool LOSO-OOF at that risk; ribbons use fold-wise SE (95% normal approximation). Source: `nested_target_risk_calibration_curve.csv`.
+init_plot_series_scales(build_plot_series_meta(summary_operating_df))
 
-```{r calibration_curves, fig.width = 10, fig.height = 9}
-if (nrow(calibration_curve_df) == 0L) {
-  knitr::kable(data.frame(note = "No nested_target_risk_calibration_curve.csv — rerun Rscript R/calibration_reject_models.R"))
+marce_df <- read_csv(marce_path, show_col_types = FALSE) %>% add_plot_series()
+calibration_curve_df <- read_csv(calibration_curve_path, show_col_types = FALSE) %>% add_plot_series()
+per_fold_operating_df <- read_csv(per_fold_operating_path, show_col_types = FALSE) %>% add_plot_series()
+fold_coverage_df <- if (file.exists(calibration_fold_coverage_path)) {
+  read_csv(calibration_fold_coverage_path, show_col_types = FALSE) %>% add_plot_series()
 } else {
-  curve_plot_df <- calibration_curve_df %>%
-    mutate(
-      split_type_fac = factor(toupper(split_type), levels = SPLIT_TYPE_LEVELS),
-      label_display = label_set_to_display(label_set)
-    )
-
-  p_nested_requested_vs_realized_risk <- ggplot(
-    curve_plot_df,
-    aes(x = requested_target_risk_pct, y = realized_risk_pct)
-  ) +
-    geom_ribbon(
-      aes(ymin = realized_risk_ci95_lo_pct, ymax = realized_risk_ci95_hi_pct),
-      alpha = 0.14
-    ) +
-    geom_line(linewidth = 1) +
-    geom_point(size = 1.8) +
-    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "grey40") +
-    facet_grid(label_display ~ split_type_fac) +
-    labs(
-      title = "Requested vs realized accepted risk",
-      subtitle = "Ribbons = 95% CI",
-      x = "Requested risk target (%)",
-      y = "Realized accepted risk (%)"
-    ) +
-    theme_bw()
-  print(p_nested_requested_vs_realized_risk)
-
-  p_nested_requested_vs_coverage <- ggplot(
-    curve_plot_df,
-    aes(x = requested_target_risk_pct, y = realized_coverage_seen_pct)
-  ) +
-    geom_ribbon(
-      aes(ymin = realized_coverage_seen_ci95_lo_pct, ymax = realized_coverage_seen_ci95_hi_pct),
-      alpha = 0.14
-    ) +
-    geom_line(linewidth = 1) +
-    geom_point(size = 1.8) +
-    facet_grid(label_display ~ split_type_fac) +
-    labs(
-      title = "Requested risk vs realized seen-class coverage",
-      subtitle = "Ribbons = 95% CI",
-      x = "Requested risk target (%)",
-      y = "Realized seen-class coverage (%)"
-    ) +
-    theme_bw()
-  print(p_nested_requested_vs_coverage)
+  data.frame()
+}
+probability_samples_df <- read_csv(probability_samples_path, show_col_types = FALSE) %>% add_plot_series()
+inner_logloss_summary_df <- if (file.exists(inner_logloss_summary_path)) {
+  read_csv(inner_logloss_summary_path, show_col_types = FALSE)
+} else {
+  data.frame()
 }
 ```
 
-### By label set only (CV green, LOSO purple)
+## Inner CV log loss
 
-Same mean + 95% CI as above; **one panel per label set**, CV and LOSO overlaid.
+Mean inner cross-validation log loss per outer fold (study-blocked inner CV on the outer train pool), averaged across LOSO folds. Lower is better. **Max-prob** uses a fixed `max_prob` GLM (no feature selection); **ridge** uses the inner winner (`inner_rank == 1`). Rank is within `label_set × split_type × nested_rejector_mode`.
 
-```{r calibration_curves_by_label, fig.width = 9, fig.height = 5}
-if (nrow(calibration_curve_df) == 0L) {
-  knitr::kable(data.frame(note = "No nested_target_risk_calibration_curve.csv — rerun Rscript R/calibration_reject_models.R"))
-} else {
-  split_colors <- c("CV" = "#2ca25f", "LOSO" = "#756bb1")
-
-  curve_by_label_df <- calibration_curve_df %>%
-    mutate(
-      split_type_fac = factor(toupper(split_type), levels = SPLIT_TYPE_LEVELS),
-      label_display = label_set_to_display(label_set),
-      # For this two-panel comparison: Full left, Collapsed right.
-      label_display = factor(
-        as.character(label_display),
-        levels = c("Full subtypes", "Collapsed (merged)")
-      )
-    )
-
-  p_nested_by_label_requested_vs_realized_risk <- ggplot(
-    curve_by_label_df,
-    aes(
-      x = requested_target_risk_pct,
-      y = realized_risk_pct,
-      color = split_type_fac,
-      fill = split_type_fac,
-      group = split_type_fac
-    )
-  ) +
-    geom_ribbon(
-      aes(ymin = realized_risk_ci95_lo_pct, ymax = realized_risk_ci95_hi_pct),
-      alpha = 0.18,
-      color = NA
-    ) +
-    geom_line(linewidth = 1) +
-    geom_point(size = 1.6) +
-    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "grey40") +
-    scale_color_manual(values = split_colors, name = "Split") +
-    scale_fill_manual(values = split_colors, name = "Split") +
-    facet_wrap(~ label_display, ncol = 2) +
-    labs(
-      title = "Requested vs realized accepted risk",
-      x = "Requested risk target (%)",
-      y = "Realized accepted risk (%)"
-    ) +
-    theme_bw() +
-    theme(legend.position = "bottom")
- # print(p_nested_by_label_requested_vs_realized_risk)
-
-  p_nested_by_label_requested_vs_coverage <- ggplot(
-    curve_by_label_df,
-    aes(
-      x = requested_target_risk_pct,
-      y = realized_coverage_seen_pct,
-      color = split_type_fac,
-      fill = split_type_fac,
-      group = split_type_fac
-    )
-  ) +
-    geom_ribbon(
-      aes(ymin = realized_coverage_seen_ci95_lo_pct, ymax = realized_coverage_seen_ci95_hi_pct),
-      alpha = 0.18,
-      color = NA
-    ) +
-    geom_line(linewidth = 1) +
-    geom_point(size = 1.6) +
-    scale_color_manual(values = split_colors, name = "Split") +
-    scale_fill_manual(values = split_colors, name = "Split") +
-    facet_wrap(~ label_display, ncol = 2) +
-    labs(
-      title = "Requested risk vs realized seen-class coverage",
-      x = "Requested risk target (%)",
-      y = "Realized seen-class coverage (%)"
-    ) +
-    theme_bw() +
-    theme(legend.position = "bottom")
- # print(p_nested_by_label_requested_vs_coverage)
-}
-
-p1 <- p_nested_by_label_requested_vs_realized_risk/p_nested_by_label_requested_vs_coverage+ plot_layout(guides = "collect") & theme(legend.position = 'bottom')
-p1
-```
-
-### Per outer fold
-
-Same setup as above; one line per **target_fold** (no ribbons). Source: `nested_target_risk_calibration_curve_per_fold.csv`.
-
-```{r calibration_curves_per_fold, fig.width = 10, fig.height = 9}
-if (nrow(calibration_curve_per_fold_df) == 0L) {
-  knitr::kable(data.frame(
-    note = "No nested_target_risk_calibration_curve_per_fold.csv — rerun Rscript R/calibration_reject_models.R"
-  ))
-} else {
-  curve_pf_plot_df <- calibration_curve_per_fold_df %>%
-    mutate(
-      split_type_fac = factor(toupper(split_type), levels = SPLIT_TYPE_LEVELS),
-      label_display = label_set_to_display(label_set),
-      target_fold = as.character(target_fold)
-    )
-
-  p_nested_pf_requested_vs_realized_risk <- ggplot(
-    curve_pf_plot_df,
-    aes(
-      x = requested_target_risk_pct,
-      y = realized_risk_pct,
-      group = target_fold,
-      color = target_fold
-    )
-  ) +
-    geom_line(linewidth = 0.7, alpha = 0.85) +
-    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "grey40") +
-    facet_grid(label_display ~ split_type_fac) +
-    labs(
-      title = "Requested vs realized accepted risk (per outer fold)",
-      subtitle = "One line per held-out target fold",
-      x = "Requested risk target (%)",
-      y = "Realized accepted risk (%)",
-      color = "Target fold"
-    ) +
-    theme_bw() +
-    theme(legend.position = "bottom")
-  print(p_nested_pf_requested_vs_realized_risk)
-
-  p_nested_pf_requested_vs_coverage <- ggplot(
-    curve_pf_plot_df,
-    aes(
-      x = requested_target_risk_pct,
-      y = realized_coverage_seen_pct,
-      group = target_fold,
-      color = target_fold
-    )
-  ) +
-    geom_line(linewidth = 0.7, alpha = 0.85) +
-    facet_grid(label_display ~ split_type_fac) +
-    labs(
-      title = "Requested risk vs realized seen-class coverage (per outer fold)",
-      subtitle = "One line per held-out target fold",
-      x = "Requested risk target (%)",
-      y = "Realized seen-class coverage (%)",
-      color = "Target fold"
-    ) +
-    theme_bw() +
-    theme(legend.position = "bottom")
-  print(p_nested_pf_requested_vs_coverage)
-}
-```
-
-### Mean line with per-fold points
-
-Black line = cross-fold mean (`nested_target_risk_calibration_curve.csv`); grey points = individual outer folds (`nested_target_risk_calibration_curve_per_fold.csv`).
-
-```{r calibration_curves_mean_plus_points, fig.width = 10, fig.height = 9}
-if (nrow(calibration_curve_df) == 0L || nrow(calibration_curve_per_fold_df) == 0L) {
-  knitr::kable(data.frame(
-    note = "Need both calibration curve CSVs — rerun Rscript R/calibration_reject_models.R"
-  ))
-} else {
-  curve_mean_plot_df <- calibration_curve_df %>%
-    mutate(
-      split_type_fac = factor(toupper(split_type), levels = SPLIT_TYPE_LEVELS),
-      label_display = label_set_to_display(label_set)
-    )
-  curve_pf_pts_df <- calibration_curve_per_fold_df %>%
-    mutate(
-      split_type_fac = factor(toupper(split_type), levels = SPLIT_TYPE_LEVELS),
-      label_display = label_set_to_display(label_set)
-    )
-
-  p_nested_mean_pts_requested_vs_realized_risk <- ggplot() +
-    geom_point(
-      data = curve_pf_pts_df,
-      aes(x = requested_target_risk_pct, y = realized_risk_pct),
-      color = "grey55",
-      alpha = 0.55,
-      size = 1.1
-    ) +
-    geom_line(
-      data = curve_mean_plot_df,
-      aes(x = requested_target_risk_pct, y = realized_risk_pct),
-      color = "black",
-      linewidth = 1
-    ) +
-    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "grey40") +
-    facet_grid(label_display ~ split_type_fac) +
-    labs(
-      title = "Requested vs realized accepted risk (mean + folds)",
-      subtitle = "Black line = cross-fold mean; grey points = outer folds",
-      x = "Requested risk target (%)",
-      y = "Realized accepted risk (%)"
-    ) +
-    theme_bw()
-  print(p_nested_mean_pts_requested_vs_realized_risk)
-
-  p_nested_mean_pts_requested_vs_coverage <- ggplot() +
-    geom_point(
-      data = curve_pf_pts_df,
-      aes(x = requested_target_risk_pct, y = realized_coverage_seen_pct),
-      color = "grey55",
-      alpha = 0.55,
-      size = 1.1
-    ) +
-    geom_line(
-      data = curve_mean_plot_df,
-      aes(x = requested_target_risk_pct, y = realized_coverage_seen_pct),
-      color = "black",
-      linewidth = 1
-    ) +
-    facet_grid(label_display ~ split_type_fac) +
-    labs(
-      title = "Requested risk vs realized seen-class coverage (mean + folds)",
-      subtitle = "Black line = cross-fold mean; grey points = outer folds",
-      x = "Requested risk target (%)",
-      y = "Realized seen-class coverage (%)"
-    ) +
-    theme_bw()
-  print(p_nested_mean_pts_requested_vs_coverage)
-}
-```
-
-## Best features vs max_prob only
-
-Same risk sweep (**1–10%**, 0.5% steps). **Red** = fused inner-best recipe; **blue** = `max_prob` only. Ribbons/error bars = 95% CI across outer folds. Source: `nested_target_risk_calibration_compare.csv`.
-
-```{r calibration_compare_best_vs_maxprob, fig.width = 10, fig.height = 10}
-if (nrow(calibration_compare_df) == 0L) {
-  knitr::kable(data.frame(
-    note = "No nested_target_risk_calibration_compare.csv — rerun Rscript R/calibration_reject_models.R"
-  ))
-} else {
-  recipe_colors <- c(
-    inner_best_features = "#d62728",
-    max_prob_only = "#1f77b4"
+```{r inner_logloss_table}
+if (nrow(inner_logloss_summary_df) == 0L) {
+  knitr::kable(
+    data.frame(note = "Run R/calibration_reject_models.R to generate nested_target_risk_inner_logloss_summary.csv"),
+    caption = "Inner CV log loss (not yet available)"
   )
-  recipe_labels <- c("Best features", "Max AML class probability only")
-
-  compare_plot_df <- calibration_compare_df %>%
-    arrange(label_set, split_type, calibration_recipe, requested_target_risk_pct) %>%
-    mutate(
-      split_type_fac = factor(toupper(split_type), levels = SPLIT_TYPE_LEVELS),
-      label_display = label_set_to_display(label_set),
-      calibration_recipe = factor(
-        as.character(calibration_recipe),
-        levels = c("inner_best_features", "max_prob_only")
-      )
-    )
-
-  p_compare_requested_vs_realized_risk <- ggplot(
-    compare_plot_df,
-    aes(
-      x = requested_target_risk_pct,
-      y = realized_risk_pct,
-      color = calibration_recipe,
-      fill = calibration_recipe,
-      group = calibration_recipe
-    )
-  ) +
-    geom_ribbon(
-      aes(ymin = realized_risk_ci95_lo_pct, ymax = realized_risk_ci95_hi_pct),
-      alpha = 0.18,
-      color = NA
-    ) +
-    geom_line(linewidth = 1) +
-    geom_point(size = 1.6) +
-    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "grey40") +
-    scale_color_manual(values = recipe_colors, labels = recipe_labels, name = NULL) +
-    scale_fill_manual(values = recipe_colors, labels = recipe_labels, name = NULL) +
-    facet_grid(label_display ~ split_type_fac) +
-    labs(
-      title = "Requested vs realized risk",
-      subtitle = "Ribbons = 95% CI",
-      x = "Requested risk target (%)",
-      y = "Realized accepted risk (%)"
-    ) +
-    theme_bw() +
-    theme(legend.position = "bottom")
-  print(p_compare_requested_vs_realized_risk)
-
-  p_compare_risk_vs_coverage <- ggplot(
-    compare_plot_df,
-    aes(
-      x = requested_target_risk_pct,
-      y = realized_coverage_seen_pct,
-      color = calibration_recipe,
-      fill = calibration_recipe,
-      group = calibration_recipe
-    )
-  ) +
-    geom_ribbon(
-      aes(ymin = realized_coverage_seen_ci95_lo_pct, ymax = realized_coverage_seen_ci95_hi_pct),
-      alpha = 0.18,
-      color = NA
-    ) +
-    geom_path(linewidth = 1) +
-    geom_point(size = 1.6) +
-    scale_color_manual(values = recipe_colors, labels = recipe_labels, name = NULL) +
-    scale_fill_manual(values = recipe_colors, labels = recipe_labels, name = NULL) +
-    facet_grid(label_display ~ split_type_fac) +
-    labs(
-      title = "Realized risk vs seen-class coverage",
-      subtitle = "Ribbons = 95% CI",
-      x = "Requested risk (%)",
-      y = "Realized seen-class coverage (%)"
-    ) +
-    theme_bw() +
-    theme(legend.position = "bottom")
-  print(p_compare_risk_vs_coverage)
-}
-
-p_sub_1 <- p_compare_requested_vs_realized_risk + p_compare_risk_vs_coverage
-```
-
-## Requested vs realized risk: calibration slope (β)
-
-From `nested_target_risk_calibration_compare.csv`: OLS **realized risk (%) ~ requested risk (%)** at each point on the 1–10% sweep (cross-fold means). **β = 1** is perfect calibration; smaller **|β − 1|** is better.
-
-```{r calibration_risk_slope}
-if (nrow(calibration_compare_df) == 0L) {
-  knitr::kable(data.frame(
-    note = "No nested_target_risk_calibration_compare.csv — rerun Rscript R/calibration_reject_models.R"
-  ))
 } else {
-  slope_display <- calibration_compare_df %>%
-    group_by(label_set, split_type, setting_col, calibration_recipe) %>%
-    group_modify(function(d, ...) {
-      fit <- stats::lm(realized_risk_pct ~ requested_target_risk_pct, data = d)
-      beta <- unname(stats::coef(fit)[["requested_target_risk_pct"]])
-      data.frame(
-        n_points = nrow(d),
-        slope_beta = beta,
-        intercept = unname(stats::coef(fit)[["(Intercept)"]]),
-        abs_slope_minus_1 = abs(beta - 1),
-        stringsAsFactors = FALSE
-      )
-    }) %>%
-    ungroup() %>%
+  inner_logloss_display <- inner_logloss_summary_df %>%
     mutate(
-      split_type = factor(toupper(as.character(split_type)), levels = SPLIT_TYPE_LEVELS),
+      split_type = toupper(as.character(split_type)),
       label_display = label_set_to_display(label_set),
-      calibration_model = dplyr::recode(
-        as.character(calibration_recipe),
-        inner_best_features = "Best features",
-        max_prob_only = "Max AML class probability only"
+      nested_rejector_mode = dplyr::recode(
+        as.character(nested_rejector_mode),
+        single_head = "Single-head",
+        two_head_min = "Two-head (min nested)"
       )
     ) %>%
-    group_by(label_display, split_type) %>%
-    mutate(closer_to_perfect = abs_slope_minus_1 == min(abs_slope_minus_1)) %>%
-    ungroup() %>%
     select(
-      label_display, split_type, setting_col, calibration_model,
-      n_points, slope_beta, intercept, abs_slope_minus_1, closer_to_perfect
+      rank_mean_logloss, config_label, ensemble_key, recipe_key, rejector_method,
+      nested_rejector_mode, label_display, split_type,
+      n_outer_folds, mean_inner_logloss, sd_inner_logloss, inner_winner_alpha
     ) %>%
-    filter(split_type == "LOSO") %>%
-    arrange(label_display, split_type, calibration_model)
-
-  knitr::kable(slope_display, digits = 3)
-
-  slope_wins <- slope_display %>%
-    filter(closer_to_perfect) %>%
-    count(calibration_model, name = "n_settings_closer")
+    arrange(label_display, split_type, nested_rejector_mode, rank_mean_logloss)
 
   knitr::kable(
-    slope_wins,
-    caption = "Settings (of 4) where |β − 1| is smallest"
+    inner_logloss_display,
+    digits = 4,
+    col.names = c(
+      "Rank", "Config", "Ensemble", "Recipe", "Rejector", "Head mode",
+      "Label set", "Split", "N folds", "Mean log loss", "SD log loss", "Winner alpha"
+    ),
+    caption = "Inner CV log loss summary (max-prob and ridge jobs)"
   )
-
-  p_slope_beta <- ggplot(
-    slope_display,
-    aes(x = calibration_model, y = slope_beta, fill = calibration_model)
-  ) +
-    geom_col(width = 0.65) +
-    geom_hline(yintercept = 1, linetype = "dashed", color = "grey40") +
-    geom_text(aes(label = sprintf("%.2f", slope_beta)), vjust = -0.4, size = 3) +
-    scale_fill_manual(
-      values = c(
-        "Best features" = "#d62728",
-        "Max AML class probability only" = "#1f77b4"
-      ),
-      guide = "none"
-    ) +
-    facet_grid(label_display ~ .) +
-    labs(
-      title = "Calibration slope β (realized ~ requested risk)",
-      x = NULL,
-      y = "Slope β"
-    ) +
-    theme_bw() +
-    theme(axis.text.x = element_text(angle = 35, hjust = 1)) + 
-  ylim(0,2)
-  print(p_slope_beta)
 }
-
-p2 <- p_slope_beta
 ```
 
-## Probability distributions for correct, incorrect, and OOD (multivariate model)
+## Operating points (5%, 7.5%, 10% requested risk)
 
-Histogram, boxplot, violin, and **ggridges** density ridges of the **multivariate accept probability** assigned by the calibrated rejector (same RHS as the fused inner winner for each outer fold).
+Mean across outer folds when **all** LOSO folds have a successful eval at that risk; otherwise means and SDs are **NA**. Lower risk gap and higher coverage are better. Both threshold methods are shown.
 
-Each sample is bucketed into (plot order: Incorrect → OOD → Correct):
-- **Incorrect**: `correct == 0` and `is_seen == 1`
-- **OOD**: `is_seen == 0`
-- **Correct**: `correct == 1` and `is_seen == 1`
+```{r operating_table}
+loso_fold_totals_op <- per_fold_operating_df %>%
+  filter(toupper(as.character(split_type)) == "LOSO") %>%
+  group_by(label_set) %>%
+  summarise(n_loso_folds_total_ref = dplyr::n_distinct(target_fold), .groups = "drop")
 
-We plot the predicted accept probability (`p_hat`) for **LOSO only**, facetted by label set
-in this order: **Full subtypes**, then **Collapsed (merged)**.
+operating_display <- summary_operating_df %>%
+  left_join(loso_fold_totals_op, by = "label_set") %>%
+  mutate(
+    split_type = toupper(as.character(split_type)),
+    label_display = label_set_to_display(label_set),
+    plot_series_key = factor(as.character(plot_series_key), levels = plot_series_levels),
+    threshold_method = factor(
+      if ("threshold_method" %in% names(.)) as.character(threshold_method) else "pooled_oof",
+      levels = THRESHOLD_METHOD_LEVELS,
+      labels = THRESHOLD_METHOD_LABELS
+    ),
+    mean_abs_risk_gap_pct = 100 * mean_abs_risk_gap,
+    mean_outer_coverage_seen_pct = 100 * mean_outer_coverage_seen,
+    mean_outer_risk_pct = 100 * mean_outer_risk_all_accepted,
+    sd_outer_risk_pct = 100 * sd_outer_risk_all_accepted,
+    mean_jackknife_gap_pct = if ("mean_jackknife_gap" %in% names(.)) 100 * mean_jackknife_gap else NA_real_,
+    n_loso_folds_total = dplyr::coalesce(n_loso_folds_total, n_loso_folds_total_ref),
+    all_outer_folds = if ("all_outer_folds" %in% names(.)) {
+      all_outer_folds
+    } else {
+      !is.na(n_loso_folds_total) & (n_outer_folds == n_loso_folds_total)
+    }
+  ) %>%
+  select(
+    plot_series_label, label_display, split_type, threshold_method, requested_target_risk_pct,
+    n_outer_folds, n_loso_folds_total, all_outer_folds,
+    mean_abs_risk_gap_pct, mean_outer_risk_pct, sd_outer_risk_pct,
+    mean_outer_coverage_seen_pct, mean_jackknife_gap_pct
+  ) %>%
+  arrange(plot_series_label, label_display, split_type, threshold_method, requested_target_risk_pct)
 
-```{r prob_distributions_correct_incorrect_ood, fig.width = 10, fig.height = 9}
-source(file.path(repo_root, "R/utility_functions.R"))
+knitr::kable(operating_display, digits = 2, caption = "Outer-fold means at 5%, 7.5%, and 10% (NA unless all folds succeed)")
+```
 
-per_fold_path <- file.path(
-  repo_root,
-  "data/out/outer_cv/calibration_feature_utility_selection_safe/nested_target_risk_per_fold.csv"
+## Outer-fold coverage for calibration curves
+
+RR/RC curves plot **1–15%** (0.1% steps). A point is included only when **all** LOSO outer folds have a successful eval at that requested risk.
+
+```{r curve_fold_summary}
+loso_fold_totals <- per_fold_operating_df %>%
+  filter(toupper(as.character(split_type)) == "LOSO") %>%
+  group_by(label_set) %>%
+  summarise(n_loso_folds_total = dplyr::n_distinct(target_fold), .groups = "drop")
+
+curve_series_summary <- calibration_curve_df %>%
+  filter(
+    requested_target_risk_pct >= CALIBRATION_PLOT_RISK_PCT_RANGE[1],
+    requested_target_risk_pct <= CALIBRATION_PLOT_RISK_PCT_RANGE[2]
+  ) %>%
+  mutate(
+    label_display = label_set_to_display(label_set),
+    plot_series_key = factor(as.character(plot_series_key), levels = plot_series_levels),
+    config_label = if ("plot_series_label" %in% names(.)) {
+      as.character(plot_series_label)
+    } else if ("config_label" %in% names(.)) {
+      as.character(config_label)
+    } else {
+      unname(config_labels[as.character(plot_series_key)])
+    },
+    threshold_method = factor(as.character(threshold_method), levels = THRESHOLD_METHOD_LEVELS, labels = THRESHOLD_METHOD_LABELS)
+  ) %>%
+  group_by(config_label, label_display, label_set, split_type, threshold_method) %>%
+  summarise(
+    n_risk_grid_points_plotted = dplyr::n(),
+    n_outer_folds_min = min(n_outer_folds, na.rm = TRUE),
+    n_outer_folds_max = max(n_outer_folds, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  left_join(loso_fold_totals, by = "label_set") %>%
+  mutate(
+    label_display = factor(label_display, levels = LABEL_DISPLAY_LEVELS),
+    all_folds_at_every_plotted_point = n_outer_folds_min == n_loso_folds_total &
+      n_outer_folds_max == n_loso_folds_total
+  ) %>%
+  arrange(config_label, label_display, threshold_method)
+
+knitr::kable(
+  curve_series_summary %>%
+    select(
+      config_label, label_display, threshold_method,
+      n_risk_grid_points_plotted, n_outer_folds_min, n_outer_folds_max,
+      n_loso_folds_total, all_folds_at_every_plotted_point
+    ) %>%
+    mutate(label_display = as.character(label_display)),
+  digits = 1,
+  caption = "Plotted RR/RC points (1–15%, 0.1% steps); each point requires all LOSO folds"
+)
+```
+
+```{r fold_coverage_diagnostic, fig.width=11, fig.height=8}
+if (nrow(fold_coverage_df) > 0L) {
+  fold_cov_plot_df <- fold_coverage_df %>% filter( !grepl("unweighted", plot_series_key)) %>%
+    mutate(
+      label_display = label_set_to_display(label_set),
+      plot_series_key = factor(as.character(plot_series_key), levels = plot_series_levels),
+      threshold_method = factor(as.character(threshold_method), levels = THRESHOLD_METHOD_LEVELS, labels = THRESHOLD_METHOD_LABELS)
+    )
+  p_fold_cov <- ggplot(
+    fold_cov_plot_df,
+    aes(
+      x = requested_target_risk_pct,
+      y = n_outer_folds_available,
+      color = plot_series_key,
+      group = plot_series_key
+    )
+  ) +
+    geom_line(linewidth = 0.8) +
+    geom_point(size = 1.1) +
+    geom_hline(
+      aes(yintercept = n_loso_folds_total),
+      linetype = "dotted",
+      color = "grey40",
+      linewidth = 0.5
+    ) +
+    scale_color_manual(values = config_colors, labels = config_labels, name = NULL) +
+    facet_grid(label_display ~ threshold_method) +
+    scale_x_continuous(breaks = seq(2, 15, by = 2)) +
+    labs(
+      title = "Outer folds with successful eval per requested risk (1–15% grid, 0.1% steps)",
+      subtitle = "Dotted line = total LOSO folds; points below the line are omitted from RR/RC curves",
+      x = "Requested risk (%)",
+      y = "Outer folds available"
+    ) +
+    theme_bw() +
+    theme(legend.position = "bottom", legend.text = element_text(size = 8))
+  print(p_fold_cov)
+} else {
+  operating_fold_coverage <- per_fold_operating_df %>%
+    filter(toupper(as.character(split_type)) == "LOSO") %>%
+    mutate(
+      label_display = label_set_to_display(label_set),
+      plot_series_key = factor(as.character(plot_series_key), levels = plot_series_levels),
+      threshold_method = factor(as.character(threshold_method), levels = THRESHOLD_METHOD_LEVELS, labels = THRESHOLD_METHOD_LABELS)
+    ) %>%
+    group_by(plot_series_key, label_display, threshold_method, requested_target_risk_pct) %>%
+    summarise(n_outer_folds_available = dplyr::n(), .groups = "drop") %>%
+    group_by(plot_series_key, label_display, threshold_method) %>%
+    mutate(n_loso_folds_total = max(n_outer_folds_available)) %>%
+    ungroup()
+  p_fold_cov_op <- ggplot(
+    operating_fold_coverage,
+    aes(x = requested_target_risk_pct, y = n_outer_folds_available, color = plot_series_key, group = plot_series_key)
+  ) +
+    geom_line(linewidth = 0.8) +
+    geom_point(size = 2) +
+    geom_hline(aes(yintercept = n_loso_folds_total), linetype = "dotted", color = "grey40") +
+    #scale_color_manual(values = config_colors, labels = config_labels, name = NULL) +
+    facet_grid(label_display ~ threshold_method) +
+    labs(
+      title = "Outer folds with successful eval (operating risks: 5%, 7.5%, 10%)",
+      subtitle = "Re-run calibration_reject_models.R for full 1–15% fold-coverage export",
+      x = "Requested risk (%)",
+      y = "Outer folds available"
+    ) +
+    theme_bw() +
+    theme(legend.position = "bottom")+ scale_color_brewer(palette = "Set3")
+  print(p_fold_cov_op)
+}
+```
+
+## Mean Absolute Risk Calibration Error (MARCE)
+
+MARCE = mean of **|realized risk − requested risk|** over **1–15%** (0.1% steps), averaging only grid points where all LOSO outer folds evaluated successfully.
+
+```{r marce_table}
+marce_display <- marce_df %>%
+  mutate(
+    split_type = toupper(as.character(split_type)),
+    label_display = label_set_to_display(label_set),
+    plot_series_key = factor(as.character(plot_series_key), levels = plot_series_levels),
+    plot_series_label = if ("plot_series_label" %in% names(.)) {
+      as.character(plot_series_label)
+    } else if ("config_label" %in% names(.)) {
+      as.character(config_label)
+    } else {
+      unname(config_labels[as.character(plot_series_key)])
+    },
+    threshold_method = factor(
+      if ("threshold_method" %in% names(.)) as.character(threshold_method) else "pooled_oof",
+      levels = THRESHOLD_METHOD_LEVELS,
+      labels = THRESHOLD_METHOD_LABELS
+    ),
+    ood_weight_variant = if ("class_balanced_ood" %in% names(.)) {
+      dplyr::case_when(
+        is.na(class_balanced_ood) ~ NA_character_,
+        class_balanced_ood ~ "balanced",
+        TRUE ~ "unweighted"
+      )
+    } else {
+      NA_character_
+    }
+  ) %>%
+  select(
+    plot_series_label, ood_weight_variant, label_display, split_type, threshold_method,
+    n_risk_grid_points, n_outer_folds_curve, marce_pct
+  ) %>%
+  arrange(plot_series_label, label_display, split_type, threshold_method)
+
+knitr::kable(marce_display, digits = 3)
+```
+
+```{r marce_bars, fig.width=12, fig.height=6}
+marce_bar_df <- marce_df %>% filter(!grepl("unweighted", plot_series_key)) %>%
+  left_join(loso_fold_totals_op, by = "label_set") %>%
+  mutate(
+    split_type_fac = factor(toupper(as.character(split_type)), levels = SPLIT_TYPE_LEVELS),
+    label_display = label_set_to_display(label_set),
+    plot_series_key = factor(as.character(plot_series_key), levels = plot_series_levels),
+    plot_series_label = if ("plot_series_label" %in% names(.)) {
+      as.character(plot_series_label)
+    } else if ("config_label" %in% names(.)) {
+      as.character(config_label)
+    } else {
+      unname(config_labels[as.character(plot_series_key)])
+    },
+    threshold_method = factor(
+      if ("threshold_method" %in% names(.)) as.character(threshold_method) else "pooled_oof",
+      levels = THRESHOLD_METHOD_LEVELS,
+      labels = THRESHOLD_METHOD_LABELS
+    ),
+    n_outer_folds_marce = dplyr::coalesce(
+      if ("n_outer_folds_marce" %in% names(.)) .data$n_outer_folds_marce else NA_real_,
+      if ("n_outer_folds_curve" %in% names(.)) .data$n_outer_folds_curve else NA_real_
+    ),
+    n_loso_folds_total = dplyr::coalesce(
+      if ("n_loso_folds_total" %in% names(.)) .data$n_loso_folds_total else NA_real_,
+      .data$n_loso_folds_total_ref
+    )
+  ) 
+
+p_marce <- ggplot(
+  marce_bar_df %>%
+    filter(
+      split_type_fac == "LOSO",
+      is.na(n_loso_folds_total) | n_outer_folds_marce >= n_loso_folds_total
+    ),
+  aes(x = plot_series_key, y = marce_pct, fill = threshold_method)
+) +
+  geom_col(position = position_dodge(width = 0.75), width = 0.65) +
+  scale_x_discrete(labels = config_labels) +
+ # scale_fill_manual(values = c("#bdbdbd", "#636363"), name = "Threshold") +
+  facet_wrap(~ label_display, ncol = 2) +
+  labs(
+    title = "MARCE on 1–15% requested-risk grid (LOSO)",
+    subtitle = "Mean |realized − requested| risk (%); per-point inclusion requires all LOSO folds",
+    x = NULL,
+    y = "MARCE (%)"
+  ) +
+  theme_bw() +
+  theme(legend.position = "bottom", axis.text.x = element_text(angle = 25, hjust = 1))
+
+print(p_marce)
+```
+
+## Requested vs realized risk (1–15% grid, 0.1% steps, all folds required per point)
+
+```{r calibration_curves_risk, fig.width=11, fig.height=10}
+curve_plot_df <- filter_curve_plot_points(calibration_curve_df, loso_fold_totals) %>%
+  mutate(
+    split_type_fac = factor(toupper(split_type), levels = SPLIT_TYPE_LEVELS),
+    label_display = label_set_to_display(label_set),
+    plot_series_key = factor(as.character(plot_series_key), levels = plot_series_levels),
+    threshold_method = factor(
+      if ("threshold_method" %in% names(.)) as.character(threshold_method) else "pooled_oof",
+      levels = THRESHOLD_METHOD_LEVELS
+    )
+  ) %>% #filter(threshold_method != "jackknife_adjusted" & !grepl("unweighted", plot_series_key)) %>%
+  filter(grepl("svm", config_key)) %>%
+  arrange(label_display, split_type_fac, plot_series_key, threshold_method, requested_target_risk_pct)
+
+curve_fold_labelss <- curve_plot_df %>%
+  group_by(label_display, split_type_fac, plot_series_key, threshold_method) %>%
+  slice_max(requested_target_risk_pct, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  mutate(label_n = paste0("n=", n_outer_folds))
+
+p_rr <- ggplot(
+  curve_plot_df %>% filter(grepl("svm_ridge_in_model", config_key)),
+  aes(
+    x = requested_target_risk_pct,
+    y = realized_risk_pct,
+    color = threshold_method,
+    linetype = threshold_method,
+    group = interaction(plot_series_key, threshold_method)
+  )
+) +
+  geom_line(linewidth = 0.9) +
+  #geom_point(size = 1.2) +
+  geom_text(
+    data = curve_fold_labels,
+    aes(label = label_n),
+    hjust = -0.08,
+    vjust = -0.3,
+    size = 2.2,
+    show.legend = FALSE
+  ) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "grey45") +
+  #scale_color_manual(values = config_colors, labels = config_labels, name = NULL) +
+  scale_linetype_manual(values = threshold_method_linetypes, labels = THRESHOLD_METHOD_LABELS, name = "Threshold") +
+  facet_grid(label_display ~ split_type_fac) +
+  coord_cartesian(xlim = c(0, 15.5), ylim = c(0, 20)) +
+  labs(
+    title = "Requested vs realized accepted risk",
+    subtitle = "1–15% grid (0.1% steps); points omitted unless all LOSO folds eval successfully (n at right)",
+    x = "Requested risk (%)",
+    y = "Realized accepted risk (%)"
+  ) +
+  theme_bw() +
+  theme(legend.position = "bottom", legend.text = element_text(size = 6)) + scale_color_brewer(palette = "Set3")
+
+print(p_rr)
+```
+
+## Requested risk vs realized seen-class coverage
+
+```{r calibration_curves_coverage, fig.width=11, fig.height=10}
+p_rc <- ggplot(
+  curve_plot_df,
+  aes(
+    x = realized_risk_pct,
+    y = realized_coverage_seen_pct,
+    color = plot_series_key,
+    #linetype = threshold_method,
+    group = interaction(plot_series_key)#, threshold_method)
+  )
+) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 1.2) +
+  geom_text(
+    data = curve_fold_labels,
+    aes(label = label_n),
+    hjust = -0.08,
+    vjust = -0.3,
+    size = 2.2,
+    show.legend = FALSE
+  ) +
+  #scale_color_manual(values = config_colors, labels = config_labels, name = NULL) +
+  #scale_linetype_manual(values = threshold_method_linetypes, labels = THRESHOLD_METHOD_LABELS, name = "Threshold") +
+  facet_grid(label_display ~ split_type_fac) +
+  coord_cartesian(xlim = c(0, 15.5)) +
+  labs(
+    title = "Realized risk vs realized seen-class coverage",
+    subtitle = "1–15% grid (0.1% steps); points omitted unless all LOSO folds eval successfully (n at right)",
+    x = "Realized risk (%)",
+    y = "Realized seen-class coverage (%)"
+  ) +
+  theme_bw() +
+  theme(legend.position = "bottom", legend.text = element_text(size = 6)) + scale_color_brewer(palette = "Set3")
+
+print(p_rc)
+```
+
+## Risk gap and coverage at operating points (5%, 7.5%, 10%)
+
+```{r operating_bars, fig.width=12, fig.height=8}
+op_bar_df <- summary_operating_df %>%
+  left_join(loso_fold_totals_op, by = "label_set") %>%
+  mutate(
+    split_type_fac = factor(toupper(split_type), levels = SPLIT_TYPE_LEVELS),
+    label_display = label_set_to_display(label_set),
+    plot_series_key = factor(as.character(plot_series_key), levels = plot_series_levels),
+    threshold_method = factor(
+      if ("threshold_method" %in% names(.)) as.character(threshold_method) else "pooled_oof",
+      levels = THRESHOLD_METHOD_LEVELS,
+      labels = THRESHOLD_METHOD_LABELS
+    ),
+    n_loso_folds_total = dplyr::coalesce(n_loso_folds_total, n_loso_folds_total_ref),
+    all_outer_folds = if ("all_outer_folds" %in% names(.)) {
+      all_outer_folds
+    } else {
+      !is.na(n_loso_folds_total) & (n_outer_folds == n_loso_folds_total)
+    },
+    operating_risk_pct = factor(requested_target_risk_pct, levels = OPERATING_RISK_PCTS)
+  )
+
+op_bar_plot_df <- op_bar_df %>%
+  filter(split_type_fac == "LOSO", all_outer_folds)
+
+p_gap <- ggplot(
+  op_bar_plot_df,
+  aes(x = plot_series_key, y = 100 * mean_outer_risk_all_accepted, fill = threshold_method)
+) +
+  geom_col(position = position_dodge(width = 0.75), width = 0.65) +
+  scale_x_discrete(labels = config_labels) +
+  scale_fill_manual(values = c("#bdbdbd", "#636363"), name = "Threshold") +
+  facet_grid(operating_risk_pct ~ label_display, labeller = labeller(operating_risk_pct = function(x) paste0(x, "%"))) +
+  labs(
+    title = "Mean realized risk (LOSO)",
+    subtitle = "Bars shown only when all LOSO folds succeed at that requested risk",
+    x = NULL,
+    y = "Mean absolute risk gap (%)"
+  ) +
+  theme_bw() +
+  theme(legend.position = "bottom", axis.text.x = element_text(angle = 25, hjust = 1))
+
+p_cov <- ggplot(
+  op_bar_plot_df,
+  aes(x = plot_series_key, y = 100 * mean_outer_coverage_seen, fill = threshold_method)
+) +
+  geom_col(position = position_dodge(width = 0.75), width = 0.65) +
+  scale_x_discrete(labels = config_labels) +
+  scale_fill_manual(values = c("#bdbdbd", "#636363"), name = "Threshold") +
+  facet_grid(operating_risk_pct ~ label_display, labeller = labeller(operating_risk_pct = function(x) paste0(x, "%"))) +
+  labs(
+    title = "Realized seen-class coverage at operating targets (LOSO)",
+    subtitle = "Bars shown only when all LOSO folds succeed at that requested risk",
+    x = NULL,
+    y = "Mean coverage (%)"
+  ) +
+  theme_bw() +
+  theme(legend.position = "bottom", axis.text.x = element_text(angle = 25, hjust = 1))
+
+print(p_gap + p_cov)
+```
+
+## Accept probability by outcome (correct, incorrect, OOD)
+
+Densities of max-prob rejector accept probability on **LOSO** held-out folds. Ideal separation: **Correct** high, **Incorrect** and **OOD** low.
+
+```{r prob_distributions, fig.width=12, fig.height=10}
+outcome_colors <- c(
+  "Incorrect" = "#d95f02",
+  "OOD" = "#7570b3",
+  "Correct" = "#1b9e77"
 )
 
-if (!file.exists(per_fold_path)) {
-  knitr::kable(data.frame(note = "Need nested_target_risk_per_fold.csv — rerun R/calibration_reject_models.R"))
-} else {
-  per_fold_df <- readr::read_csv(per_fold_path, show_col_types = FALSE)
-  per_fold_df <- per_fold_df %>%
-    mutate(
-      split_type = toupper(as.character(split_type)),
-      label_display = label_set_to_display(label_set)
-    )
+prob_plot_df <- probability_samples_df %>% filter(grepl("svm", config_key)) %>%
+  mutate(
+    outcome = case_when(
+      is_seen == 0L ~ "OOD",
+      correct == 1L ~ "Correct",
+      correct == 0L ~ "Incorrect",
+      TRUE ~ NA_character_
+    ),
+    outcome = factor(outcome, levels = c("Incorrect", "OOD", "Correct")),
+    label_display = label_set_to_display(label_set),
+    plot_series_key = factor(as.character(plot_series_key), levels = plot_series_levels)
+  ) %>%
+  filter(!is.na(outcome), toupper(split_type) == "LOSO")
 
-  # Extract rejection features and fit P(accept_combined) on the outer-pool; score the target fold.
-  extract_accept_features <- function(prob_matrix) {
-    feats <- get_rejection_features_from_matrix(prob_matrix)
-    # Keep true class labels for class-wise seen/OOD probability boxplots.
-    feats$true_class <- if ("y" %in% colnames(prob_matrix)) gsub("Class\\. ", "", prob_matrix$y) else NA_character_
-    feats$is_seen <- if ("is_leftout" %in% colnames(prob_matrix)) as.integer(!as.logical(prob_matrix$is_leftout)) else 1L
-    feats$accept_combined <- as.integer(feats$correct == 1L & feats$is_seen == 1L)
-    feats
-  }
-
-  fit_accept_glm_on_pool <- function(pool_fold_mats, rhs_terms) {
-    if (length(pool_fold_mats) == 0L) return(NULL)
-    pool_df <- dplyr::bind_rows(lapply(pool_fold_mats, extract_accept_features))
-    rhs_terms <- rhs_terms[rhs_terms %in% colnames(pool_df)]
-    if (length(rhs_terms) == 0L) return(NULL)
-    df <- pool_df[, unique(c("accept_combined", rhs_terms)), drop = FALSE] %>%
-      dplyr::filter(complete.cases(.))
-    if (nrow(df) < 20L || length(unique(df$accept_combined)) < 2L) return(NULL)
-    stats::glm(
-      stats::as.formula(paste("accept_combined ~", paste(rhs_terms, collapse = " + "))),
-      data = df,
-      family = stats::binomial(),
-      control = stats::glm.control(maxit = 200, epsilon = 1e-8)
-    )
-  }
-
-  score_target_fold <- function(target_mat, glm_fit, rhs_terms) {
-    if (is.null(glm_fit)) return(NULL)
-    feats <- extract_accept_features(target_mat)
-    rhs_terms <- rhs_terms[rhs_terms %in% colnames(feats)]
-    # Keep class labels so downstream class-wise boxplots can use them on the x-axis.
-    keep_cols <- unique(c("is_seen", "correct", "true_class", "pred_class", rhs_terms))
-    keep_cols <- keep_cols[keep_cols %in% colnames(feats)]
-    pred_df <- feats[, keep_cols, drop = FALSE] %>%
-      dplyr::filter(complete.cases(.))
-    if (nrow(pred_df) == 0L) return(NULL)
-    p_hat <- as.numeric(stats::predict(glm_fit, newdata = pred_df[, rhs_terms, drop = FALSE], type = "response"))
-    pred_df$p_hat <- p_hat
-    pred_df
-  }
-
-  # Load outer fold probability matrices for the Global Product Optimized rejector scoring.
-  # These contain the probability-matrix objects used by calibration_reject_models.R.
-  outer_unmerged_path <- file.path(
-    repo_root,
-    "data/out/outer_cv/outer_cv_analysis_outputs_unmerged_maxprob/outer_cv_results.rds"
-  )
-  outer_merged_path <- file.path(
-    repo_root,
-    "data/out/outer_cv/outer_cv_analysis_outputs_merged_summed/outer_cv_results.rds"
-  )
-
-  if (!file.exists(outer_unmerged_path) || !file.exists(outer_merged_path)) {
-    knitr::kable(data.frame(note = "Outer CV results RDS not found — regenerate outer_cv_analysis_outputs_* and rerun."))
-  } else {
-    outer_unmerged <- readRDS(outer_unmerged_path)
-    outer_merged <- readRDS(outer_merged_path)
-
-    # Map label_display to the right loaded R object.
-    get_results_obj <- function(label_display) {
-      if (label_display == "Full subtypes") outer_unmerged else outer_merged
-    }
-
-    SCENARIO_KEY <- "with_leftout_ood_aware"
-    TARGET_BASE_MODEL <- "Global_Product_Optimized"
-
-    all_rows <- list()
-    ri <- 1L
-
-    for (label_disp in LABEL_DISPLAY_LEVELS) {
-      res_obj <- get_results_obj(label_disp)
-      fam0 <- res_obj$multivariate_results[[SCENARIO_KEY]][[TARGET_BASE_MODEL]]
-
-      for (split_type_fac in SPLIT_TYPE_LEVELS) {
-        split_key <- tolower(split_type_fac)
-        if (is.null(fam0[[split_key]]$fold_matrices)) next
-        fold_mats <- fam0[[split_key]]$fold_matrices
-        fold_names <- names(fold_mats)
-
-        pf_sub <- per_fold_df %>%
-          dplyr::filter(label_display == label_disp, split_type == split_type_fac)
-
-        for (fold_id in fold_names) {
-          row <- pf_sub %>% dplyr::filter(as.character(target_fold) == as.character(fold_id)) %>% dplyr::slice(1)
-          if (nrow(row) != 1L) next
-          rhs_key <- as.character(row$inner_winner_rhs_key[[1]])
-          rhs_terms <- strsplit(rhs_key, ";", fixed = TRUE)[[1]]
-          glm_fit <- fit_accept_glm_on_pool(fold_mats[setdiff(fold_names, fold_id)], rhs_terms)
-          scored <- score_target_fold(fold_mats[[fold_id]], glm_fit, rhs_terms)
-          if (is.null(scored)) next
-
-          scored$label_display <- label_disp
-          scored$split_type <- split_type_fac
-          scored$fold <- as.character(fold_id)
-          all_rows[[ri]] <- scored
-          ri <- ri + 1L
-        }
-      }
-    }
-
-    prob_split_df <- if (length(all_rows) == 0L) data.frame() else dplyr::bind_rows(all_rows)
-    if (nrow(prob_split_df) == 0L) {
-      knitr::kable(data.frame(note = "No probability data produced for correct/incorrect/OOD split."))
-    } else {
-      # Requested figure layout: LOSO only, facetted by label set in the order
-      # Full subtypes -> Collapsed (merged).
-      loso_label_order <- c("Full subtypes", "Collapsed")
-      prob_split_df <- prob_split_df %>%
-        mutate(
-          outcome = case_when(
-            is_seen == 0L ~ "OOD",
-            correct == 1L ~ "Correct",
-            correct == 0L ~ "Incorrect",
-            TRUE ~ NA_character_
-          ),
-          outcome = factor(outcome, levels = c("Incorrect", "OOD", "Correct"))
-        ) %>%
-        filter(!is.na(outcome)) %>%
-        filter(split_type == "LOSO") %>%
-        mutate(
-          split_type = factor(split_type, levels = "LOSO"),
-          label_display = factor(label_display, levels = loso_label_order)
-        )
-
-      outcome_colors <- c(
-        "Incorrect" = "#d95f02",
-        "OOD" = "#7570b3",
-        "Correct" = "#1b9e77"
-      )
-
-      hist_breaks <- seq(0, 1, length.out = 31)
-      hist_bin_width <- diff(hist_breaks)[1] * 0.98
-      prob_hist_df <- prob_split_df %>%
-        mutate(
-          bin_idx = cut(
-            p_hat,
-            breaks = hist_breaks,
-            labels = FALSE,
-            include.lowest = TRUE
-          )
-        ) %>%
-        count(label_display, split_type, outcome, bin_idx, name = "n") %>%
-        group_by(label_display, split_type, outcome) %>%
-        mutate(pct = 100 * n / sum(n)) %>%
-        ungroup() %>%
-        mutate(bin_mid = (hist_breaks[bin_idx] + hist_breaks[bin_idx + 1L]) / 2)
-
-      p_hist <- ggplot(prob_hist_df, aes(x = bin_mid, y = pct, fill = outcome, group = outcome)) +
-        geom_col(
-          alpha = 0.55,
-          width = hist_bin_width,
-          position = position_identity()
-        ) +
-        facet_grid(. ~ label_display) +
-        scale_fill_manual(values = outcome_colors, name = "Outcome") +
-        labs(
-          title = "Multivariate accept probability by correctness vs OOD",
-          subtitle = "Each outcome stratum sums to 100% (300% across the three overlaid distributions)",
-          x = "Multivariate accept probability (p_hat)",
-          y = "% within outcome stratum"
-        ) +
-        theme_bw()
-      print(p_hist)
-
-      p_box <- ggplot(prob_split_df, aes(x = outcome, y = p_hat, fill = outcome)) +
-        geom_boxplot(outlier.alpha = 0.4) +
-        facet_wrap(~ label_display, ncol = 2) +
-        scale_fill_manual(values = outcome_colors, guide = "none") +
-        labs(
-          title = "Multivariate accept probability by correctness vs OOD",
-          x = NULL,
-          y = "Multivariate accept probability (p_hat)"
-        ) +
-        theme_bw()
-      print(p_box)
-
-      p_violin <- ggplot(prob_split_df, aes(x = outcome, y = p_hat, fill = outcome)) +
-        geom_violin(
-          bounds = c(0, 1),
-          trim = TRUE,
-          alpha = 0.75,
-          linewidth = 0.3
-        ) +
-        facet_grid(label_display ~ .) +
-        scale_y_continuous(limits = c(0, 1), expand = expansion(mult = c(0.02, 0))) +
-        scale_fill_manual(values = outcome_colors, guide = "none") +
-        labs(
-          title = "Multivariate accept probability by correctness vs OOD",
-          x = NULL,
-          y = "Multivariate accept probability (p_hat)"
-        ) +
-        theme_bw()
-      print(p_violin)
-
-      p_ridges <- ggplot(
-        prob_split_df,
-        aes(x = p_hat, y = outcome, fill = outcome, color = outcome)
-      ) +
-        geom_density_ridges(
-          aes(point_color = outcome),
-          scale = 2,
-          alpha = 0.4,
-          rel_min_height = -0.01,
-          bounds = c(0, 1),
-          linewidth = 0.35,
-          jittered_points = TRUE,
-          point_alpha = 0.3,
-          point_size = 0.4
-        ) +
-        geom_rug(
-          aes(color = outcome),
-          sides = "b",
-          alpha = 0.4,
-          length = unit(0.04, "npc"),
-          linewidth = 0.25
-        ) +
-        facet_grid(. ~ label_display) +
-        scale_x_continuous(limits = c(0, 1), expand = expansion(mult = c(0.02, 0))) +
-        scale_fill_manual(values = outcome_colors, guide = "none") +
-        scale_color_manual(
-          values = outcome_colors,
-          guide = "none",
-          aesthetics = c("color", "point_color")
-        ) +
-        labs(
-          title = NULL,
-          x = "Accept/reject probability",
-          y = "Assignment"
-        ) +
-        scale_y_discrete(
-          limits = c("OOD", "Incorrect", "Correct"),
-          labels = c("OOD", "Incorrect", "Correct")
-        ) +
-        theme_ridges() +
-        theme(
-          legend.position = "bottom",
-          axis.text.y = element_text(size = 10),
-          axis.title.y = element_text(size = 11)
-        )
-      print(p_ridges)
-    }
-  }
-}
-
-p3 <- p_ridges
-```
-
-## OOD and error detection performance (AUROC / AUPR)
-
-Quantify how well the multivariate accept probability separates samples that should be rejected
-from those that should be accepted (LOSO). Two tasks per label set: (1) OOD detection,
-out-of-distribution (`is_seen == 0`) vs in-distribution; (2) error detection, should-reject
-(incorrect OR OOD) vs should-accept (correct AND seen). The rejection score is `1 - p_hat`
-(higher = more likely to reject). AUROC is the Mann-Whitney statistic; AUPR is average precision.
-
-```{r ood_detection_auroc}
-if (!exists("prob_split_df") || nrow(prob_split_df) == 0L) {
-  knitr::kable(data.frame(
-    note = "Run prob_distributions_correct_incorrect_ood chunk first to build prob_split_df."
-  ))
-} else {
-  auroc <- function(score, pos) {
-    pos <- as.logical(pos)
-    n_pos <- sum(pos); n_neg <- sum(!pos)
-    if (n_pos == 0L || n_neg == 0L) return(NA_real_)
-    r <- rank(score)
-    (sum(r[pos]) - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg)
-  }
-  average_precision <- function(score, pos) {
-    pos <- as.logical(pos)
-    if (sum(pos) == 0L) return(NA_real_)
-    ord <- order(score, decreasing = TRUE)
-    tp <- cumsum(pos[ord])
-    precision <- tp / seq_along(tp)
-    recall <- tp / sum(pos)
-    sum(precision * c(recall[1], diff(recall)))
-  }
-
-  ood_metrics <- do.call(rbind, lapply(levels(prob_split_df$label_display), function(ld) {
-    d <- prob_split_df[prob_split_df$label_display == ld & !is.na(prob_split_df$p_hat), ]
-    if (nrow(d) == 0L) return(NULL)
-    reject_score <- 1 - d$p_hat
-    is_ood <- d$is_seen == 0L
-    should_reject <- (d$correct == 0L) | (d$is_seen == 0L)
-    data.frame(
-      label_set = ld,
-      task = c("OOD detection (OOD vs in-distribution)", "Error detection (reject vs accept)"),
-      n = nrow(d),
-      n_positive = c(sum(is_ood), sum(should_reject)),
-      AUROC = c(auroc(reject_score, is_ood), auroc(reject_score, should_reject)),
-      AUPR = c(average_precision(reject_score, is_ood), average_precision(reject_score, should_reject)),
-      row.names = NULL
-    )
-  }))
-  cat("OOD / error detection (LOSO, multivariate accept probability):\n")
-  print(ood_metrics, row.names = FALSE)
-  knitr::kable(ood_metrics, digits = 3)
-}
-```
-
-```{r ood_detection_roc, fig.width = 9, fig.height = 4.5}
-if (exists("prob_split_df") && nrow(prob_split_df) > 0L) {
-  # ROC points (FPR, TPR) across all thresholds for a score/label pair.
-  roc_points <- function(score, pos) {
-    pos <- as.logical(pos)
-    ord <- order(score, decreasing = TRUE)
-    tp <- cumsum(pos[ord]); fp <- cumsum(!pos[ord])
-    tpr <- tp / sum(pos); fpr <- fp / sum(!pos)
-    data.frame(fpr = c(0, fpr), tpr = c(0, tpr))
-  }
-
-  task_defs <- list(
-    "OOD detection" = function(d) d$is_seen == 0L,
-    "Error detection" = function(d) (d$correct == 0L) | (d$is_seen == 0L)
-  )
-
-  roc_df <- do.call(rbind, lapply(levels(prob_split_df$label_display), function(ld) {
-    d <- prob_split_df[prob_split_df$label_display == ld & !is.na(prob_split_df$p_hat), ]
-    if (nrow(d) == 0L) return(NULL)
-    do.call(rbind, lapply(names(task_defs), function(tk) {
-      pos <- task_defs[[tk]](d)
-      if (sum(pos) == 0L || sum(!pos) == 0L) return(NULL)
-      pts <- roc_points(1 - d$p_hat, pos)
-      pts$label_set <- ld
-      pts$task <- tk
-      pts$auroc <- auroc(1 - d$p_hat, pos)
-      pts
-    }))
-  }))
-
-  roc_df$label_auc <- sprintf("%s (AUROC %.2f)", roc_df$label_set, roc_df$auroc)
-
-  p_roc <- ggplot(roc_df, aes(x = fpr, y = tpr, color = label_auc)) +
-    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "grey60") +
-    geom_step(linewidth = 0.8, direction = "hv") +
-    facet_wrap(~ task) +
-    coord_equal() +
-    labs(
-      title = "OOD and error detection ROC (LOSO)",
-      x = "False positive rate", y = "True positive rate", color = NULL
-    ) +
-    theme_bw() +
-    theme(legend.position = "right")
-  print(p_roc)
-  ggsave("../writing/figures_new/ood_error_detection_roc.png", p_roc, width = 9, height = 4.5, dpi = 300)
-}
-```
-
-
-### Seen-class boxplots by class and correctness
-
-Seen-class (`is_seen == 1`) multivariate accept probability (`p_hat`) by class on the x-axis, split by correctness (Correct vs Incorrect).
-
-```{r prob_distributions_seen_class_by_correctness, fig.width = 12, fig.height = 9}
-if (!exists("prob_split_df") || nrow(prob_split_df) == 0L) {
-  knitr::kable(data.frame(
-    note = "Run prob_distributions_correct_incorrect_ood chunk first to build prob_split_df."
-  ))
-} else {
-  seen_class_df <- prob_split_df %>%
-    filter(is_seen == 1L) %>%
-    mutate(correctness = if_else(correct == 1L, "Correct", "Incorrect"))
-
-  if ("true_class" %in% colnames(seen_class_df)) {
-    seen_class_df$class_label <- pretty_class_label(seen_class_df$true_class)
-  } else if ("pred_class" %in% colnames(seen_class_df)) {
-    seen_class_df$class_label <- pretty_class_label(seen_class_df$pred_class)
-  } else {
-    stop("Expected one of true_class or pred_class in prob_split_df for class-wise boxplots.")
-  }
-
-  seen_class_df$class_label <- factor(
-    as.character(seen_class_df$class_label),
-    levels = levels(seen_class_df$class_label)
-  )
-  seen_class_df$correctness <- factor(seen_class_df$correctness, levels = c("Incorrect", "Correct"))
-
-  p_seen_class_box <- ggplot(
-    seen_class_df %>% filter(label_display == "Full subtypes", split_type == "LOSO"),
-    aes(x = class_label, y = p_hat, fill = correctness)
+p_probs_faceted <- ggplot(
+  prob_plot_df,
+  aes(x = p_hat, y = outcome, fill = outcome, color = outcome)
+) +
+  geom_density_ridges(
+    scale = 1.8,
+    alpha = 0.45,
+    rel_min_height = -0.01,
+    bounds = c(0, 1),
+    linewidth = 0.3
   ) +
-    geom_boxplot(
-      outlier.alpha = 0.25,
-      position = position_dodge(width = 0.75),
-      width = 0.68
-    ) +
-    #facet_grid(label_display ~ split_type) +
-    scale_fill_manual(values = c("Incorrect" = "#d95f02", "Correct" = "#1b9e77")) +
-    scale_y_continuous(limits = c(0, 1), expand = expansion(mult = c(0.02, 0))) +
-    labs(
-      title = "Probability by class and correctness",
-      x = "True AML class",
-      y = "Accept/reject probability",
-      fill = "Predicted AML class"
-    ) +
-    theme_bw() +
-    theme(
-      axis.text.x = element_text(angle = 60, hjust = 1),
-      legend.position = "bottom"
-    )
-  print(p_seen_class_box)
-}
-```
-
-### Unseen-class boxplots by class (OOD only)
-
-Unseen-class (`is_seen == 0`) multivariate accept probability (`p_hat`) by class on the x-axis (no correctness grouping).
-
-```{r prob_distributions_unseen_class_only, fig.width = 12, fig.height = 9}
-if (!exists("prob_split_df") || nrow(prob_split_df) == 0L) {
-  knitr::kable(data.frame(
-    note = "Run prob_distributions_correct_incorrect_ood chunk first to build prob_split_df."
-  ))
-} else {
-  ood_class_df <- prob_split_df %>%
-    filter(is_seen == 0L)
-
-  if ("true_class" %in% colnames(ood_class_df)) {
-    ood_class_df$class_label <- pretty_class_label(ood_class_df$true_class)
-  } else if ("pred_class" %in% colnames(ood_class_df)) {
-    ood_class_df$class_label <- pretty_class_label(ood_class_df$pred_class)
-  } else {
-    stop("Expected one of true_class or pred_class in prob_split_df for OOD class-wise boxplots.")
-  }
-
-  ood_class_df$class_label <- factor(
-    as.character(ood_class_df$class_label),
-    levels = levels(ood_class_df$class_label)
-  )
-ood_class_df$class_label <- relevel(ood_class_df$class_label, "AML, NOS")
-  p_ood_class_box <- ggplot(
-    ood_class_df %>% filter(label_display == "Full subtypes", split_type == "LOSO"),
-    aes(x = class_label, y = p_hat)
+  scale_x_continuous(limits = c(0, 1)) +
+  scale_fill_manual(values = outcome_colors, guide = "none") +
+  scale_color_manual(values = outcome_colors, guide = "none") +
+  facet_grid(label_display ~ plot_series_key, labeller = labeller(
+    plot_series_key = config_labels
+  )) +
+  labs(
+    title = "Accept probability by outcome (all rejector configurations)",
+    x = "Accept probability (p_hat)",
+    y = NULL
   ) +
-    geom_boxplot(
-      outlier.alpha = 0.25,
-      width = 0.68,
-      fill = "#7570b3"
-    ) +
-    #facet_grid(label_display ~ split_type) +
-    scale_y_continuous(limits = c(0, 1), expand = expansion(mult = c(0.02, 0))) +
-    labs(
-      title = "Probabilty by OOD class",
-      x = "Unseen class",
-      y = "Accept/reject probability"
-    ) +
-    theme_bw() +
-    theme(axis.text.x = element_text(angle = 60, hjust = 1))
-  print(p_ood_class_box)
+  theme_ridges() +
+  theme(
+    strip.text.x = element_text(size = 7),
+    axis.text.y = element_text(size = 9)
+  )
+
+print(p_probs_faceted)
+```
+
+### Side-by-side boxplots (LOSO, collapsed classes)
+
+```{r prob_boxplots, fig.width=11, fig.height=5}
+p_box <- ggplot(
+  prob_plot_df %>% filter(label_display == "Collapsed"),
+  aes(x = plot_series_key, y = p_hat, fill = outcome)
+) +
+  geom_boxplot(outlier.alpha = 0.25, position = position_dodge(width = 0.78), width = 0.7) +
+  scale_x_discrete(labels = config_labels) +
+  scale_fill_manual(values = outcome_colors, name = "Outcome") +
+  scale_y_continuous(limits = c(0, 1)) +
+  labs(
+    title = "Accept probability distributions (LOSO, collapsed classes)",
+    x = NULL,
+    y = "Accept probability (p_hat)"
+  ) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1), legend.position = "bottom")
+
+print(p_box)
+```
+
+---
+
+# Final deployment calibration curves
+
+Run after `R/train_test_analysis.R`: `Rscript R/calibration_reject_models_final.R`
+
+These curves use the **same stack as `python/predict_new_samples.py`**: pooled max-prob GLM rejectors on all training data, jackknife-adjusted thresholds, and LOSO pseudo-outer evaluation (each study held out once). Use these for the **main deployment figure** and MLL-lab interpretation. Keep the outer-CV curves above for **method development** (nested selection, rejector comparison, uncertainty bands across the full nested pipeline).
+
+```{r final_deploy_paths}
+final_out_dir <- file.path(repo_root, "data/out/final_train_test/calibration_feature_utility_selection_safe")
+final_calibration_curve_path <- file.path(final_out_dir, "final_deploy_calibration_curve.csv")
+final_calibration_per_fold_path <- file.path(final_out_dir, "final_deploy_calibration_curve_per_fold.csv")
+
+if (!file.exists(final_calibration_curve_path)) {
+  manifest_path <- file.path(final_out_dir, "final_deployment_manifest.csv")
+  has_new_manifest <- file.exists(manifest_path) &&
+    "deploy_risk_grid" %in% readr::read_csv(manifest_path, show_col_types = FALSE)$key
+  deploy_curve_glob <- list.files(
+    file.path(repo_root, "data/out/final_train_test"),
+    pattern = "^deploy_risk_coverage_curve_maxprob_.*\\.csv$",
+    recursive = TRUE,
+    full.names = TRUE
+  )
+  hint <- if (length(deploy_curve_glob) == 0L && !has_new_manifest) {
+    paste0(
+      "Your manifest/cutoffs look like an older run (cutoffs only, no deploy risk-coverage curves). ",
+      "Re-run from repo root with the current script:\n",
+      "  Rscript R/calibration_reject_models_final.R\n",
+      "Expected new outputs: final_deploy_calibration_curve.csv and ",
+      "cutoffs_*/deploy_risk_coverage_curve_maxprob_*.csv"
+    )
+  } else {
+    paste0(
+      "Re-run from repo root:\n",
+      "  Rscript R/calibration_reject_models_final.R"
+    )
+  }
+  stop("Missing ", final_calibration_curve_path, ".\n", hint)
+}
+
+final_calibration_curve_df <- read_csv(final_calibration_curve_path, show_col_types = FALSE) %>%
+  filter(as.character(rejector_key) %in% DEPLOY_REJECTOR_LEVELS)
+
+final_calibration_per_fold_df <- if (file.exists(final_calibration_per_fold_path)) {
+  read_csv(final_calibration_per_fold_path, show_col_types = FALSE) %>%
+    filter(as.character(rejector_key) %in% DEPLOY_REJECTOR_LEVELS)
+} else {
+  data.frame()
+}
+
+final_loso_fold_totals <- final_calibration_curve_df %>%
+  group_by(label_set) %>%
+  summarise(n_loso_folds_total = max(n_outer_folds, na.rm = TRUE), .groups = "drop")
+
+filter_final_curve_plot_points <- function(df, loso_totals) {
+  loso_ref <- loso_totals %>%
+    rename(n_loso_folds_expected = n_loso_folds_total)
+  df %>%
+    filter(
+      requested_target_risk_pct >= CALIBRATION_PLOT_RISK_PCT_RANGE[1],
+      requested_target_risk_pct <= CALIBRATION_PLOT_RISK_PCT_RANGE[2]
+    ) %>%
+    left_join(loso_ref, by = "label_set") %>%
+    filter(is.na(n_loso_folds_expected) | n_outer_folds >= n_loso_folds_expected)
 }
 ```
 
-```{r}
-base <- "../writing/figures_new/figure_rej"
-dir.create(base)
+```{r final_deploy_curve_summary}
+final_curve_series_summary <- final_calibration_curve_df %>%
+  filter(
+    requested_target_risk_pct >= CALIBRATION_PLOT_RISK_PCT_RANGE[1],
+    requested_target_risk_pct <= CALIBRATION_PLOT_RISK_PCT_RANGE[2]
+  ) %>%
+  mutate(
+    label_display = label_set_to_display(label_set),
+    rejector_key = factor(as.character(rejector_key), levels = DEPLOY_REJECTOR_LEVELS),
+    rejector_label = unname(DEPLOY_REJECTOR_LABELS[as.character(rejector_key)])
+  ) %>%
+  group_by(rejector_label, label_display, label_set) %>%
+  summarise(
+    n_risk_grid_points_plotted = dplyr::n(),
+    n_outer_folds_min = min(n_outer_folds, na.rm = TRUE),
+    n_outer_folds_max = max(n_outer_folds, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  left_join(final_loso_fold_totals, by = "label_set") %>%
+  mutate(
+    label_display = factor(label_display, levels = LABEL_DISPLAY_LEVELS),
+    all_folds_at_every_plotted_point = n_outer_folds_min == n_loso_folds_total &
+      n_outer_folds_max == n_loso_folds_total
+  ) %>%
+  arrange(rejector_label, label_display)
 
-
-ggsave(paste0(base, "/rr_curve.svg"),p_nested_by_label_requested_vs_realized_risk, height = 3, width = 6)
-
-ggsave(paste0(base, "/rc_curve.svg"),p_nested_by_label_requested_vs_coverage, height = 3, width = 6)
-
-ggsave(paste0(base, "/beta_slope.svg"),p2, height = 4, width = 3)
-
-
-ggsave(paste0(base, "/probs.svg"),p3, height = 3, width = 7)
-
-ggsave(paste0(base, "/seen_box.svg"),p_seen_class_box, height = 4.5, width = 6)
-
-ggsave(paste0(base, "/ood_box.svg"),p_ood_class_box, height = 4.5, width = 6)
-
-ggsave(paste0(base, "/rc_curve_multi_vs_1.svg"),p_compare_risk_vs_coverage, height = 4, width = 6)
-
-ggsave(paste0(base, "/hm_features.svg"),p_features_hm, height = 4, width = 6)
-
+knitr::kable(
+  final_curve_series_summary %>%
+    select(
+      rejector_label, label_display,
+      n_risk_grid_points_plotted, n_outer_folds_min, n_outer_folds_max,
+      n_loso_folds_total, all_folds_at_every_plotted_point
+    ) %>%
+    mutate(label_display = as.character(label_display)),
+  digits = 1,
+  caption = "Final deployment RR/RC points (1–15%, 0.1% steps); jackknife-adjusted thresholds"
+)
 ```
 
+## Final deployment: requested vs realized risk
+
+```{r final_deploy_rr, fig.width=9, fig.height=6}
+final_curve_plot_df <- filter_final_curve_plot_points(
+  final_calibration_curve_df, final_loso_fold_totals
+) %>%
+  mutate(
+    label_display = label_set_to_display(label_set),
+    rejector_key = factor(as.character(rejector_key), levels = DEPLOY_REJECTOR_LEVELS)
+  ) %>%
+  arrange(label_display, rejector_key, requested_target_risk_pct)
+
+final_curve_fold_labels <- final_curve_plot_df %>%
+  group_by(label_display, rejector_key) %>%
+  slice_max(requested_target_risk_pct, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  mutate(label_n = paste0("n=", n_outer_folds))
+
+p_final_rr <- ggplot(
+  final_curve_plot_df,
+  aes(
+    x = requested_target_risk_pct,
+    y = realized_risk_pct,
+    color = rejector_key,
+    group = rejector_key
+  )
+) +
+  geom_ribbon(
+    aes(ymin = realized_risk_ci95_lo_pct, ymax = realized_risk_ci95_hi_pct, fill = rejector_key),
+    alpha = 0.15,
+    color = NA
+  ) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 1.2) +
+  geom_text(
+    data = final_curve_fold_labels,
+    aes(label = label_n),
+    hjust = -0.08,
+    vjust = -0.3,
+    size = 2.4,
+    show.legend = FALSE
+  ) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "grey45") +
+  scale_color_manual(values = deploy_rejector_colors, labels = DEPLOY_REJECTOR_LABELS, name = NULL) +
+  scale_fill_manual(values = deploy_rejector_colors, guide = "none") +
+  facet_wrap(~ label_display, ncol = 2) +
+  coord_cartesian(xlim = c(0, 15.5), ylim = c(0, 20)) +
+  labs(
+    title = "Final deployment: requested vs realized accepted risk",
+    subtitle = "Pooled max-prob GLM + jackknife thresholds; LOSO pseudo-outer eval (n at right)",
+    x = "Requested risk (%)",
+    y = "Realized accepted risk (%)"
+  ) +
+  theme_bw() +
+  theme(legend.position = "bottom", legend.text = element_text(size = 8))
+
+print(p_final_rr)
+```
+
+## Final deployment: requested risk vs seen-class coverage
+
+```{r final_deploy_rc, fig.width=9, fig.height=6}
+p_final_rc <- ggplot(
+  final_curve_plot_df,
+  aes(
+    x = requested_target_risk_pct,
+    y = realized_coverage_seen_pct,
+    color = rejector_key,
+    group = rejector_key
+  )
+) +
+  geom_ribbon(
+    aes(
+      ymin = realized_coverage_seen_ci95_lo_pct,
+      ymax = realized_coverage_seen_ci95_hi_pct,
+      fill = rejector_key
+    ),
+    alpha = 0.15,
+    color = NA
+  ) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 1.2) +
+  geom_text(
+    data = final_curve_fold_labels,
+    aes(label = label_n),
+    hjust = -0.08,
+    vjust = -0.3,
+    size = 2.4,
+    show.legend = FALSE
+  ) +
+  scale_color_manual(values = deploy_rejector_colors, labels = DEPLOY_REJECTOR_LABELS, name = NULL) +
+  scale_fill_manual(values = deploy_rejector_colors, guide = "none") +
+  facet_wrap(~ label_display, ncol = 2) +
+  coord_cartesian(xlim = c(0, 15.5)) +
+  labs(
+    title = "Final deployment: requested risk vs realized seen-class coverage",
+    subtitle = "Pooled max-prob GLM + jackknife thresholds; LOSO pseudo-outer eval (n at right)",
+    x = "Requested risk (%)",
+    y = "Realized seen-class coverage (%)"
+  ) +
+  theme_bw() +
+  theme(legend.position = "bottom", legend.text = element_text(size = 8))
+
+print(p_final_rc)
+```
+
+```{r save_figures, include=FALSE}
+base <- file.path(repo_root, "writing/figures_new/figure_rej")
+dir.create(base, recursive = TRUE, showWarnings = FALSE)
+ggsave(file.path(base, "rr_curve_rejector_compare.svg"), p_rr, height = 5, width = 9)
+ggsave(file.path(base, "rc_curve_rejector_compare.svg"), p_rc, height = 5, width = 9)
+ggsave(file.path(base, "marce_bar_rejector_compare.svg"), p_marce, height = 5, width = 9)
+ggsave(file.path(base, "probs.svg"), p_probs_faceted, height = 6, width = 10)
+if (exists("p_final_rr")) {
+  ggsave(file.path(base, "rr_curve_final_deploy.svg"), p_final_rr, height = 5, width = 9)
+}
+if (exists("p_final_rc")) {
+  ggsave(file.path(base, "rc_curve_final_deploy.svg"), p_final_rc, height = 5, width = 9)
+}
+```

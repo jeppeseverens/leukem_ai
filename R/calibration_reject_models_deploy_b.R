@@ -1,8 +1,5 @@
 # =============================================================================
-# Final deployment calibration: SVM + SVM rejector recipes (maxprob / ridge ± KNN10)
-# =============================================================================
-# Reads final_train_test_results*.rds (R/train_test_analysis.R) and exports
-# pooled rejector coefficients + jackknife/pooled thresholds for predict_new_samples.py.
+# Option B deployment calibration: deploy-loso fold matrices (SVM + SVM rejectors)
 # =============================================================================
 
 suppressPackageStartupMessages({
@@ -22,13 +19,13 @@ repo_root <- if (file.exists("R/train_test_analysis.R")) "." else if (file.exist
 
 ANALYSIS_INPUTS <- tibble::tribble(
   ~label_set_key,       ~label_set,            ~results_rel_path,
-  "unmerged_maxprob",   "full_subtypes",       "data/out/final_train_test/final_train_test_results_10feb2026_unmerged_maxprob.rds",
-  "merged_summed",      "collapsed_classes",   "data/out/final_train_test/final_train_test_results_10feb2026_merged_summed.rds",
-  "merged_maxprob",     "collapsed_maxprob",   "data/out/final_train_test/final_train_test_results_10feb2026_merged_maxprob.rds"
+  "unmerged_maxprob",   "full_subtypes",       "data/out/final_train_test/deploy_loso_fold_results_10feb2026_unmerged_maxprob.rds",
+  "merged_summed",      "collapsed_classes",   "data/out/final_train_test/deploy_loso_fold_results_10feb2026_merged_summed.rds",
+  "merged_maxprob",     "collapsed_maxprob",   "data/out/final_train_test/deploy_loso_fold_results_10feb2026_merged_maxprob.rds"
 ) %>%
   mutate(results_path = file.path(repo_root, results_rel_path))
 
-OUTPUT_DIR <- file.path(repo_root, "data/out/final_train_test/calibration_feature_utility_selection_safe")
+OUTPUT_DIR <- file.path(repo_root, "data/out/final_train_test/calibration_feature_utility_deploy_loso")
 dir.create(OUTPUT_DIR, recursive = TRUE, showWarnings = FALSE)
 
 source(file.path(repo_root, "R/calibration_reject_deploy_config.R"))
@@ -36,21 +33,14 @@ source(file.path(repo_root, "R/calibration_reject_deploy_config.R"))
 SCENARIO_KEY <- "with_leftout_ood_aware"
 POOL_RULE <- "all_rows"
 TEST_RULE <- "all_rows"
-CUTOFF_SOURCE <- "selection_loso"
-ARTIFACT_TAG <- ""
+CUTOFF_SOURCE <- "deploy_loso"
+ARTIFACT_TAG <- "_deploy_loso"
 
-cat("Final deployment calibration: SVM classifier + SVM rejector recipes\n")
+cat("Option B deploy-loso calibration: SVM + SVM rejector recipes\n")
 cat(sprintf(
-  "  Base model: %s, rejectors: %d, label sets: %d, target risk: %.1f%%\n",
-  DEPLOY_BASE_MODEL,
-  nrow(DEPLOY_REJECTORS),
-  nrow(ANALYSIS_INPUTS),
-  100 * DEPLOY_RISK_TARGET
-))
-cat(sprintf("  Rejector keys: %s\n", paste(DEPLOY_REJECTORS$rejector_key, collapse = ", ")))
-cat(sprintf(
-  "  Ridge: alpha=%s, lambda.min via study-blocked cv.glmnet (LOSO pool folds)\n",
-  paste(ENET_ALPHA_GRID, collapse = ", ")
+  "  Base model: %s, rejectors: %d, label sets: %d, target risk: %.1f%%, tag: %s\n",
+  DEPLOY_BASE_MODEL, nrow(DEPLOY_REJECTORS), nrow(ANALYSIS_INPUTS),
+  100 * DEPLOY_RISK_TARGET, ARTIFACT_TAG
 ))
 
 source(if (file.exists("R/calibration_reject_core.R")) {
@@ -69,14 +59,14 @@ load_pool_fold_dfs <- function(results_obj, label_set_key) {
   fam <- results_obj$multivariate_results[[SCENARIO_KEY]][[DEPLOY_BASE_MODEL]]$loso$fold_matrices
   if (is.null(fam) || length(fam) < 3L) {
     stop(sprintf(
-      "Need >=3 LOSO fold matrices for %s. Re-run R/train_test_analysis.R with left-out augmentation.",
+      "Need >=3 deploy-loso fold matrices for %s. Run R/build_deploy_loso_fold_matrices.R first.",
       label_set_key
     ))
   }
   pool_fold_dfs <- lapply(copy_fold_matrix_list(fam), extract_features)
   assert_calibration_terms_available(
     bind_rows(pool_fold_dfs),
-    sprintf("final pool fold features (%s | %s)", label_set_key, DEPLOY_BASE_MODEL)
+    sprintf("deploy-loso pool fold features (%s | %s)", label_set_key, DEPLOY_BASE_MODEL)
   )
   pool_fold_dfs
 }
@@ -115,24 +105,19 @@ export_maxprob_glm_deployment <- function(
 
   if (is_two_head) {
     fit_obj <- fit_twohead_models(train_u, DEPLOY_RHS_TERMS, min_rows = 20L)
-    if (is.null(fit_obj)) {
-      stop(sprintf("Could not fit pooled max_prob two-head GLM for %s (%s).", label_set_key, rejector_key))
-    }
+    if (is.null(fit_obj)) stop(sprintf("Could not fit two-head maxprob GLM for %s.", rejector_key))
     params_df <- export_glm_twohead_coef_df(fit_obj, DEPLOY_BASE_MODEL)
     cutoff_builder <- function(tm) {
       out <- derive_glm_twohead_deploy_cutoff(
         pool_fold_dfs, DEPLOY_RHS_TERMS, risk_target,
-        combine = two_head_combine, rejector_mode = rejector_mode,
-        threshold_method = tm
+        combine = two_head_combine, rejector_mode = rejector_mode, threshold_method = tm
       )
       out$requested_target_risk <- risk_target
       out
     }
   } else {
     fit_obj <- fit_binary_model(train_u, "accept_combined", DEPLOY_RHS_TERMS, min_rows = 20L)
-    if (is.null(fit_obj)) {
-      stop(sprintf("Could not fit pooled max_prob single-head GLM for %s (%s).", label_set_key, rejector_key))
-    }
+    if (is.null(fit_obj)) stop(sprintf("Could not fit single-head maxprob GLM for %s.", rejector_key))
     params_df <- export_glm_coef_df(fit_obj$fit, "accept_combined", DEPLOY_BASE_MODEL)
     cutoff_builder <- function(tm) {
       out <- derive_glm_singlehead_deploy_cutoff(
@@ -166,7 +151,6 @@ export_maxprob_glm_deployment <- function(
   invisible(list(
     params_path = params_path,
     cutoffs_path = cutoffs_path,
-    deploy_curve_path = curve_out$deploy_curve_path,
     calibration_curve = curve_out$calibration_curve,
     calibration_per_fold = curve_out$calibration_per_fold
   ))
@@ -187,14 +171,7 @@ export_enet_rejector_deployment <- function(
   dir.create(params_dir, recursive = TRUE, showWarnings = FALSE)
   dir.create(cutoffs_dir, recursive = TRUE, showWarnings = FALSE)
 
-  alphas <- enet_alpha_grid_values()
-  if (length(alphas) != 1L) {
-    stop(sprintf(
-      "Elastic-net export requires a single ENET_ALPHA_GRID value for %s (%s); got: %s",
-      label_set_key, rejector_key, paste(alphas, collapse = ", ")
-    ))
-  }
-  alpha <- alphas[[1L]]
+  alpha <- enet_alpha_grid_values()[[1L]]
   is_two_head <- is_two_head_rejector(rejector_mode)
   fit_rejector_mode <- rejector_mode
   cache_id <- paste(label_set_key, merge_suffix, params_file_key, sep = "|")
@@ -207,10 +184,7 @@ export_enet_rejector_deployment <- function(
       rejector_mode = fit_rejector_mode
     )
     if (is.null(ena_fit)) {
-      stop(sprintf(
-        "Could not fit pooled elastic-net for %s (%s).",
-        label_set_key, rejector_key
-      ))
+      stop(sprintf("Could not fit elastic-net for %s (%s).", label_set_key, rejector_key))
     }
     assign(cache_id, ena_fit, envir = .enet_deploy_fit_cache)
   }
@@ -222,7 +196,6 @@ export_enet_rejector_deployment <- function(
     ena_fit$lambda
   }
   rhs_key <- rejector_spec_rhs_key(rejector_spec)
-
   write_params <- identical(rejector_key, params_file_key)
   params_path <- file.path(
     params_dir,
@@ -232,17 +205,7 @@ export_enet_rejector_deployment <- function(
   if (write_params) {
     params_df <- export_enet_rejector_coef_df(ena_fit, DEPLOY_BASE_MODEL, fit_rejector_mode)
     write.csv(params_df, params_path, row.names = FALSE)
-    cat(sprintf(
-      "  [%s] Exported elastic-net params (%s, alpha=%g, lambda=%s): %s\n",
-      label_set_key, params_file_key, alpha,
-      paste(format(rejector_spec$lambda, digits = 4), collapse = "/"),
-      params_path
-    ))
-  } else {
-    cat(sprintf(
-      "  [%s] Reusing shared two-head elastic-net params for %s -> %s\n",
-      label_set_key, rejector_key, basename(params_path)
-    ))
+    cat(sprintf("  [%s] Exported elastic-net params (%s): %s\n", label_set_key, params_file_key, params_path))
   }
 
   cutoff_builder <- function(tm) {
@@ -271,7 +234,6 @@ export_enet_rejector_deployment <- function(
   invisible(list(
     params_path = params_path,
     cutoffs_path = cutoffs_path,
-    deploy_curve_path = curve_out$deploy_curve_path,
     calibration_curve = curve_out$calibration_curve,
     calibration_per_fold = curve_out$calibration_per_fold
   ))
@@ -285,7 +247,7 @@ ccpf <- 1L
 for (i in seq_len(nrow(ANALYSIS_INPUTS))) {
   row <- ANALYSIS_INPUTS[i, ]
   if (!file.exists(row$results_path)) {
-    stop(sprintf("Missing final results: %s. Run R/train_test_analysis.R first.", row$results_path))
+    stop(sprintf("Missing deploy-loso results: %s", row$results_path))
   }
   risk_target <- INNER_RANK_TARGET_RISK_BY_LABEL_SET[[row$label_set]]
   cat(sprintf("\n=== %s (target risk %.1f%%) ===\n", row$label_set_key, 100 * risk_target))
@@ -316,50 +278,30 @@ for (i in seq_len(nrow(ANALYSIS_INPUTS))) {
   }
 }
 
-final_calibration_curve_out <- if (length(all_calibration_curves) == 0L) {
-  data.frame()
-} else {
-  dplyr::bind_rows(all_calibration_curves)
-}
-final_calibration_per_fold_out <- if (length(all_calibration_per_fold) == 0L) {
-  data.frame()
-} else {
-  dplyr::bind_rows(all_calibration_per_fold)
-}
-
-if (nrow(final_calibration_curve_out) > 0L) {
+if (length(all_calibration_curves) > 0L) {
   write_csv(
-    final_calibration_curve_out,
-    file.path(OUTPUT_DIR, "final_deploy_calibration_curve.csv")
+    dplyr::bind_rows(all_calibration_curves),
+    file.path(OUTPUT_DIR, "deploy_loso_calibration_curve.csv")
   )
 }
-if (nrow(final_calibration_per_fold_out) > 0L) {
+if (length(all_calibration_per_fold) > 0L) {
   write_csv(
-    final_calibration_per_fold_out,
-    file.path(OUTPUT_DIR, "final_deploy_calibration_curve_per_fold.csv")
+    dplyr::bind_rows(all_calibration_per_fold),
+    file.path(OUTPUT_DIR, "deploy_loso_calibration_curve_per_fold.csv")
   )
 }
 
-manifest <- data.frame(
-  key = c(
-    "timestamp_utc", "base_model", "rejector_keys", "threshold_methods",
-    "deploy_risk_target_pct", "label_sets",
-    "final_deploy_calibration_curve_csv", "final_deploy_calibration_curve_per_fold_csv"
+write_csv(
+  data.frame(
+    key = c("timestamp_utc", "calibration_source", "artifact_tag", "base_model", "rejector_keys"),
+    value = c(
+      format(Sys.time(), tz = "UTC", usetz = TRUE),
+      CUTOFF_SOURCE, ARTIFACT_TAG, DEPLOY_BASE_MODEL,
+      paste(DEPLOY_REJECTORS$rejector_key, collapse = "; ")
+    ),
+    stringsAsFactors = FALSE
   ),
-  value = c(
-    format(Sys.time(), tz = "UTC", usetz = TRUE),
-    DEPLOY_BASE_MODEL,
-    paste(DEPLOY_REJECTORS$rejector_key, collapse = "; "),
-    paste(THRESHOLD_METHODS, collapse = "; "),
-    sprintf("%.1f", 100 * DEPLOY_RISK_TARGET),
-    paste(ANALYSIS_INPUTS$label_set_key, collapse = "; "),
-    file.path(OUTPUT_DIR, "final_deploy_calibration_curve.csv"),
-    file.path(OUTPUT_DIR, "final_deploy_calibration_curve_per_fold.csv")
-  ),
-  stringsAsFactors = FALSE
+  file.path(OUTPUT_DIR, "deploy_loso_manifest.csv")
 )
-write_csv(manifest, file.path(OUTPUT_DIR, "final_deployment_manifest.csv"))
 
-cat("\nFinal deployment calibration complete.\n")
-cat("Predict with:\n")
-cat("  python predict_new_samples.py --rejector_mode all --cutoff_source both --threshold_method both ...\n")
+cat("\nOption B deploy-loso calibration complete.\n")

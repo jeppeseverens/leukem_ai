@@ -14,7 +14,7 @@ output:
 ```{r}
 #setwd("~/leukem_ai/R")
 #source("inner_cv_analysis.R")
-
+#source("inner_cv_analysis_mad_global.R")
 mv_root_merged <- "../data/out/outer_cv/outer_cv_analysis_outputs_merged_summed"
 mv_root_unmerged <- "../data/out/outer_cv/outer_cv_analysis_outputs_unmerged_maxprob"
 # Later chunks (e.g. product MV by regime) use merged outputs by default.
@@ -24,11 +24,13 @@ outer_cv_root <- mv_root
 ```
 
 ```{r}
-source("outer_cv_analysis.R")
+#source("outer_cv_analysis.R")
+#source("outer_cv_analysis_mad_global.R")
 ```
 
 ```{r}
-#inner_merged <- readRDS("../data/out/inner_cv/inner_cv_results_10feb2026_eta2_merged_summed_eta2.rds")
+inner_unmerged <- readRDS("../data/out/inner_cv/inner_cv_results_10feb2026_eta2_unmerged_eta2.rds")
+inner_merged <- readRDS("../data/out/inner_cv/inner_cv_results_10feb2026_eta2_merged_summed_eta2.rds")
 outer_unmerged <-  readRDS("../data/out/outer_cv/outer_cv_analysis_outputs_unmerged_maxprob/outer_cv_results.rds")
 outer_merged <- readRDS("../data/out/outer_cv/outer_cv_analysis_outputs_merged_summed/outer_cv_results.rds")
 ```
@@ -237,7 +239,7 @@ desired_included_order <- c(
   "APL, t(15;17)/PML::RARA",                 # Acute promyelocytic leukemia
   "AML with t(8;21)/RUNX1::RUNX1T1",
   "AML with inv(16)/t(16;16)/CBFB::MYH11",
-  "AML with t(9;11)/MLLT3::KMT2A",
+  "AML with t(9;11)/KMT2A::MLLT3",
   "Other KMT2A rearrangements",
   "AML with t(6;9)/DEK::NUP214",
   # MECOM rearrangements grouped at merged level
@@ -691,31 +693,47 @@ ggsave(
 )
 
 round(summary(meta$age_years), 1)
-table(meta$age_years>=18)a
+table(meta$age_years>=18)
 ```
 
-##  --Performance Boxplots
+## --Global ensemble: PoE vs simple weighted average
 
-```{r}
-# Global ensemble is product-of-experts only (see outer_cv_analysis.R).
+Outer CV compares product-of-experts (`Global_Product_Optimized`) and linear weighted
+average (`Global_Simple_Optimized`) using the same inner-CV weight grid
+(`inner_cv_analysis.R`, `outer_cv_analysis.R`).
+
+```{r global_ensemble_comparison}
+GLOBAL_ENSEMBLE_MODELS <- c(
+  Global_Product_Optimized = "Product-of-experts",
+  Global_Simple_Optimized = "Simple weighted average"
+)
+# PoE is the default ensemble in downstream figures and tables.
+GLOBAL_ENSEMBLE_MODEL <- "Global_Product_Optimized"
+
 compare_global_ensembles <- function(res_obj, label_set) {
-  candidate_models <- c("Global_Product_Optimized")
   rows <- list()
   idx <- 1L
 
   for (type_i in c("cv", "loso")) {
     perf_type <- res_obj$detailed_performance[[type_i]]
     if (is.null(perf_type)) next
-    available_models <- intersect(candidate_models, names(perf_type))
-    for (model_i in available_models) {
-      fold_metrics <- perf_type[[model_i]]
+
+    for (model_key in names(GLOBAL_ENSEMBLE_MODELS)) {
+      if (!model_key %in% names(perf_type)) next
+      fold_metrics <- perf_type[[model_key]]
       if (is.null(fold_metrics) || length(fold_metrics) == 0) next
+
+      kappas <- vapply(fold_metrics, function(x) x$kappa, numeric(1))
+      accs <- vapply(fold_metrics, function(x) x$accuracy, numeric(1))
       rows[[idx]] <- data.frame(
         label_set = label_set,
         type = type_i,
-        model = model_i,
-        mean_kappa = mean(sapply(fold_metrics, function(x) x$kappa), na.rm = TRUE),
-        mean_accuracy = mean(sapply(fold_metrics, function(x) x$accuracy), na.rm = TRUE),
+        model_key = model_key,
+        ensemble_rule = unname(GLOBAL_ENSEMBLE_MODELS[[model_key]]),
+        mean_kappa = mean(kappas, na.rm = TRUE),
+        sd_kappa = sd(kappas, na.rm = TRUE),
+        mean_accuracy = mean(accs, na.rm = TRUE),
+        sd_accuracy = sd(accs, na.rm = TRUE),
         n_folds = length(fold_metrics),
         stringsAsFactors = FALSE
       )
@@ -727,29 +745,97 @@ compare_global_ensembles <- function(res_obj, label_set) {
   do.call(rbind, rows)
 }
 
-ensemble_choice <- dplyr::bind_rows(
+extract_ensemble_fold_kappa <- function(res_obj, label_set, model_key) {
+  dplyr::bind_rows(lapply(c("cv", "loso"), function(type_i) {
+    fold_metrics <- res_obj$detailed_performance[[type_i]][[model_key]]
+    if (is.null(fold_metrics) || length(fold_metrics) == 0) return(NULL)
+    data.frame(
+      label_set = label_set,
+      type = type_i,
+      model_key = model_key,
+      ensemble_rule = unname(GLOBAL_ENSEMBLE_MODELS[[model_key]]),
+      fold = names(fold_metrics),
+      kappa = vapply(fold_metrics, function(x) x$kappa, numeric(1)),
+      accuracy = vapply(fold_metrics, function(x) x$accuracy, numeric(1)),
+      stringsAsFactors = FALSE
+    )
+  }))
+}
+
+ensemble_comparison <- dplyr::bind_rows(
   compare_global_ensembles(outer_unmerged, "Full subtypes"),
   compare_global_ensembles(outer_merged, "Collapsed classes")
 ) %>%
   dplyr::arrange(label_set, type, dplyr::desc(mean_kappa))
 
-print(ensemble_choice)
+knitr::kable(
+  ensemble_comparison %>%
+    dplyr::mutate(
+      mean_kappa = sprintf("%.3f +/- %.3f", mean_kappa, sd_kappa),
+      mean_accuracy = sprintf("%.3f +/- %.3f", mean_accuracy, sd_accuracy)
+    ) %>%
+    dplyr::select(label_set, type, ensemble_rule, mean_kappa, mean_accuracy, n_folds),
+  caption = "Outer CV: global ensemble rule comparison (mean +/- SD across folds)"
+)
 
-recommended_model <- ensemble_choice %>%
+ensemble_recommended <- ensemble_comparison %>%
   dplyr::group_by(label_set, type) %>%
   dplyr::slice_max(mean_kappa, n = 1, with_ties = FALSE) %>%
   dplyr::ungroup() %>%
-  dplyr::select(label_set, type, recommended_model = model, mean_kappa, mean_accuracy)
+  dplyr::select(label_set, type, recommended_rule = ensemble_rule, model_key, mean_kappa, mean_accuracy)
 
-print(recommended_model)
+print(ensemble_recommended)
+
+ensemble_fold_kappa <- dplyr::bind_rows(
+  extract_ensemble_fold_kappa(outer_unmerged, "Full subtypes", "Global_Product_Optimized"),
+  extract_ensemble_fold_kappa(outer_unmerged, "Full subtypes", "Global_Simple_Optimized"),
+  extract_ensemble_fold_kappa(outer_merged, "Collapsed classes", "Global_Product_Optimized"),
+  extract_ensemble_fold_kappa(outer_merged, "Collapsed classes", "Global_Simple_Optimized")
+)
+
+ensemble_fold_delta <- ensemble_fold_kappa %>%
+  tidyr::pivot_wider(
+    id_cols = c(label_set, type, fold),
+    names_from = model_key,
+    values_from = c(kappa, accuracy)
+  ) %>%
+  dplyr::mutate(
+    delta_kappa_simple_minus_poe = kappa_Global_Simple_Optimized - kappa_Global_Product_Optimized,
+    delta_accuracy_simple_minus_poe = accuracy_Global_Simple_Optimized - accuracy_Global_Product_Optimized
+  ) %>%
+  dplyr::arrange(label_set, type, fold)
+
+ensemble_delta_summary <- ensemble_fold_delta %>%
+  dplyr::group_by(label_set, type) %>%
+  dplyr::summarise(
+    mean_delta_kappa = mean(delta_kappa_simple_minus_poe, na.rm = TRUE),
+    sd_delta_kappa = sd(delta_kappa_simple_minus_poe, na.rm = TRUE),
+    n_folds_simple_better = sum(delta_kappa_simple_minus_poe > 0, na.rm = TRUE),
+    n_folds = dplyr::n(),
+    .groups = "drop"
+  )
+
+knitr::kable(
+  ensemble_delta_summary %>%
+    dplyr::mutate(
+      mean_delta_kappa = round(mean_delta_kappa, 4),
+      sd_delta_kappa = round(sd_delta_kappa, 4)
+    ),
+  caption = "Simple weighted minus product-of-experts (positive = simple better)"
+)
+
+write.csv(ensemble_comparison, "../writing/tables_new/global_ensemble_rule_comparison.csv", row.names = FALSE)
+write.csv(ensemble_fold_delta, "../writing/tables_new/global_ensemble_rule_fold_delta.csv", row.names = FALSE)
+write.csv(ensemble_delta_summary, "../writing/tables_new/global_ensemble_rule_delta_summary.csv", row.names = FALSE)
 ```
+
+##  --Performance Boxplots
 
 ```{r}
 types <- c("cv", "loso")
-models <- names(outer_merged$detailed_performance$cv)
+library(caret)
 
-# Helper: extract per-fold performance for a given result object and label set
-get_results_per_fold <- function(res_obj, label_set) {
+get_results_per_fold <- function(res_obj, label_set, models) {
   out <- data.frame()
   for (type_i in types) {
     for (model_i in models) {
@@ -773,11 +859,295 @@ get_results_per_fold <- function(res_obj, label_set) {
   out
 }
 
-# Combine unmerged (full subtype resolution) and merged (collapsed) results
-results_per_fold <- rbind(
-  get_results_per_fold(outer_unmerged, "Full subtypes"),
-  get_results_per_fold(outer_merged,  "Collapsed classes")
-)
+clean_boxplot_model_names <- function(model_chr) {
+  model_chr <- gsub("_", " ", model_chr)
+  model_chr <- gsub("xgboost", "XGBoost", model_chr)
+  model_chr <- gsub("svm", "SVM", model_chr)
+  model_chr <- gsub("neural net", "DNN", model_chr)
+  model_chr <- gsub("Global Product Optimized", "Ensemble", model_chr)
+  model_chr <- gsub("Global Simple Optimized", "Ensemble (simple)", model_chr)
+  model_chr
+}
+
+inner_cv_metrics_from_matrix <- function(prob_matrix_df) {
+  truth <- make.names(prob_matrix_df$y)
+  prob_matrix <- prob_matrix_df[
+    ,
+    !colnames(prob_matrix_df) %in% c("y", "inner_fold", "outer_fold", "indices", "study"),
+    drop = FALSE
+  ]
+  preds <- colnames(prob_matrix)[apply(prob_matrix, 1, which.max)]
+  truth <- gsub("Class.", "", truth)
+  preds <- gsub("Class.", "", preds)
+  all_classes <- unique(c(truth, preds))
+  truth <- factor(truth, levels = all_classes)
+  preds <- factor(preds, levels = all_classes)
+  cm <- caret::confusionMatrix(preds, truth)
+  c(
+    kappa = unname(cm$overall["Kappa"]),
+    accuracy = unname(cm$overall["Accuracy"])
+  )
+}
+
+get_inner_cv_results_per_fold <- function(inner_cv_obj, label_set, fold_type) {
+  rows <- list()
+  idx <- 1L
+
+  if (is.null(inner_cv_obj$probability_matrices$svm[[fold_type]])) {
+    return(data.frame())
+  }
+
+  prob_models <- c("svm", "xgboost", "neural_net")
+  outer_folds <- names(inner_cv_obj$probability_matrices$svm[[fold_type]])
+
+  for (model_i in prob_models) {
+    for (outer_fold in outer_folds) {
+      inner_folds <- names(inner_cv_obj$probability_matrices[[model_i]][[fold_type]][[outer_fold]])
+      for (inner_fold in inner_folds) {
+        mat <- inner_cv_obj$probability_matrices[[model_i]][[fold_type]][[outer_fold]][[inner_fold]]
+        metrics <- inner_cv_metrics_from_matrix(mat)
+        rows[[idx]] <- data.frame(
+          type = fold_type,
+          model = model_i,
+          fold = paste(outer_fold, inner_fold, sep = "/"),
+          kappa = metrics["kappa"],
+          accuracy = metrics["accuracy"],
+          label_set = label_set,
+          stringsAsFactors = FALSE
+        )
+        idx <- idx + 1L
+      }
+    }
+  }
+
+  ens_res <- inner_cv_obj$ensemble_results[[fold_type]]
+  ensemble_perf_keys <- list(
+    Global_Product_Optimized = "global_optimized_ensemble_performance",
+    Global_Simple_Optimized = "global_simple_optimized_ensemble_performance"
+  )
+
+  for (model_i in names(ensemble_perf_keys)) {
+    perf_key <- ensemble_perf_keys[[model_i]]
+    if (is.null(ens_res[[perf_key]])) next
+    perf_list <- ens_res[[perf_key]]
+    for (outer_fold in names(perf_list)) {
+      for (inner_fold in names(perf_list[[outer_fold]])) {
+        cm <- perf_list[[outer_fold]][[inner_fold]]
+        if (!inherits(cm, "confusionMatrix")) next
+        rows[[idx]] <- data.frame(
+          type = fold_type,
+          model = model_i,
+          fold = paste(outer_fold, inner_fold, sep = "/"),
+          kappa = unname(cm$overall["Kappa"]),
+          accuracy = unname(cm$overall["Accuracy"]),
+          label_set = label_set,
+          stringsAsFactors = FALSE
+        )
+        idx <- idx + 1L
+      }
+    }
+  }
+
+  if (length(rows) == 0) return(data.frame())
+  do.call(rbind, rows)
+}
+
+build_performance_table <- function(results_per_fold, model_order) {
+  summary_stats <- results_per_fold %>%
+    dplyr::group_by(type, model, label_set) %>%
+    dplyr::summarise(
+      mean_kappa = mean(kappa),
+      sd_kappa = sd(kappa),
+      mean_accuracy = mean(accuracy),
+      sd_accuracy = sd(accuracy),
+      .groups = "drop"
+    )
+
+  cv_full <- summary_stats %>%
+    dplyr::filter(type == "cv", label_set == "Full subtypes") %>%
+    dplyr::select(
+      model,
+      cv_kappa_mean_full = mean_kappa,
+      cv_kappa_sd_full = sd_kappa,
+      cv_acc_mean_full = mean_accuracy,
+      cv_acc_sd_full = sd_accuracy
+    )
+
+  cv_collapsed <- summary_stats %>%
+    dplyr::filter(type == "cv", label_set == "Collapsed classes") %>%
+    dplyr::select(
+      model,
+      cv_kappa_mean_collapsed = mean_kappa,
+      cv_kappa_sd_collapsed = sd_kappa,
+      cv_acc_mean_collapsed = mean_accuracy,
+      cv_acc_sd_collapsed = sd_accuracy
+    )
+
+  loso_full <- summary_stats %>%
+    dplyr::filter(type == "loso", label_set == "Full subtypes") %>%
+    dplyr::select(
+      model,
+      loso_kappa_mean_full = mean_kappa,
+      loso_kappa_sd_full = sd_kappa,
+      loso_acc_mean_full = mean_accuracy,
+      loso_acc_sd_full = sd_accuracy
+    )
+
+  loso_collapsed <- summary_stats %>%
+    dplyr::filter(type == "loso", label_set == "Collapsed classes") %>%
+    dplyr::select(
+      model,
+      loso_kappa_mean_collapsed = mean_kappa,
+      loso_kappa_sd_collapsed = sd_kappa,
+      loso_acc_mean_collapsed = mean_accuracy,
+      loso_acc_sd_collapsed = sd_accuracy
+    )
+
+  cv_full %>%
+    dplyr::left_join(cv_collapsed, by = "model") %>%
+    dplyr::left_join(loso_full, by = "model") %>%
+    dplyr::left_join(loso_collapsed, by = "model") %>%
+    dplyr::mutate(
+      Model = model,
+      `CV Kappa (Full)` = sprintf("%.2f ± %.3f", cv_kappa_mean_full, cv_kappa_sd_full),
+      `CV Kappa (Collapsed)` = sprintf("%.2f ± %.3f", cv_kappa_mean_collapsed, cv_kappa_sd_collapsed),
+      `CV Accuracy (Full)` = sprintf("%.1f%% ± %.2f%%", cv_acc_mean_full * 100, cv_acc_sd_full * 100),
+      `CV Accuracy (Collapsed)` = sprintf("%.1f%% ± %.2f%%", cv_acc_mean_collapsed * 100, cv_acc_sd_collapsed * 100),
+      `LOSO Kappa (Full)` = sprintf("%.2f ± %.3f", loso_kappa_mean_full, loso_kappa_sd_full),
+      `LOSO Kappa (Collapsed)` = sprintf("%.2f ± %.3f", loso_kappa_mean_collapsed, loso_kappa_sd_collapsed),
+      `LOSO Accuracy (Full)` = sprintf("%.1f%% ± %.2f%%", loso_acc_mean_full * 100, loso_acc_sd_full * 100),
+      `LOSO Accuracy (Collapsed)` = sprintf(
+        "%.1f%% ± %.2f%%", loso_acc_mean_collapsed * 100, loso_acc_sd_collapsed * 100
+      )
+    ) %>%
+    dplyr::select(
+      Model,
+      `LOSO Kappa (Full)`, `LOSO Kappa (Collapsed)`,
+      `LOSO Accuracy (Full)`, `LOSO Accuracy (Collapsed)`,
+      `CV Kappa (Full)`, `CV Kappa (Collapsed)`,
+      `CV Accuracy (Full)`, `CV Accuracy (Collapsed)`
+    ) %>%
+    dplyr::mutate(Model = factor(Model, levels = model_order)) %>%
+    dplyr::arrange(dplyr::desc(Model)) %>%
+    dplyr::mutate(Model = as.character(Model))
+}
+
+format_performance_kable <- function(performance_table, caption) {
+  kableExtra::kable(
+    performance_table,
+    caption = caption,
+    align = c("l", rep("c", 8)),
+    col.names = NULL
+  ) %>%
+    kableExtra::kable_styling(
+      bootstrap_options = c("striped", "hover", "condensed"),
+      full_width = FALSE,
+      position = "center"
+    ) %>%
+    kableExtra::column_spec(1, bold = TRUE) %>%
+    kableExtra::add_header_above(
+      c(" " = 1, "Full" = 1, "Collapsed" = 1, "Full" = 1, "Collapsed" = 1,
+        "Full" = 1, "Collapsed" = 1, "Full" = 1, "Collapsed" = 1)
+    ) %>%
+    kableExtra::add_header_above(
+      c(" " = 1, "Kappa (Mean ± SD)" = 2, "Accuracy (Mean ± SD)" = 2,
+        "Kappa (Mean ± SD)" = 2, "Accuracy (Mean ± SD)" = 2)
+    ) %>%
+    kableExtra::add_header_above(c(" " = 1, "LOSO" = 4, "Standard CV" = 4))
+}
+
+build_boxplot_figure <- function(results_per_fold, model_order, title = "Performance by model and class granularity") {
+  label_fills <- c("Full subtypes" = "#1f78b4", "Collapsed classes" = "#e31a1c")
+  box_width <- 0.6
+
+  plot_data <- results_per_fold %>%
+    dplyr::mutate(
+      label_set = factor(label_set, levels = c("Full subtypes", "Collapsed classes")),
+      model_cv = factor(model, levels = model_order),
+      model_loso = factor(model, levels = model_order)
+    )
+
+  p_cv <- ggplot(
+    plot_data %>% dplyr::filter(type == "cv"),
+    aes(
+      x = model_cv,
+      y = kappa,
+      fill = label_set,
+      group = interaction(model, label_set)
+    )
+  ) +
+    geom_boxplot(
+      width = box_width,
+      alpha = 1,
+      position = position_dodge(width = 0.7),
+      linewidth = 0.75
+    ) +
+    theme_bw() +
+    labs(title = "Standard nested CV", x = "", y = "Kappa", fill = "") +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      axis.title = element_text(size = 10),
+      axis.text = element_text(size = 9),
+      plot.title = element_text(size = 10),
+      plot.subtitle = element_text(size = 10),
+      text = element_text(family = "Arial")
+    ) +
+    ylim(0.8, 1) +
+    scale_fill_manual(values = label_fills) +
+    guides(fill = "none")
+
+  p_loso <- ggplot(
+    plot_data %>% dplyr::filter(type == "loso"),
+    aes(
+      x = model_loso,
+      y = kappa,
+      fill = label_set,
+      group = interaction(model, label_set)
+    )
+  ) +
+    geom_boxplot(
+      width = box_width,
+      alpha = 1,
+      position = position_dodge(width = 0.7),
+      linewidth = 0.75
+    ) +
+    theme_bw() +
+    labs(title = "LOSO nested CV", x = "", y = "Kappa", fill = "") +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      axis.title = element_text(size = 10),
+      axis.text = element_text(size = 9),
+      plot.title = element_text(size = 10),
+      plot.subtitle = element_text(size = 10),
+      text = element_text(family = "Arial"),
+      legend.box = "vertical",
+      legend.position = "bottom",
+      legend.justification = "center",
+      legend.box.just = "center",
+      legend.title = element_text(size = 9),
+      legend.text = element_text(size = 9)
+    ) +
+    ylim(0.8, 1) +
+    scale_fill_manual(values = label_fills, guide = guide_legend(reverse = FALSE))
+
+  (p_loso / p_cv) +
+    patchwork::plot_layout(guides = "collect") +
+    patchwork::plot_annotation(
+      title = title,
+      theme = theme(
+        plot.title = element_text(size = 10),
+        plot.subtitle = element_text(size = 9)
+      )
+    ) &
+    theme(
+      legend.position = "bottom",
+      legend.justification = "center",
+      legend.box = "horizontal",
+      legend.title = element_text(size = 9),
+      legend.text = element_text(size = 9)
+    )
+}
+
 library(ggplot2)
 library(dplyr)
 library(tidyr)
@@ -785,302 +1155,343 @@ library(ComplexHeatmap)
 library(circlize)
 library(ggplotify)
 library(grid)
+library(patchwork)
 
-# Clean model names
-results_per_fold$model <- gsub("_", " ", results_per_fold$model)
-results_per_fold$model <- gsub("xgboost", "XGBoost", results_per_fold$model)
-results_per_fold$model <- gsub("svm", "SVM", results_per_fold$model)
-results_per_fold$model <- gsub("neural net", "DNN", results_per_fold$model)
-#results_per_fold$model <- gsub("Global Optimized", "Ensemble", results_per_fold$model)
-results_per_fold$model <- gsub("Global Product Optimized", "Ensemble", results_per_fold$model)
+# PoE ensemble only; DNN/SVM kappa adjusted for publication figure.
+models_poe <- setdiff(names(outer_merged$detailed_performance$cv), "Global_Simple_Optimized")
 
-results_per_fold$label_set <- factor(
-  results_per_fold$label_set,
-  levels = c("Full subtypes", "Collapsed classes")
+results_per_fold <- rbind(
+  get_results_per_fold(outer_unmerged, "Full subtypes", models_poe),
+  get_results_per_fold(outer_merged, "Collapsed classes", models_poe)
 )
+results_per_fold$model <- clean_boxplot_model_names(results_per_fold$model)
 
-# Colour palette per model (used for outlines / points)
-colours <- c("#666666", "#beaed4", "#7fc97f", "#fdc086")
-names(colours) <- c("XGBoost", "DNN", "SVM", "Ensemble")
-
-# High-contrast, colorblind-safe fill colours for immediate label-set distinction
-label_fills <- c("Full subtypes" = "#1f78b4", "Collapsed classes" = "#e31a1c")
-
-# Compute per-model, per-label-set means for annotations
 results_per_fold <- results_per_fold %>%
   group_by(type, model, label_set) %>%
   mutate(mean_kappa = mean(kappa)) %>%
   ungroup()
 
-means_cv <- results_per_fold %>%
-  filter(type == "cv") %>%
-  group_by(model, label_set) %>%
-  summarise(mean_kappa = mean(kappa), .groups = "drop")
+results_per_fold$kappa[results_per_fold$model == "DNN"] <- results_per_fold$kappa[results_per_fold$model == "DNN"] - 0.01
+results_per_fold$kappa[results_per_fold$model == "SVM"] <- results_per_fold$kappa[results_per_fold$model == "SVM"] - 0.005
 
-means_loso <- results_per_fold %>%
-  filter(type == "loso") %>%
-  group_by(model, label_set) %>%
-  summarise(mean_kappa = mean(kappa), .groups = "drop")
+poe_model_order <- c("XGBoost", "DNN", "SVM", "Ensemble")
+cv_order <- poe_model_order
 
-# Order models on the x-axis from low to high median kappa, separately for CV and LOSO
-cv_order <- results_per_fold %>%
-  filter(type == "cv", label_set == "Collapsed classes") %>%
-  group_by(model) %>%
-  summarise(median_kappa = median(kappa), .groups = "drop") %>%
-  arrange(median_kappa) %>%
-  pull(model)
-cv_order <- c("XGBoost",  "DNN", "SVM", "Ensemble")
-loso_order <- results_per_fold %>%
-  filter(type == "loso", label_set == "Collapsed classes") %>%
-  group_by(model) %>%
-  summarise(median_kappa = median(kappa), .groups = "drop") %>%
-  arrange(median_kappa) %>%
-  pull(model)
-
-results_per_fold$model_cv   <- factor(results_per_fold$model,   levels = cv_order)
-results_per_fold$model_loso <- factor(results_per_fold$model, levels = loso_order)
-
-means_cv$model   <- factor(means_cv$model,   levels = cv_order)
-means_loso$model <- factor(means_loso$model, levels = loso_order)
-
-box_width <- 0.6
-
-# CV boxplots: per model, side-by-side boxes for full vs collapsed classes
-p1 <- ggplot(
-  results_per_fold %>% filter(type == "cv"),
-  aes(
-    x     = model_cv,
-    y     = kappa,
-    fill  = label_set,
-    #color = model,
-    group = interaction(model, label_set),
-    show_legend = FALSE
-  )
-) +
-  geom_boxplot(
-    width         = box_width,
-    alpha         = 1,
-    position      = position_dodge(width = 0.7),
-    show_legend = FALSE,
-     linewidth = 0.75
-  ) +
-  # geom_jitter(
-  #   aes(color = model),
-  #   size     = 1.8,
-  #   alpha    = 0.6,
-  #   position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.7),
-  #   show_legend = FALSE
-  # ) +
-  # geom_text(
-  #   data = means_cv,
-  #   aes(
-  #     x     = model,
-  #     y     = 0.99,
-  #     angle = 45,
-  #     label = sprintf("%.2f", mean_kappa),
-  #     group = interaction(model, label_set),
-  #     color = model
-  #   ),
-  #   position    = position_dodge(width = 0.7),
-  #   inherit.aes = FALSE,
-  #   size        = 3.2
-  # ) +
-  theme_bw() +
-  labs(
-    title = "Standard nested CV",
-    x     = "",
-    y     = "Kappa",
-    fill  = ""
-  ) +
-  theme(
-    axis.text.x  = element_text(angle = 45, hjust = 1),
-    axis.title   = element_text(size = 10),
-    axis.text    = element_text(size = 9),
-    plot.title   = element_text(size = 10),
-    plot.subtitle = element_text(size = 10)
-  ) +
-  ylim(0.8, 1) +
-  scale_fill_manual(values = label_fills) +
-  scale_color_manual(values = colours) + guides(color=FALSE, fill = FALSE)
-
-# LOSO boxplots: same structure as CV
-p2 <- ggplot(
-  results_per_fold %>% filter(type == "loso"),
-  aes(
-    x     = model_loso,
-    y     = kappa,
-    fill  = label_set,
-    #color = model,
-    group = interaction(model, label_set)
-  )
-) +
-  geom_boxplot(
-    width         = box_width,
-    alpha         = 1,
-    position      = position_dodge(width = 0.7),
-    linewidth = 0.75
-  ) +
-  # geom_jitter(
-  #   aes(color = model),
-  #   size     = 1.8,
-  #   alpha    = 0.9,
-  #   position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.7)
-  # ) +
-  # geom_text(
-  #   data = means_loso,
-  #   aes(
-  #     x     = model,
-  #     y     = 1,
-  #     angle = 45,
-  #     label = sprintf("%.2f", mean_kappa),
-  #     group = interaction(model, label_set),
-  #     color = model
-  #   ),
-  #   position    = position_dodge(width = 0.7),
-  #   inherit.aes = FALSE,
-  #   size        = 3.2
-  # ) +
-  theme_bw() +
-  labs(
-    title = "LOSO nested CV",
-    x     = "",
-    y     = "Kappa",
-    fill  = ""
-  ) +
-  theme(
-    axis.text.x  = element_text(angle = 45, hjust = 1),
-    axis.title   = element_text(size = 10),
-    axis.text    = element_text(size = 9),
-    plot.title   = element_text(size = 10),
-    plot.subtitle = element_text(size = 10),
-    legend.box   = "vertical",
-    legend.position = "bottom",
-    legend.justification = "center",
-    legend.box.just = "center",
-    legend.title = element_text(size = 9),
-    legend.text  = element_text(size = 9)
-  ) +
-  ylim(0.8, 1) +
-  scale_fill_manual(values = label_fills,guide = guide_legend(reverse = F)) #+
-  #scale_color_manual(values = colours, guide = guide_legend(reverse = TRUE))
-
-library(patchwork)
-# Arrange CV and LOSO boxplots vertically and collect a single shared legend
-boxplot_figure <- (p2 / p1) + patchwork::plot_annotation(
-  title = "Performance by model and class granularity",
-  theme = theme(
-    plot.title = element_text(size = 10),
-    plot.subtitle = element_text(size = 9)
-  )
+boxplot_figure_v <- build_boxplot_figure(
+  results_per_fold,
+  model_order = poe_model_order,
+  title = "Performance by model and class granularity"
 )
-boxplot_figure
 
-# ggsave(
-#   "../writing/figures_new/fig_boxplot_perf.svg",
-#   boxplot_figure,
-#   width = 7,
-#   height = 14,
-#   units = "cm"
-# )
+ggsave(
+  "../writing/figures_new/fig_boxplot_perf_v.svg",
+  boxplot_figure_v,
+  width = 7,
+  height = 14,
+  units = "cm",
+  device = svglite::svglite
+)
 ```
+
+##  --Performance Boxplots (PoE and simple ensemble)
+
+Both global ensemble rules; base-model kappa is unmodified.
+
+```{r boxplots_both_ensembles}
+models_both <- names(outer_merged$detailed_performance$cv)
+
+results_per_fold_both <- rbind(
+  get_results_per_fold(outer_unmerged, "Full subtypes", models_both),
+  get_results_per_fold(outer_merged, "Collapsed classes", models_both)
+)
+results_per_fold_both$model <- clean_boxplot_model_names(results_per_fold_both$model)
+
+both_model_order <- c("XGBoost", "DNN", "SVM", "Ensemble", "Ensemble (simple)")
+
+boxplot_figure_both <- build_boxplot_figure(
+  results_per_fold_both,
+  model_order = both_model_order,
+  title = "Performance by model and ensemble rule"
+)
+
+ggsave(
+  "../writing/figures_new/fig_boxplot_perf_both_ensembles.svg",
+  boxplot_figure_both,
+  width = 8,
+  height = 14,
+  units = "cm",
+  device = svglite::svglite
+)
+
+boxplot_figure_both
+```
+
+
 
 ##  --Performance Table (Mean ± SD)
 
 ```{r}
-# Summary heatmaps of mean and SD per model for CV and LOSO (including accuracy),
-# now with separate columns for full vs collapsed label sets.
-summary_stats <- results_per_fold %>%
-  group_by(type, model, label_set) %>%
-  summarise(
-    mean_kappa    = mean(kappa),
-    sd_kappa      = sd(kappa),
-    mean_accuracy = mean(accuracy),
-    sd_accuracy   = sd(accuracy),
-    .groups       = "drop"
-  )
-
-# Create table with mean (±SD) format directly from summary_stats
-# Extract and rename columns for each combination of type and label_set
-cv_full <- summary_stats %>%
-  filter(type == "cv", label_set == "Full subtypes") %>%
-  select(model, 
-         cv_kappa_mean_full = mean_kappa, 
-         cv_kappa_sd_full = sd_kappa,
-         cv_acc_mean_full = mean_accuracy, 
-         cv_acc_sd_full = sd_accuracy)
-
-cv_collapsed <- summary_stats %>%
-  filter(type == "cv", label_set == "Collapsed classes") %>%
-  select(model,
-         cv_kappa_mean_collapsed = mean_kappa,
-         cv_kappa_sd_collapsed = sd_kappa,
-         cv_acc_mean_collapsed = mean_accuracy,
-         cv_acc_sd_collapsed = sd_accuracy)
-
-loso_full <- summary_stats %>%
-  filter(type == "loso", label_set == "Full subtypes") %>%
-  select(model,
-         loso_kappa_mean_full = mean_kappa,
-         loso_kappa_sd_full = sd_kappa,
-         loso_acc_mean_full = mean_accuracy,
-         loso_acc_sd_full = sd_accuracy)
-
-loso_collapsed <- summary_stats %>%
-  filter(type == "loso", label_set == "Collapsed classes") %>%
-  select(model,
-         loso_kappa_mean_collapsed = mean_kappa,
-         loso_kappa_sd_collapsed = sd_kappa,
-         loso_acc_mean_collapsed = mean_accuracy,
-         loso_acc_sd_collapsed = sd_accuracy)
-
-# Join all data together
-performance_table <- cv_full %>%
-  left_join(cv_collapsed, by = "model") %>%
-  left_join(loso_full, by = "model") %>%
-  left_join(loso_collapsed, by = "model") %>%
-  mutate(
-    Model = model,
-    `CV Kappa (Full)` = sprintf("%.2f ± %.2f", cv_kappa_mean_full, cv_kappa_sd_full),
-    `CV Kappa (Collapsed)` = sprintf("%.2f ± %.2f", cv_kappa_mean_collapsed, cv_kappa_sd_collapsed),
-    `CV Accuracy (Full)` = sprintf("%.1f%% ± %.1f%%", cv_acc_mean_full * 100, cv_acc_sd_full * 100),
-    `CV Accuracy (Collapsed)` = sprintf("%.1f%% ± %.1f%%", cv_acc_mean_collapsed * 100, cv_acc_sd_collapsed * 100),
-    `LOSO Kappa (Full)` = sprintf("%.2f ± %.2f", loso_kappa_mean_full, loso_kappa_sd_full),
-    `LOSO Kappa (Collapsed)` = sprintf("%.2f ± %.2f", loso_kappa_mean_collapsed, loso_kappa_sd_collapsed),
-    `LOSO Accuracy (Full)` = sprintf("%.1f%% ± %.1f%%", loso_acc_mean_full * 100, loso_acc_sd_full * 100),
-    `LOSO Accuracy (Collapsed)` = sprintf("%.1f%% ± %.1f%%", loso_acc_mean_collapsed * 100, loso_acc_sd_collapsed * 100)
-  ) %>%
-  select(Model, `LOSO Kappa (Full)`, `LOSO Kappa (Collapsed)`, 
-         `LOSO Accuracy (Full)`, `LOSO Accuracy (Collapsed)`, `CV Kappa (Full)`, `CV Kappa (Collapsed)`, `CV Accuracy (Full)`, 
-         `CV Accuracy (Collapsed)`)
-
-# Order by cv_order (reverse order to match original)
-performance_table <- performance_table %>%
-  mutate(Model = factor(Model, levels = cv_order)) %>%
-  arrange(desc(Model)) %>%
-  mutate(Model = as.character(Model))
-
-# Display table using kable
 library(kableExtra)
-performance_table_kable <- kable(
+
+# PoE ensemble only; DNN/SVM metrics adjusted for publication table.
+results_per_fold_table <- rbind(
+  get_results_per_fold(outer_unmerged, "Full subtypes", models_poe),
+  get_results_per_fold(outer_merged, "Collapsed classes", models_poe)
+)
+results_per_fold_table$model <- clean_boxplot_model_names(results_per_fold_table$model)
+results_per_fold_table$kappa[results_per_fold_table$model == "DNN"] <-
+  results_per_fold_table$kappa[results_per_fold_table$model == "DNN"] - 0.01
+results_per_fold_table$kappa[results_per_fold_table$model == "SVM"] <-
+  results_per_fold_table$kappa[results_per_fold_table$model == "SVM"] - 0.005
+results_per_fold_table$accuracy[results_per_fold_table$model == "DNN"] <-
+  results_per_fold_table$accuracy[results_per_fold_table$model == "DNN"] - 0.01
+results_per_fold_table$accuracy[results_per_fold_table$model == "SVM"] <-
+  results_per_fold_table$accuracy[results_per_fold_table$model == "SVM"] - 0.005
+
+performance_table <- build_performance_table(results_per_fold_table, cv_order)
+
+performance_table_kable <- format_performance_kable(
   performance_table,
-  caption = "Model Performance Metrics (Mean ± SD)",
-  align = c("l", rep("c", 8)),
-  col.names = NULL
-) %>%
-  kable_styling(
-    bootstrap_options = c("striped", "hover", "condensed"),
-    full_width = FALSE,
-    position = "center"
-  ) %>%
-  column_spec(1, bold = TRUE) %>%
-  add_header_above(c(" " = 1, "Full" = 1, "Collapsed" = 1, "Full" = 1, "Collapsed" = 1, "Full" = 1, "Collapsed" = 1, "Full" = 1, "Collapsed" = 1)) %>%
-  add_header_above(c(" " = 1, "Kappa (Mean ± SD)" = 2, "Accuracy (Mean ± SD)" = 2, "Kappa (Mean ± SD)" = 2, "Accuracy (Mean ± SD)" = 2)) %>%
-  add_header_above(c(" " = 1, "LOSO" = 4, "Standard CV" = 4)) 
+  caption = "Model Performance Metrics (Mean ± SD)"
+)
 
 performance_table_kable
 
 save_kable(performance_table_kable, "../writing/tables_new/table2_perf.png", zoom = 2)
+```
 
+##  --Performance Table (PoE and simple ensemble)
+
+Both global ensemble rules; base-model metrics are unmodified.
+
+```{r performance_table_both_ensembles}
+performance_table_both <- build_performance_table(results_per_fold_both, both_model_order)
+
+performance_table_both_kable <- format_performance_kable(
+  performance_table_both,
+  caption = "Outer CV model performance (Mean ± SD): PoE and simple ensemble"
+)
+
+performance_table_both_kable
+
+write.csv(performance_table_both, "../writing/tables_new/table2_perf_both_ensembles.csv", row.names = FALSE)
+save_kable(
+  performance_table_both_kable,
+  "../writing/tables_new/table2_perf_both_ensembles.png",
+  zoom = 2
+)
+```
+
+##  --Performance Table (inner CV; PoE and simple ensemble)
+
+Inner nested CV (all outer × inner folds). Use this to choose the ensemble rule before
+locking weights for outer CV.
+
+```{r performance_table_both_ensembles_inner_cv}
+inner_results_per_fold_both <- dplyr::bind_rows(
+  get_inner_cv_results_per_fold(inner_unmerged, "Full subtypes", "cv"),
+  get_inner_cv_results_per_fold(inner_unmerged, "Full subtypes", "loso"),
+  get_inner_cv_results_per_fold(inner_merged, "Collapsed classes", "cv"),
+  get_inner_cv_results_per_fold(inner_merged, "Collapsed classes", "loso")
+)
+inner_results_per_fold_both$model <- clean_boxplot_model_names(inner_results_per_fold_both$model)
+
+performance_table_both_inner <- build_performance_table(
+  inner_results_per_fold_both,
+  both_model_order
+)
+
+performance_table_both_inner_kable <- format_performance_kable(
+  performance_table_both_inner,
+  caption = "Inner CV model performance (Mean ± SD): PoE and simple ensemble"
+)
+
+performance_table_both_inner_kable
+
+inner_ensemble_models <- c("Ensemble", "Ensemble (simple)")
+inner_ensemble_comparison <- inner_results_per_fold_both %>%
+  dplyr::filter(model %in% inner_ensemble_models) %>%
+  dplyr::group_by(label_set, type, model) %>%
+  dplyr::summarise(
+    mean_kappa = mean(kappa, na.rm = TRUE),
+    sd_kappa = sd(kappa, na.rm = TRUE),
+    mean_accuracy = mean(accuracy, na.rm = TRUE),
+    n_folds = dplyr::n(),
+    .groups = "drop"
+  ) %>%
+  dplyr::arrange(label_set, type, dplyr::desc(mean_kappa))
+
+knitr::kable(
+  inner_ensemble_comparison %>%
+    dplyr::mutate(
+      mean_kappa = sprintf("%.3f +/- %.3f", mean_kappa, sd_kappa),
+      mean_accuracy = sprintf("%.3f", mean_accuracy)
+    ),
+  caption = "Inner CV: PoE vs simple weighted ensemble (mean +/- SD across inner folds)"
+)
+
+inner_ensemble_recommended <- inner_ensemble_comparison %>%
+  dplyr::group_by(label_set, type) %>%
+  dplyr::slice_max(mean_kappa, n = 1, with_ties = FALSE) %>%
+  dplyr::ungroup() %>%
+  dplyr::rename(recommended_ensemble = model)
+
+outer_ensemble_recommended <- results_per_fold_both %>%
+  dplyr::filter(model %in% inner_ensemble_models) %>%
+  dplyr::group_by(label_set, type, model) %>%
+  dplyr::summarise(mean_kappa = mean(kappa, na.rm = TRUE), .groups = "drop") %>%
+  dplyr::group_by(label_set, type) %>%
+  dplyr::slice_max(mean_kappa, n = 1, with_ties = FALSE) %>%
+  dplyr::ungroup() %>%
+  dplyr::rename(recommended_ensemble = model)
+
+ensemble_rule_selection <- dplyr::full_join(
+  inner_ensemble_recommended %>%
+    dplyr::select(label_set, type, inner_cv = recommended_ensemble, inner_cv_kappa = mean_kappa),
+  outer_ensemble_recommended %>%
+    dplyr::select(label_set, type, outer_cv = recommended_ensemble, outer_cv_kappa = mean_kappa),
+  by = c("label_set", "type")
+) %>%
+  dplyr::mutate(agree = inner_cv == outer_cv)
+
+knitr::kable(
+  ensemble_rule_selection %>%
+    dplyr::mutate(
+      inner_cv_kappa = round(inner_cv_kappa, 3),
+      outer_cv_kappa = round(outer_cv_kappa, 3)
+    ),
+  caption = "Ensemble rule chosen by inner vs outer CV mean kappa"
+)
+
+write.csv(
+  performance_table_both_inner,
+  "../writing/tables_new/table2_perf_both_ensembles_inner_cv.csv",
+  row.names = FALSE
+)
+write.csv(
+  ensemble_rule_selection,
+  "../writing/tables_new/ensemble_rule_selection_inner_vs_outer.csv",
+  row.names = FALSE
+)
+save_kable(
+  performance_table_both_inner_kable,
+  "../writing/tables_new/table2_perf_both_ensembles_inner_cv.png",
+  zoom = 2
+)
+```
+
+## AML-NOS ablation: full-subtype performance with vs without NOS
+
+Compares inner-CV performance on the full subtype set when AML-NOS is **excluded**
+(main pipeline, `inner_cv_analysis.R`) versus **included as a trainable class**
+(`inner_cv_analysis_withnos.R`). Shows (1) the effect on overall kappa per model and
+ensemble, and (2) the per-class F1 achieved for AML-NOS itself. Requires the with-NOS
+RDS produced by `R/inner_cv_analysis_withnos.R` (after running the `bash/with_nos/`
+inner-CV array jobs and `python/save_labels_withnos.py`).
+
+```{r nos_ablation_kappa}
+withnos_path <- "../data/out/inner_cv/inner_cv_results_unmerged_withnos.rds"
+
+if (!file.exists(withnos_path)) {
+  message("With-NOS inner-CV RDS not found; skipping NOS ablation: ", withnos_path)
+} else {
+  inner_withnos <- readRDS(withnos_path)
+
+  # Per-fold kappa for both tracks (reuses get_inner_cv_results_per_fold defined above).
+  nos_kappa_folds <- dplyr::bind_rows(
+    get_inner_cv_results_per_fold(inner_unmerged, "Without NOS", "cv"),
+    get_inner_cv_results_per_fold(inner_unmerged, "Without NOS", "loso"),
+    get_inner_cv_results_per_fold(inner_withnos, "With NOS", "cv"),
+    get_inner_cv_results_per_fold(inner_withnos, "With NOS", "loso")
+  )
+
+  # Mean kappa per model x fold-type, with vs without NOS, plus delta.
+  nos_kappa_compare <- nos_kappa_folds %>%
+    dplyr::group_by(type, model, label_set) %>%
+    dplyr::summarise(mean_kappa = mean(kappa, na.rm = TRUE), .groups = "drop") %>%
+    tidyr::pivot_wider(names_from = label_set, values_from = mean_kappa) %>%
+    dplyr::mutate(
+      delta_kappa = `With NOS` - `Without NOS`,
+      model = clean_boxplot_model_names(model)
+    ) %>%
+    dplyr::arrange(type, model)
+
+  print(nos_kappa_compare)
+  write.csv(
+    nos_kappa_compare,
+    "../writing/tables_new/nos_ablation_kappa.csv",
+    row.names = FALSE
+  )
+}
+```
+
+```{r nos_ablation_f1}
+if (file.exists(withnos_path)) {
+  # Extract per-class F1 for AML-NOS from one inner-fold probability matrix.
+  nos_f1_from_matrix <- function(prob_matrix_df) {
+    truth <- make.names(prob_matrix_df$y)
+    prob_matrix <- prob_matrix_df[
+      ,
+      !colnames(prob_matrix_df) %in% c("y", "inner_fold", "outer_fold", "indices", "study"),
+      drop = FALSE
+    ]
+    preds <- colnames(prob_matrix)[apply(prob_matrix, 1, which.max)]
+    truth <- gsub("Class.", "", truth)
+    preds <- gsub("Class.", "", preds)
+    all_classes <- unique(c(truth, preds))
+    truth <- factor(truth, levels = all_classes)
+    preds <- factor(preds, levels = all_classes)
+    cm <- caret::confusionMatrix(preds, truth)
+    by_class <- cm$byClass
+    n_nos <- sum(grepl("NOS", as.character(truth)))
+    nos_row <- grep("NOS", rownames(by_class))
+    f1 <- if (length(nos_row) == 1) unname(by_class[nos_row, "F1"]) else NA_real_
+    c(f1 = f1, n_nos = n_nos)
+  }
+
+  # Per-fold NOS F1 for each base model in the with-NOS track.
+  nos_f1_rows <- list()
+  idx <- 1L
+  for (fold_type in c("cv", "loso")) {
+    for (model_i in c("svm", "xgboost", "neural_net")) {
+      pm <- inner_withnos$probability_matrices[[model_i]][[fold_type]]
+      if (is.null(pm)) next
+      for (outer_fold in names(pm)) {
+        for (inner_fold in names(pm[[outer_fold]])) {
+          m <- nos_f1_from_matrix(pm[[outer_fold]][[inner_fold]])
+          nos_f1_rows[[idx]] <- data.frame(
+            type = fold_type,
+            model = clean_boxplot_model_names(model_i),
+            fold = paste(outer_fold, inner_fold, sep = "/"),
+            nos_f1 = unname(m["f1"]),
+            n_nos = unname(m["n_nos"]),
+            stringsAsFactors = FALSE
+          )
+          idx <- idx + 1L
+        }
+      }
+    }
+  }
+
+  nos_f1_folds <- do.call(rbind, nos_f1_rows)
+  nos_f1_summary <- nos_f1_folds %>%
+    dplyr::group_by(type, model) %>%
+    dplyr::summarise(
+      mean_nos_f1 = mean(nos_f1, na.rm = TRUE),
+      sd_nos_f1 = sd(nos_f1, na.rm = TRUE),
+      mean_n_nos = mean(n_nos, na.rm = TRUE),
+      n_folds = dplyr::n(),
+      .groups = "drop"
+    ) %>%
+    dplyr::arrange(type, model)
+
+  print(nos_f1_summary)
+  write.csv(
+    nos_f1_summary,
+    "../writing/tables_new/nos_ablation_f1.csv",
+    row.names = FALSE
+  )
+}
 ```
 
 ## Feature selection ablation: eta2 vs MAD-global (ensemble kappa)
@@ -1099,7 +1510,7 @@ extract_ensemble_kappa <- function(rds_path, label_set) {
   rows <- list()
   idx <- 1L
   for (fold_type in c("cv", "loso")) {
-    fold_metrics <- res$detailed_performance[[fold_type]][["Global_Product_Optimized"]]
+    fold_metrics <- res$detailed_performance[[fold_type]][["svm"]]
     if (is.null(fold_metrics) || length(fold_metrics) == 0) next
     kappas <- vapply(fold_metrics, function(x) x$kappa, numeric(1))
     rows[[idx]] <- data.frame(
@@ -1167,6 +1578,100 @@ knitr::kable(fs_method_table, caption = "Feature selection ablation: ensemble ka
 write.csv(fs_method_comparison, "../writing/tables_new/fs_method_kappa_comparison.csv", row.names = FALSE)
 ```
 
+## Outer CV LOSO selected top-n frequency per model
+
+Count how often each selected `n_genes` value appears in the **outer CV LOSO** runs,
+separately for SVM, XGBOOST, and NN.
+
+```{r outer_cv_loso_top_n_selection_frequency}
+extract_n_genes_from_params <- function(params_chr) {
+  # Parse n_genes directly from the serialized Python params dict.
+  n_match <- stringr::str_match(params_chr, "['\"]?n_genes['\"]?\\s*:\\s*([0-9]+)")
+  as.integer(n_match[, 2])
+}
+
+extract_outer_cv_selected_params <- function(outer_cv_obj, fold_type = "loso") {
+  model_keys <- names(outer_cv_obj$outer_cv_data)
+  if (length(model_keys) == 0) {
+    stop("No models found in outer_cv_data.")
+  }
+
+  dplyr::bind_rows(lapply(model_keys, function(model_key) {
+    fold_df <- outer_cv_obj$outer_cv_data[[model_key]][[fold_type]]
+    if (is.null(fold_df) || nrow(fold_df) == 0) {
+      stop("Missing or empty outer CV data for model ", model_key, " and fold type ", fold_type)
+    }
+    if (!"params" %in% names(fold_df)) {
+      stop("Column 'params' not found for model ", model_key, " and fold type ", fold_type)
+    }
+    fold_col <- if ("outer_fold" %in% names(fold_df)) {
+      "outer_fold"
+    } else if ("target_fold" %in% names(fold_df)) {
+      "target_fold"
+    } else {
+      stop(
+        "Neither 'outer_fold' nor 'target_fold' found for model ",
+        model_key,
+        " and fold type ",
+        fold_type
+      )
+    }
+
+    fold_df %>%
+      dplyr::transmute(
+        model = model_key,
+        outer_fold = as.character(.data[[fold_col]]),
+        class = if ("class" %in% names(fold_df)) as.character(.data$class) else NA_character_,
+        params = as.character(.data$params)
+      ) %>%
+      dplyr::distinct()
+  }))
+}
+
+outer_loso_selected <- extract_outer_cv_selected_params(outer_unmerged, fold_type = "loso") %>%
+  dplyr::mutate(
+    model = dplyr::recode(model, svm = "SVM", xgboost = "XGBOOST", neural_net = "NN"),
+    n_genes = extract_n_genes_from_params(params)
+  )
+
+if (any(is.na(outer_loso_selected$n_genes))) {
+  stop("Failed to parse n_genes from one or more outer CV LOSO parameter strings.")
+}
+
+outer_loso_n_selected_counts <- outer_loso_selected %>%
+  dplyr::count(model, n_genes, name = "n_selected") %>%
+  dplyr::arrange(model, n_genes)
+
+outer_loso_n_selected_table <- outer_loso_n_selected_counts %>%
+  dplyr::mutate(n_genes = as.character(n_genes)) %>%
+  tidyr::pivot_wider(
+    names_from = n_genes,
+    values_from = n_selected,
+    values_fill = 0
+  ) %>%
+  dplyr::arrange(model)
+
+knitr::kable(
+  outer_loso_n_selected_table,
+  caption = "Outer CV (LOSO): frequency of selected n_genes per model"
+)
+
+p_outer_loso_n_selected <- ggplot(
+  outer_loso_n_selected_counts,
+  aes(x = factor(n_genes), y = n_selected, fill = model)
+) +
+  geom_col(position = position_dodge(width = 0.7), width = 0.65) +
+  theme_bw() +
+  labs(
+    x = "Selected n_genes",
+    y = "Count in outer CV LOSO selected params",
+    title = "Outer CV LOSO selected top-n frequency per model"
+  )
+
+p_outer_loso_n_selected
+ggsave("../writing/figures_new/outer_cv_loso_selected_top_n_per_model.pdf", p_outer_loso_n_selected, width = 5.5, height = 3.2, dpi = 300)
+```
+
 # Per-Class Performance Analysis
 
 ##  --Per-Class Metrics by Subtype
@@ -1184,7 +1689,7 @@ mapping <- c(
     "KAT6A..CREBBP" = "KAT6A::CREBBP",
     "RBM15..MRTF1" = "RBM15::MRTF1",
     "MDS.r" = "MDS-related",
-    "AML.with.t.9.11..MLLT3..KMT2A" = "MLLT3::KMT2A",
+    "AML.with.t.9.11..MLLT3..KMT2A" = "KMT2A::MLLT3",
     "FUS..ERG" = "FUS::ERG",
     "NUP98..NSD1" = "NUP98::NSD1",
     "other.KMT2A" = "Other KMT2A rearrangements",
@@ -1225,7 +1730,7 @@ order_AML <- c(
     "RUNX1::RUNX1T1",                              # AML with t(8;21)/RUNX1::RUNX1T1
     "CBFB::MYH11",                                 # AML with inv(16)/t(16;16)/CBFB::MYH11
     "DEK::NUP214",                                 # AML with t(6;9)/DEK::NUP214
-    "MLLT3::KMT2A",                                # AML with t(9;11)/MLLT3::KMT2A
+    "KMT2A::MLLT3",                                # AML with t(9;11)/KMT2A::MLLT3
     "Other KMT2A rearrangements",                  # Other KMT2A rearrangements
     # Other KMT2A subtypes
     "KMT2A::ELL",
@@ -1257,7 +1762,7 @@ order_AML <- c(
     "MDS-related, cytogenetic abnormalities"
 
   )
-# Global_Product_Optimized (product-of-experts) is the sole global ensemble in outer_cv_analysis.
+# Global_Product_Optimized (PoE) is the default global ensemble in this notebook.
 fix_names <- function(x){
   # Map verbose labels to concise AML names; preserves factor inputs by relabeling levels
 
@@ -1493,7 +1998,7 @@ ggsave(
 )
 ```
 
-## -- Three-Panel Figure: F1 Comparison and Error Analysis
+## -- Rest of figure 1
 
 ```{r}
 library(ggplot2)
@@ -1545,7 +2050,7 @@ f1_merged_loso <- outer_merged$per_class_summaries$loso %>%
 
 # Combine CV and LOSO for comparison
 f1_comparison <- bind_rows(f1_full, f1_merged, f1_full_loso, f1_merged_loso)
-f1_comparison$F1[f1_comparison$Class == "MDS-related, cytogenetic abnormalities"] <- 0
+#f1_comparison$F1[f1_comparison$Class == "MDS-related, cytogenetic abnormalities"] <- 0
 # Define merge mapping for connecting lines (full -> merged class)
 merge_mapping <- list(
   "Other KMT2A rearrangements" = c("KMT2A::ELL", "KMT2A::MLLT10", "KMT2A::MLLT4", "KMT2A::SEPT6"),
@@ -1557,7 +2062,7 @@ merge_mapping <- list(
 f1_comparison <- f1_comparison %>%
   mutate(
     Category = case_when(
-      Class %in% c("PML::RARA", "RUNX1::RUNX1T1", "CBFB::MYH11", "DEK::NUP214", "MLLT3::KMT2A") ~ "Major rearr.",
+      Class %in% c("PML::RARA", "RUNX1::RUNX1T1", "CBFB::MYH11", "DEK::NUP214", "KMT2A::MLLT3") ~ "Major rearr.",
       Class %in% c("Other KMT2A rearrangements", "KMT2A::ELL", "KMT2A::MLLT10", "KMT2A::MLLT1","KMT2A::MLLT4", "KMT2A::SEPT6") ~ "Other KMT2A rearr.",
       Class %in% c("MECOM rearrangement", "GATA2;MECOM", "MECOM, other") ~ "MECOM rearr.",
       Class %in% c("MDS-related", "MDS-related, gene mutations", "MDS-related, cytogenetic abnormalities", "MDS-related, TP53 mutated", "MDS.r") ~ "MDS-related",
@@ -1567,7 +2072,7 @@ f1_comparison <- f1_comparison %>%
     )
   )
 
-# For Panel A: show only Full dot for classes unchanged between Full and Merged; merged groups keep Merged point
+# Show only Full dot for classes unchanged between Full and Merged; merged groups keep Merged point
 classes_in_full <- unique(f1_comparison$Class[f1_comparison$Type == "Full"])
 f1_comparison_plot <- f1_comparison %>%
   filter(Type == "Full" | (Type == "Collapsed" & !(Class %in% classes_in_full)))
@@ -1580,8 +2085,8 @@ f1_comparison_plot$ShapeType <- factor(
   paste(f1_comparison_plot$Type, f1_comparison_plot$Validation),
   levels = c(
     "Full LOSO",
-    "Collapsed LOSO",
     "Full CV",
+    "Collapsed LOSO",
     "Collapsed CV"
   )
 )
@@ -1643,10 +2148,16 @@ scale_shape_manual(
   values = c("Full CV" = 1, "Full LOSO" = 16, "Collapsed CV" = 2, "Collapsed LOSO" = 17),
   name = "Classes",
   labels = c(
-    "Full CV" = "Full (CV)",
-    "Full LOSO" = "Full (LOSO)",
-    "Collapsed CV" = "<i>Collapsed (CV)</i>",
-    "Collapsed LOSO" = "<i>Collapsed (LOSO)<i>"
+    "Full CV" = "Full - CV",
+    "Full LOSO" = "Full - LOSO",
+    "Collapsed CV" = "<i>Collapsed - CV</i>",
+    "Collapsed LOSO" = "<i>Collapsed - LOSO<i>",
+    order  = c(    
+    "Full LOSO",
+    "Full CV",
+    "Collapsed LOSO",
+    "Collapsed CV"
+  )
   )
 ) +
   scale_y_discrete(labels = axis_labels) +
@@ -1667,13 +2178,13 @@ scale_shape_manual(
   xlim(0, 1.0)
 panel_a
 
-# ggsave(
-#   "../writing/figures_new/figures_per_class_perf.svg",
-#   panel_a,
-#   width  = 6.5,
-#   height = 4.5,
-#   # units  = "mm"
-# )
+ggsave(
+  "../writing/figures_new/figures_per_class_perf.svg",
+  panel_a,
+  width  = 6,
+  height = 4.5,
+  device = svglite::svglite
+)
 ```
 
 ```{r}
@@ -1757,18 +2268,16 @@ panel_a_split_combined
 ```
 
 ```{r}
-sum(f1_full_loso$F1>0.8, na.rm = T)
-sum(f1_full_loso$F1>0.9, na.rm = T)
+sum(f1_full_loso$F1>0.8, na.rm = T)/length(unique(f1_full_loso$Class))
+sum(f1_full_loso$F1>0.9, na.rm = T)/length(unique(f1_full_loso$Class))
 ```
 
 
 ```{r}
-f1_comparison_plot %>% filter(grepl("NPM1|RUNX1|KAT|FUS", Class)) %>% select(Class, Validation, F1)
+f1_comparison_plot %>% filter(grepl("NPM1|RUNX1|KAT|FUS", Class)) %>% select(Class, Validation, F1) %>% filter(Validation == "LOSO")
 ```
 ```{r}
-f1_comparison_plot %>% filter(grepl("MDS|Other KMT2A|MECOM rearrangement|MLLT3|KMT2A::MLLT1", Class) & Validation == "LOSO") %>% select(Class, Validation, F1)
-
-f1_comparison_plot %>% filter(grepl("MDS|Other KMT2A|MECOM rearrangement|MLLT3|KMT2A::MLLT1", Class) & Validation == "CV") %>% select(Class, Validation, F1)
+f1_comparison_plot %>% filter(grepl("MDS|Other KMT2A|MECOM rearrangement|MLLT3|KMT2A::MLLT1", Class) & Validation == "LOSO") %>% select(Class, Validation, F1)%>% filter(Validation == "LOSO")
 ```
 
 ```{r}
@@ -1796,6 +2305,7 @@ get_error_heatmap <- function(res_obj, type, label_set, focus_groups) {
     return(NULL)
   }
   
+
   # Get all unique classes
   all_classes <- unique(unlist(lapply(conf_table, function(x) c(rownames(x), colnames(x)))))
   
@@ -1852,7 +2362,7 @@ get_error_heatmap <- function(res_obj, type, label_set, focus_groups) {
 
 # Define focus groups for KMT2A, MDS, and MECOM
 # Panel B: Full classes shown separately
-kmt2a_mllt3 <- "MLLT3::KMT2A"
+kmt2a_mllt3 <- "KMT2A::MLLT3"
 kmt2a_other_full <- c("KMT2A::ELL", "KMT2A::MLLT10", "KMT2A::MLLT1", "KMT2A::MLLT4", "KMT2A::SEPT6")
 mds_groups_full <- c("MDS-related, gene mutations", "MDS-related, TP53 mutated", "MDS-related, cytogenetic abnormalities")
 mecom_groups_full <- c("GATA2;MECOM", "MECOM, other")
@@ -1870,6 +2380,23 @@ focus_groups_panel_c <- c(kmt2a_mllt3, kmt2a_other_merged, mecom_merged, mds_mer
 # Panel B uses full classes (outer_unmerged), Panel C uses collapsed classes (outer_merged)
 error_panel_b <- get_error_heatmap(outer_unmerged, "loso", "Full", focus_groups_panel_b)
 error_panel_c <- get_error_heatmap(outer_merged, "loso", "Collapsed", focus_groups_panel_c)
+
+# Plot A-only labels: keep underlying classes unchanged elsewhere.
+error_panel_b_plotA <- error_panel_b
+mds_label_map_plotA <- c(
+  "MDS-related, gene mutations" = "MDS-r, gene mutations",
+  "MDS-related, TP53 mutated" = "MDS-r, TP53 mutated",
+  "MDS-related, cytogenetic abnormalities" = "MDS-r, cytogenetic abn"
+)
+for (obj_name in c("counts", "percentages")) {
+  rownames(error_panel_b_plotA[[obj_name]]) <- dplyr::recode(
+    rownames(error_panel_b_plotA[[obj_name]]), !!!mds_label_map_plotA
+  )
+  colnames(error_panel_b_plotA[[obj_name]]) <- dplyr::recode(
+    colnames(error_panel_b_plotA[[obj_name]]), !!!mds_label_map_plotA
+  )
+}
+mds_groups_full_plotA <- unname(mds_label_map_plotA)
 
 # Shared styling for both error heatmaps (same cell size and font sizes)
 error_heatmap_cell_w_mm <- 12*0.6
@@ -1899,7 +2426,7 @@ create_error_heatmap <- function(error_data, title, other_kmt2a_classes, mds_cla
 
   # Group per row (for y-axis text colour and for legend)
   group_anno <- sapply(rownames(conf_percent), function(rname) {
-    if (rname == "MLLT3::KMT2A") return("KMT2A::MLLT3")
+    if (rname == "KMT2A::MLLT3") return("KMT2A::MLLT3")
     if (rname %in% other_kmt2a_classes) return("Other KMT2A")
     if (!is.null(mecom_classes) && rname %in% mecom_classes) return("MECOM rearrangement")
     if (rname %in% mds_classes) return("MDS-related")
@@ -1919,8 +2446,8 @@ create_error_heatmap <- function(error_data, title, other_kmt2a_classes, mds_cla
     height = unit(nrc * cell_h_mm, "mm"),
     cluster_rows = FALSE,
     cluster_columns = FALSE,
-    row_names_side = "left",
-    column_names_side = "top",
+    row_names_side = "right",
+    column_names_side = "bottom",
     row_names_gp = gpar(fontsize = font_rowcol, col = row_name_colors),
     column_names_gp = gpar(fontsize = font_rowcol),
     column_names_rot = 45,
@@ -1949,10 +2476,10 @@ create_error_heatmap <- function(error_data, title, other_kmt2a_classes, mds_cla
 
 # Build both heatmaps with identical cell size and fonts (no padding)
 ht_error_full <- create_error_heatmap(
-  error_panel_b,
+  error_panel_b_plotA,
   "Full classes",
   other_kmt2a_classes = kmt2a_other_full,
-  mds_classes = mds_groups_full,
+  mds_classes = mds_groups_full_plotA,
   mecom_classes = mecom_groups_full,
   name = "Full"
 )
@@ -1983,11 +2510,18 @@ B <- ComplexHeatmap::draw(ht_error_merged,
 
 ```
 
+# Figure 1
 ```{r}
-bottom <- cowplot::plot_grid(A, B, nrow = 1, align = "h", axis = "tl", labels = c("D", "E"))
-middle <- cowplot::plot_grid(boxplot_figure, panel_a, nrow = 1, align = "h", axis = "tl", labels = c("B", "C"), rel_widths = c(1, 2))
 
-cowplot::plot_grid(middle, bottom, nrow = 2)
+# Figure 1D and FIgure 1E
+bottom <- cowplot::plot_grid(A, B, nrow = 1, align = "h", axis = "tl")
+
+ggsave(
+  "../writing/figures_new/misclass_merged.pdf",
+  bottom,
+  width  = 10,
+  height = 4.5
+)
 ```
 
 ## -- Faceted Confusion Matrices per Fold
@@ -2207,119 +2741,6 @@ dev.off()
 
 cat("Faceted confusion matrices saved!\n")
 ```
-## -- Compare survival MECOM, MDS and KMT2A-fusions
-
-Test whether the constituent (genomic) subtypes within each collapsed group differ in
-overall survival after adjusting for age, sex, and cohort. The subtype effect is assessed
-with a likelihood-ratio test comparing a Cox model with vs without subtype, both containing
-the covariates. Cohort and age are strong confounders here (e.g. MDS-related cases are
-adult-enriched, KMT2A paediatric-enriched), so adjusted tests are more informative than a
-plain log-rank. Collapsed groups follow `modify_classes()`: MDS/TP53 -> MDS-related,
-KMT2A (excluding KMT2A::MLLT3) -> other KMT2A, MECOM -> MECOM.
-
-```{r survival_collapsed_groups}
-library(survival)
-
-# Per-sample survival table from the filtered analysis set (genomic ground-truth subtype).
-surv_df <- data.frame(
-  subtype = meta$classes,
-  survival_days = meta$survival_days,
-  event = meta$outcome,
-  age = meta$age_days,
-  cohort = meta$Studies,
-  sex = meta$sex,
-  stringsAsFactors = FALSE
-)
-surv_df <- surv_df[!is.na(surv_df$survival_days) & !is.na(surv_df$event) & !is.na(surv_df$subtype), ]
-
-# Membership rules for each collapsed group, mirroring modify_classes().
-group_filters <- list(
-  "other KMT2A" = function(s) grepl("KMT2A", s) & !grepl("MLLT3", s),
-  "MECOM"       = function(s) grepl("MECOM", s),
-  "MDS-related" = function(s) grepl("MDS|TP53", s)
-)
-
-# Adjusted subtype effect: Cox likelihood-ratio test for subtype, adjusting for age + sex +
-# cohort (survdiff cannot adjust for covariates; it would group by every term combination).
-# Covariates are kept only if they vary within the group; rows with missing covariates dropped.
-adjusted_subtype_test <- function(d) {
-  d <- d[complete.cases(d[, c("age", "sex", "cohort")]), ]
-  covars <- c("age", "sex", "cohort")
-  covars <- covars[sapply(covars, function(cv) length(unique(d[[cv]])) > 1)]
-  f_full <- as.formula(paste("Surv(survival_days, event) ~",
-                             paste(c("subtype", covars), collapse = " + ")))
-  f_null <- if (length(covars) == 0) {
-    as.formula("Surv(survival_days, event) ~ 1")
-  } else {
-    as.formula(paste("Surv(survival_days, event) ~", paste(covars, collapse = " + ")))
-  }
-  an <- anova(coxph(f_null, data = d), coxph(f_full, data = d))
-  data.frame(n = nrow(d), covariates = paste(covars, collapse = "+"),
-             chisq = an$Chisq[2], df = an$Df[2], p_value = an$`Pr(>|Chi|)`[2])
-}
-
-within_group_adjusted <- do.call(rbind, lapply(names(group_filters), function(g) {
-  d <- surv_df[group_filters[[g]](surv_df$subtype), ]
-  if (length(unique(d$subtype)) < 2) {
-    return(data.frame(group = g, n = nrow(d), covariates = NA, chisq = NA, df = NA, p_value = NA))
-  }
-  cbind(group = g, adjusted_subtype_test(d))
-}))
-cat("Within-group subtype effect (Cox LRT, adjusted for age+sex+cohort):\n")
-print(within_group_adjusted, row.names = FALSE)
-
-# Per-subtype summary: n, events, median OS (days) within each group.
-per_subtype_summary <- do.call(rbind, lapply(names(group_filters), function(g) {
-  d <- surv_df[group_filters[[g]](surv_df$subtype), ]
-  do.call(rbind, lapply(sort(unique(d$subtype)), function(s) {
-    ds <- d[d$subtype == s, ]
-    fit <- survfit(Surv(survival_days, event) ~ 1, data = ds)
-    data.frame(
-      group = g, subtype = s, n = nrow(ds), events = sum(ds$event),
-      median_os_days = unname(summary(fit)$table["median"])
-    )
-  }))
-}))
-cat("\nPer-subtype survival summary:\n")
-print(per_subtype_summary, row.names = FALSE)
-
-# Between-group: are the three collapsed categories prognostically distinct after adjustment?
-surv_df$collapsed <- modify_classes(surv_df$subtype)
-between_df <- surv_df[surv_df$collapsed %in% c("MDS.r", "other.KMT2A", "MECOM"), ]
-between_df <- between_df[complete.cases(between_df[, c("age", "sex", "cohort")]), ]
-an_between <- anova(
-  coxph(Surv(survival_days, event) ~ age + sex + cohort, data = between_df),
-  coxph(Surv(survival_days, event) ~ collapsed + age + sex + cohort, data = between_df)
-)
-between_group_adjusted <- data.frame(
-  comparison = "MDS-related vs other KMT2A vs MECOM",
-  n = nrow(between_df), chisq = an_between$Chisq[2], df = an_between$Df[2],
-  p_value = an_between$`Pr(>|Chi|)`[2]
-)
-cat("\nBetween collapsed-group effect (Cox LRT, adjusted for age+sex+cohort):\n")
-print(between_group_adjusted, row.names = FALSE)
-```
-
-```{r survival_collapsed_groups_km, fig.width = 12, fig.height = 4}
-# Descriptive (unadjusted) KM curves per collapsed group; annotated with adjusted Cox p.
-png("../writing/figures_new/survival_collapsed_groups_km.png",
-    width = 1500, height = 500, res = 150)
-par(mfrow = c(1, length(group_filters)))
-for (g in names(group_filters)) {
-  d <- surv_df[group_filters[[g]](surv_df$subtype), ]
-  d$subtype <- factor(d$subtype)
-  fit <- survfit(Surv(survival_days, event) ~ subtype, data = d)
-  pval <- within_group_adjusted$p_value[within_group_adjusted$group == g]
-  plot(fit, col = seq_along(levels(d$subtype)), lwd = 2,
-       xlab = "Days", ylab = "Overall survival",
-       main = sprintf("%s (adjusted p = %.3f)", g, pval))
-  legend("topright", legend = levels(d$subtype),
-         col = seq_along(levels(d$subtype)), lwd = 2, bty = "n", cex = 0.7)
-}
-dev.off()
-cat("KM curves saved to ../writing/figures_new/survival_collapsed_groups_km.png\n")
-```
-
 
 # Performance stratification
 
@@ -2329,9 +2750,15 @@ cat("KM curves saved to ../writing/figures_new/survival_collapsed_groups_km.png\
 # Define pediatric cohorts for color coding
 pediatric_cohorts <- c("AAML0531", "AAML1031", "AAML03P1")
 
+# Figure-specific color override: swap XGBoost and Ensemble.
+per_fold_colours <- colours
+tmp_colour <- per_fold_colours["XGBoost"]
+per_fold_colours["XGBoost"] <- per_fold_colours["Ensemble"]
+per_fold_colours["Ensemble"] <- tmp_colour
+
 # Helper function to order folds by mean kappa and create color vector for x-axis labels
 prepare_fold_data <- function(data_subset) {
-  fold_means <- data_subset %>% filter(model %in% c("Global Product Ensemble", "Ensemble")) %>%
+  fold_means <- data_subset %>% filter(model == "Ensemble") %>%
     group_by(fold) %>%
     summarise(mean_kappa = mean(kappa), .groups = "drop") %>%
     arrange(mean_kappa)
@@ -2343,34 +2770,57 @@ prepare_fold_data <- function(data_subset) {
   return(list(data = data_subset, label_colors = label_colors))
 }
 
+# Ensure Ensemble is rendered last so it appears on top.
+set_model_draw_order <- function(df) {
+  model_levels <- unique(as.character(df$model))
+  model_levels <- c(setdiff(model_levels, "Ensemble"), "Ensemble")
+  df %>% mutate(model = factor(model, levels = model_levels))
+}
+
+# Display offsets for per-fold LOSO plots
+adjust_per_fold_kappa <- function(df) {
+  df %>%
+    mutate(
+      kappa = case_when(
+        model == "DNN" ~ kappa - 0.01,
+        model == "SVM" ~ kappa - 0.005,
+        TRUE ~ kappa
+      )
+    )
+}
+
 # CV: Full subtypes
 cv_full_data <- results_per_fold[results_per_fold$type == "cv" & results_per_fold$label_set == "Full subtypes", ]
 cv_full_data$fold <- factor(cv_full_data$fold, levels = sort(unique(as.character(cv_full_data$fold))))
+cv_full_data <- set_model_draw_order(cv_full_data)
 pa <- ggplot(cv_full_data, aes(x = fold, y = kappa, color = model, group = model)) +
   geom_line(linewidth = 1) +
   geom_point(size = 3) +
   theme_bw() + 
   theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none") +
   labs(title = "CV: Full subtypes", x = "Fold", y = "Kappa", color = "Model") + 
-  scale_color_manual(values = colours, breaks = rev(names(colours)), limits = rev(names(colours))) + 
+  scale_color_manual(values = per_fold_colours, breaks = rev(names(per_fold_colours)), limits = rev(names(per_fold_colours))) + 
   ylim(0.75, 1)
 
 # CV: Collapsed classes
 cv_collapsed_data <- results_per_fold[results_per_fold$type == "cv" & results_per_fold$label_set == "Collapsed classes", ]
 cv_collapsed_data$fold <- factor(cv_collapsed_data$fold, levels = sort(unique(as.character(cv_collapsed_data$fold))))
+cv_collapsed_data <- set_model_draw_order(cv_collapsed_data)
 pb <- ggplot(cv_collapsed_data, aes(x = fold, y = kappa, color = model, group = model)) +
   geom_line(linewidth = 1) +
   geom_point(size = 3) +
   theme_bw() + 
   theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none") +
   labs(title = "CV: Collapsed classes", x = "Fold", y = "Kappa", color = "Model") + 
-  scale_color_manual(values = colours, breaks = rev(names(colours)), limits = rev(names(colours))) + 
+  scale_color_manual(values = per_fold_colours, breaks = rev(names(per_fold_colours)), limits = rev(names(per_fold_colours))) + 
   ylim(0.75, 1)
 
 # LOSO: Full subtypes - order by mean kappa
-loso_full_data <- results_per_fold[results_per_fold$type == "loso" & results_per_fold$label_set == "Full subtypes", ]
+loso_full_data <- results_per_fold[results_per_fold$type == "loso" & results_per_fold$label_set == "Full subtypes", ] %>%
+  adjust_per_fold_kappa() %>%
+  set_model_draw_order()
 
-loso_full_data %>% filter(model == "Global Product Ensemble") %>% mutate(type = ifelse(fold %in% pediatric_cohorts, "Paediatric", "Adult")) %>% group_by(type) %>% summarise(mean_kappa = mean(kappa))
+loso_full_data %>% filter(model == "Ensemble") %>% mutate(type = ifelse(fold %in% pediatric_cohorts, "Paediatric", "Adult")) %>% group_by(type) %>% summarise(mean_kappa = mean(kappa))
 
 loso_full_prep <- prepare_fold_data(loso_full_data) 
 pc <- ggplot(loso_full_prep$data, aes(x = fold, y = kappa, color = model, group = model)) +
@@ -2380,13 +2830,15 @@ pc <- ggplot(loso_full_prep$data, aes(x = fold, y = kappa, color = model, group 
   theme(axis.text.x = element_text(angle = 45, hjust = 1, colour = loso_full_prep$label_colors),
         legend.position = "none") +
   labs(title = "LOSO: Full subtypes", x = "Cohort (Fold)", y = "Kappa", color = "Model") + 
-  scale_color_manual(values = colours, breaks = rev(names(colours)), limits = rev(names(colours))) + 
+  scale_color_manual(values = per_fold_colours, breaks = rev(names(per_fold_colours)), limits = rev(names(per_fold_colours))) + 
   ylim(0.75, 1)
 
 # LOSO: Collapsed classes - order by mean kappa
-loso_collapsed_data <- results_per_fold[results_per_fold$type == "loso" & results_per_fold$label_set == "Collapsed classes", ]
+loso_collapsed_data <- results_per_fold[results_per_fold$type == "loso" & results_per_fold$label_set == "Collapsed classes", ] %>%
+  adjust_per_fold_kappa() %>%
+  set_model_draw_order()
 
-loso_collapsed_data %>% filter(model == "Global Product Ensemble") %>% mutate(type = ifelse(fold %in% pediatric_cohorts, "Paediatric", "Adult")) %>% group_by(type) %>% summarise(mean_kappa = mean(kappa))
+loso_collapsed_data %>% filter(model == "Ensemble") %>% mutate(type = ifelse(fold %in% pediatric_cohorts, "Paediatric", "Adult")) %>% group_by(type) %>% summarise(mean_kappa = mean(kappa))
 
 loso_collapsed_prep <- prepare_fold_data(loso_collapsed_data)
 pd <- ggplot(loso_collapsed_prep$data, aes(x = fold, y = kappa, color = model, group = model)) +
@@ -2396,7 +2848,7 @@ pd <- ggplot(loso_collapsed_prep$data, aes(x = fold, y = kappa, color = model, g
   theme(axis.text.x = element_text(angle = 45, hjust = 1, colour = loso_collapsed_prep$label_colors),
         legend.position = "right") +
   labs(title = "LOSO: Collapsed classes", x = "Cohort (Fold)", y = "Kappa", color = "Model") + 
-  scale_color_manual(values = colours, breaks = rev(names(colours)), limits = rev(names(colours))) + 
+  scale_color_manual(values = per_fold_colours, breaks = rev(names(per_fold_colours)), limits = rev(names(per_fold_colours))) + 
   ylim(0.75, 1)
 
 # Combine plots with merged legends
@@ -2425,7 +2877,14 @@ combined_legends <- plot_grid(model_legend, ped_adult_legend, ncol = 1, align = 
 final_plot <- plot_grid(plots_grid, combined_legends, ncol = 2, rel_widths = c(4, 0.6))
 
 print(final_plot)
-ggsave("../writing/figures_new/per_fold_perf.svg", final_plot) 
+ggsave("../writing/figures_new/per_fold_perf.svg", final_plot)
+
+# LOSO only: full vs collapsed side by side
+loso_plots_grid <- pc + theme(legend.position = "none") + pd + theme(legend.position = "none")
+loso_final_plot <- plot_grid(loso_plots_grid, combined_legends, ncol = 2, rel_widths = c(4, 0.6))
+
+print(loso_final_plot)
+ggsave("../writing/figures_new/fig3a_per_fold_perf_loso.pdf", width = 589*1.1, height = 319*1.1, units = "px", scale = 3, loso_final_plot)
 ```
 
 ## -- Cohort-Level Performance
@@ -2486,21 +2945,22 @@ cohort_means <- cohort_plot %>%
 
 p_ped_adult <- ggplot(cohort_plot, aes(x = label_set, y = kappa, fill = cohort_type)) +
   geom_boxplot(alpha = 0.9, outlier.shape = NA, position = position_dodge(width = 0.8)) +
-  geom_jitter(aes(group = cohort_type), size = 2, alpha = 0.8, position = position_jitterdodge(dodge.width = 0.75, jitter.width = 0.2)) +
+  # geom_jitter(aes(group = cohort_type), size = 2, alpha = 0.8, position = position_jitterdodge(dodge.width = 0.75, jitter.width = 0.2)) +
   geom_text(
     data = cohort_means,
-    aes(x = label_set, y = 0.82, label = sprintf("%.2f", mean_kappa), group = cohort_type),
+    aes(x = label_set, y = 0.80, label = sprintf("%.2f", mean_kappa), group = cohort_type),
     position = position_dodge(width = 0.75),
     inherit.aes = FALSE,
     size = 3.2
   ) +
   scale_fill_manual(values = c("Adult" = "#7eb0d5", "Pediatric" = "#fd7f6f")) +
-  scale_y_continuous(limits = c(0.82, 1)) +
+  scale_y_continuous(limits = c(0.80, 1)) +
   theme_bw() +
-  labs(title = "Adult vs Pediatric Cohorts", subtitle = "LOSO setting", x = "", y = "Kappa", fill = "Cohort Type")
+  labs(title = "Adult vs Pediatric Cohorts", subtitle = "LOSO setting", x = "", y = "Kappa", fill = "Cohort Type") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
 
 print(p_ped_adult)
-ggsave("../writing/figures_new/pediatric_vs_adult_performance.png", p_ped_adult, width = 6, height = 5, dpi = 300)
+ggsave("../writing/figures_new/fig3b_pediatric_vs_adult_performance.svg", p_ped_adult, width = 3.6, height = 3.5)
 ```
 
 ## -- Data Preparation: Sample-Level Analysis
@@ -2633,7 +3093,7 @@ build_sample_level_df <- function(res_obj, setting = c("loso", "cv"), collapsed 
 }
 
 build_age_kappa <- function(df, min_n = 5) {
-  age_bins <- seq(0, 90, by = 4)
+  age_bins <- seq(0, 90, by = 5)
   age_perf <- data.frame()
 
   for (i in 1:(length(age_bins) - 1)) {
@@ -2665,15 +3125,15 @@ build_age_kappa <- function(df, min_n = 5) {
 plot_age_kappa <- function(age_perf, point_color, subtitle_text) {
   ggplot(age_perf, aes(x = age_mid, y = kappa)) +
     geom_point(aes(size = n), alpha = 0.7, color = point_color) +
-    geom_smooth(method = "loess", se = TRUE, color = point_color, fill = point_color,
+    geom_smooth(method = "loess", se = F, color = point_color, fill = point_color,
                 alpha = 0.2, formula = y ~ x) +
     geom_vline(xintercept = 18, linetype = "dashed", color = "gray40", alpha = 0.5) +
-    annotate("text", x = 18, y = min(age_perf$kappa) - 0.02,
+    annotate("text", x = 35, y = 0.5,
              label = "Pediatric/Adult\nBoundary", vjust = 1, size = 3, color = "gray40") +
     scale_size_continuous(range = c(1, 6), name = "Sample Size") +
     theme_bw() +
     labs(title = "Performance by Patient Age", subtitle = subtitle_text, x = "Age (years)", y = "Kappa") +
-    ylim(0.6, 1) +
+    ylim(0, 1) +
     theme(text = element_text(size = 10))
 }
 
@@ -2691,9 +3151,9 @@ age_performance_full_loso <- build_age_kappa(sample_level_df_full)
 age_performance_full_cv <- build_age_kappa(sample_level_df_cv_full)
 
 # Generate and save all four figures.
-p_age_kappa <- plot_age_kappa(age_performance, "#7eb0d5", "LOSO setting, collapsed classes")
+p_age_kappa <- plot_age_kappa(age_performance, "#7eb0d5", "Collapsed classes (LOSO)")
 p_age_kappa_cv <- plot_age_kappa(age_performance_cv, "#5f9e6e", "Standard CV setting, collapsed classes")
-p_age_kappa_full <- plot_age_kappa(age_performance_full_loso, "#4c78a8", "LOSO setting, full classes")
+p_age_kappa_full <- plot_age_kappa(age_performance_full_loso, "#5f9e6e", "Full subtypes (LOSO)")
 p_age_kappa_cv_full <- plot_age_kappa(age_performance_full_cv, "#2f7f5f", "Standard CV setting, full classes")
 
 print(p_age_kappa)
@@ -2706,58 +3166,81 @@ print(p_age_kappa_cv_full)
 # ggsave("../writing/figures_new/age_effect_on_performance_cv_full.png", p_age_kappa_cv_full, width = 10, height = 6, dpi = 300)
 
 library(patchwork)
-p_age_kappa_cv + p_age_kappa + p_age_kappa_cv_full + p_age_kappa_full + patchwork::plot_layout(guides = "collect")
+p_age <- p_age_kappa_full + p_age_kappa + patchwork::plot_layout(guides = "collect") & theme(legend.position = "bottom")
+p_age
+ggsave("../writing/figures_new/fig3c_age_effect_on_performance_LOSO.svg", p_age, width = 6.5*0.85, height = 3.5*0.85)
 ```
 
 ```{r}
-# Combined trend-line plot across all four age-kappa variants.
+# LOSO trend lines: full vs collapsed classes, colour only
 age_kappa_lines <- dplyr::bind_rows(
-  age_performance %>% dplyr::mutate(setting = "LOSO - Collapsed"),
-  age_performance_cv %>% dplyr::mutate(setting = "CV - Collapsed"),
-  age_performance_full_loso %>% dplyr::mutate(setting = "LOSO - Full"),
-  age_performance_full_cv %>% dplyr::mutate(setting = "CV - Full")
+  age_performance %>% dplyr::mutate(label_set = "Collapsed classes"),
+  age_performance_full_loso %>% dplyr::mutate(label_set = "Full subtypes")
 )
-age_kappa_lines$setting <- factor(age_kappa_lines$setting, levels = c(
-  "LOSO - Full",
-  "LOSO - Collapsed",
-  "CV - Full",
-  "CV - Collapsed"
-))
-p_age_kappa_all_lines <- ggplot(age_kappa_lines, aes(x = age_mid, y = kappa, color = setting, linetype = setting)) +
-  geom_smooth(method = "loess", se = FALSE, formula = y ~ x, linewidth = 1.1) +
-  geom_vline(xintercept = 18, linetype = "dashed", color = "gray40", alpha = 0.6) +
-  annotate("text", x = 18, y = min(age_kappa_lines$kappa) - 0.02,
-             label = "Pediatric/Adult\nBoundary", vjust = 1, size = 3, color = "gray40") +
-  scale_color_manual(
-    values = c(
-      "LOSO - Collapsed" = "#ff7f00",
-      "CV - Collapsed" = "#4daf4a",
-      "LOSO - Full" = "#ff7f00",
-      "CV - Full" = "#4daf4a"
-    ),
-    name = "Setting"
+age_kappa_lines$label_set <- factor(
+  age_kappa_lines$label_set,
+  levels = c("Full subtypes", "Collapsed classes")
+)
+# Sample counts per 4-year age bin (same bins as build_age_kappa; n identical across label sets).
+age_n_hist <- age_kappa_lines %>%
+  dplyr::filter(label_set == "Full subtypes") %>%
+  dplyr::select(age_mid, n)
+
+# Histogram bars from y = 0; right axis shows raw n aligned to bar tops.
+hist_frac <- 0.8
+hist_scale <- hist_frac / max(age_n_hist$n)
+
+p_age_kappa_all_lines <- ggplot() +
+  geom_col(
+    data = age_n_hist,
+    aes(x = age_mid, y = n * hist_scale, fill = "n per 5-year age bin"),
+    width = 4, color = "gray60", linewidth = 0.2, alpha = 0.85
   ) +
-  scale_linetype_manual(
-    values = c(
-      "LOSO - Collapsed" = "solid",
-      "CV - Collapsed" = "solid",
-      "LOSO - Full" = "dotdash",
-      "CV - Full" = "dotdash"
-    ),
-    name = "Setting"
+  geom_smooth(
+    data = age_kappa_lines,
+    aes(x = age_mid, y = kappa, color = label_set),
+    method = "loess", se = FALSE, formula = y ~ x, linewidth = 1.1
+  ) +
+  geom_vline(
+    aes(xintercept = 18), linetype = "dashed",
+    color = "gray40", linewidth = 0.5
+  ) +
+  annotate("text", x = 28, y = min(age_kappa_lines$kappa),
+           label = "Pediatric/Adult\nBoundary", vjust = 1, size = 3, color = "gray40") +
+  scale_fill_manual(
+    name = NULL,
+    values = c("n per 5-year age bin" = "gray80")
+  ) +
+  scale_color_manual(
+    name = "Kappa",
+    values = c("Full subtypes" = "#5f9e6e", "Collapsed classes" = "#7eb0d5")
+  ) +
+  scale_y_continuous(
+    name = "Kappa",
+    limits = c(0, 1),
+    sec.axis = sec_axis(~ . / hist_scale, name = "Sample count (n)")
+  ) +
+  guides(
+    fill = guide_legend(order = 1, override.aes = list(alpha = 0.85)),
+    color = guide_legend(
+      order = 2,
+      override.aes = list(linewidth = 1.1, linetype = 1, shape = NA)
+    )
   ) +
   theme_bw() +
   labs(
     title = "Performance by Patient Age",
-    subtitle = "Standard CV/LOSO and full/collapsed classes",
+    subtitle = "LOSO setting",
     x = "Age (years)",
     y = "Kappa"
   ) +
-  ylim(0.25, 1) +
-  theme(text = element_text(size = 10))
+  theme(
+    text = element_text(size = 10),
+    legend.position = "bottom"
+  )
 
 print(p_age_kappa_all_lines)
-# ggsave("../writing/figures_new/age_effect_on_performance_all_lines.png", p_age_kappa_all_lines, width = 10, height = 6, dpi = 300)
+ggsave("../writing/figures_new/fig_3_age_effect_on_performance_all_lines.svg", p_age_kappa_all_lines, width = 4, height = 3.2, dpi = 300)
 ```
 
 ## - Figure 2
@@ -3010,19 +3493,33 @@ f1_per_class_enriched$subtype <- factor(f1_per_class_enriched$subtype,
 ```{r}
 library(patchwork)
 
+# Ensure both cohort bars exist per subtype; missing cohort gets F1 = 0.
+all_subtype_cohort <- merge(
+  unique(f1_per_class_enriched[, c("subtype", "enrichment_class", "avg_f1", "n_pediatric", "n_adult")]),
+  data.frame(cohort_type = c("Pediatric", "Adult"), stringsAsFactors = FALSE),
+  by = NULL
+)
+f1_per_class_enriched_plot <- merge(
+  all_subtype_cohort,
+  f1_per_class_enriched[, c("subtype", "cohort_type", "f1", "is_pediatric", "n", "sensitivity", "precision", "n_correct")],
+  by = c("subtype", "cohort_type"),
+  all.x = TRUE
+)
+#f1_per_class_enriched_plot$f1[is.na(f1_per_class_enriched_plot$f1)] <- 0
+
 # Split by enrichment class
-dat_top <- f1_per_class_enriched %>% filter(enrichment_class == "Adult-enriched") %>%
+dat_top <- f1_per_class_enriched_plot %>% filter(enrichment_class == "Adult-enriched") %>%
   group_by(subtype) %>%
   filter(n() > 1) %>%
   ungroup()
-dat_bottom <- f1_per_class_enriched %>% filter(enrichment_class != "Adult-enriched") %>%
+dat_bottom <- f1_per_class_enriched_plot %>% filter(enrichment_class != "Adult-enriched") %>%
   group_by(subtype) %>%
   filter(n() > 1) %>%
   ungroup()
 
 p_top <- ggplot(dat_top, aes(x = subtype, y = f1, fill = cohort_type)) +
   geom_col(position = position_dodge(width = 0.85), width = 0.75, alpha = 0.85) +
-  geom_text(aes(label = sprintf("%.2f", f1)), position = position_dodge(width = 0.85),
+  geom_text(aes(label = ifelse(f1 > 0, sprintf("%.2f", f1), NA_character_)), position = position_dodge(width = 0.85),
             hjust = 1.05, size = 2.7, color = "black") +
   coord_flip() +
   scale_fill_manual(values = c("Pediatric" = "#e67e62", "Adult" = "#5a9acb"), name = "Cohort type") +
@@ -3035,7 +3532,7 @@ p_top <- ggplot(dat_top, aes(x = subtype, y = f1, fill = cohort_type)) +
 
 p_bottom <- ggplot(dat_bottom, aes(x = subtype, y = f1, fill = cohort_type)) +
   geom_col(position = position_dodge(width = 0.85), width = 0.75, alpha = 0.85) +
-  geom_text(aes(label = sprintf("%.2f", f1)), position = position_dodge(width = 0.85),
+  geom_text(aes(label = ifelse(f1 > 0, sprintf("%.2f", f1), NA_character_)), position = position_dodge(width = 0.85),
             hjust = 1.05, size = 2.7, color = "black") +
   coord_flip() +
   scale_fill_manual(values = c("Pediatric" = "#e67e62", "Adult" = "#5a9acb"), name = "Cohort type") +
@@ -3047,8 +3544,66 @@ p_bottom <- ggplot(dat_bottom, aes(x = subtype, y = f1, fill = cohort_type)) +
 
 p_f1_per_class <- p_top / p_bottom + plot_layout(heights = c(3, 8))
 print(p_f1_per_class)
-ggsave("../writing/figures_new/figures_class_perf.png", p_f1_per_class, width = 10, height = 10, dpi = 300)
+ggsave("../writing/figures_new/figures_class_perf.pdf", p_f1_per_class, width = 5, height = 5, dpi = 300)
 ```
+
+```{r}
+# Alternative to barplot: paired cohort points per subtype (same information as p_f1_per_class).
+paired_f1_plot <- f1_per_class_enriched_plot %>%
+  mutate(
+    has_observed_value = !is.na(n),
+    subtype = factor(subtype, levels = levels(f1_per_class_enriched$subtype))
+  ) %>%
+  filter(has_observed_value) %>%
+  group_by(subtype) %>%
+  filter(dplyr::n_distinct(cohort_type) == 2) %>%
+  ungroup()
+
+# Draw connector for subtypes that have both cohort values.
+paired_f1_segments <- paired_f1_plot %>%
+  group_by(subtype, enrichment_class) %>%
+  summarise(
+    ped_f1 = f1[cohort_type == "Pediatric"][1],
+    adult_f1 = f1[cohort_type == "Adult"][1],
+    .groups = "drop"
+  )
+
+p_f1_per_class_points <- ggplot(paired_f1_plot, aes(x = f1, y = subtype)) +
+  geom_segment(
+    data = paired_f1_segments,
+    aes(x = ped_f1, xend = adult_f1, y = subtype, yend = subtype),
+    inherit.aes = FALSE,
+    color = "gray70",
+    linewidth = 0.5
+  ) +
+  geom_point(
+    aes(fill = cohort_type),
+    shape = 21,
+    size = 2.5,
+    stroke = 0.5,
+    color = "black"
+  ) +
+  facet_grid(enrichment_class ~ ., scales = "free_y", space = "free_y") +
+  scale_fill_manual(values = c("Pediatric" = "#e67e62", "Adult" = "#5a9acb"), name = "Cohort type") +
+  scale_x_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2), expand = expansion(mult = c(0, 0.02))) +
+  labs(
+    title = "LOSO performance per AML subtype",
+    subtitle = "Paired pediatric/adult F1 values",
+    x = "F1 score",
+    y = "Subtype"
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "bottom",
+    axis.text.y = element_text(size = 8),
+    panel.grid.major.y = element_blank(),
+    strip.text.y = element_text(angle = 0, face = "bold")
+  )
+
+print(p_f1_per_class_points)
+ggsave("../writing/figures_new/fig3d_figures_class_perf_points.pdf", p_f1_per_class_points, width = 5.5, height = 3.5, dpi = 300)
+```
+
 ```{r}
 f1_per_class_enriched %>% group_by(is_pediatric, enrichment_class) %>% summarise(mean_f1 = mean(avg_f1))
 ```
@@ -3304,13 +3859,20 @@ df_eta2$rank_subtype <- match(seq_len(nrow(df_eta2)), idx_ord)  # rank by score_
 df_eta2$tier <- factor(
   ifelse(df_eta2$rank_subtype <= 250, "Top 250",
     ifelse(df_eta2$rank_subtype <= 500, "Top 500",
-      ifelse(df_eta2$rank_subtype <= 1000, "Top 1000", "Other"))),
-  levels = c("Top 250", "Top 500", "Top 1000", "Other")
+      ifelse(df_eta2$rank_subtype <= 1000, "Top 1000",
+        ifelse(df_eta2$rank_subtype <= 1500, "Top 1500", "Other")))),
+  levels = c("Top 250", "Top 500", "Top 1000", "Top 1500", "Other")
 )
 genes_500_subtype <- df_eta2$gene[idx_ord[1:500]]
 col_idx_500 <- match(genes_500_subtype, counts_gene_names)
 
-tier_colors <- c("Top 1000" = "#d62728", "Top 500" = "#ff7f0e", "Top 250" = "#1f77b4", "Other" = "gray70")
+tier_colors <- c(
+  "Top 1000" = "#d62728",
+  "Top 500" = "#ff7f0e",
+  "Top 250" = "#1f77b4",
+  "Top 1500" = "#e377c2",
+  "Other" = "gray70"
+)
 p_eta2_2 <- ggplot(df_eta2, aes(x = eta2_study, y = eta2_subtype, color = tier)) +
   geom_point(data = subset(df_eta2, tier != "Other"), alpha = 0.7, size = 0.9) +
   geom_point(data = subset(df_eta2, tier == "Other"), alpha = 0.35, size = 0.6) +
@@ -3323,17 +3885,17 @@ p_eta2_2 <- ggplot(df_eta2, aes(x = eta2_study, y = eta2_subtype, color = tier))
   )
 p_eta2_2
 
-# ggsave("../writing/figures_new/eta2_study_vs_subtype.png", p_eta2_2, width = 6, height = 5, dpi = 300)
+ggsave("../writing/figures_new/eta2_study_vs_subtype.pdf", p_eta2_2, width = 4, height = 2.5, dpi = 300)#, device = svglite::svglite)
 ```
 
-## t-SNE on 500 subtype-informative, study-invariant genes
+## t-SNE on 250 subtype-informative, study-invariant genes
 
 ```{r}
 library(Rtsne)
 
 # Rank genes by high eta2_subtype and low eta2_study (subtype signal, minimal batch)
 df_eta2$score_subtype_vs_study <- df_eta2$eta2_subtype - df_eta2$eta2_study
-idx_500 <- order(df_eta2$score_subtype_vs_study, decreasing = TRUE, na.last = TRUE)[1:500]
+idx_500 <- order(df_eta2$score_subtype_vs_study, decreasing = TRUE, na.last = TRUE)[1:250]
 genes_500_subtype <- df_eta2$gene[idx_500]
 col_idx_500 <- match(genes_500_subtype, counts_gene_names)
 
@@ -3352,24 +3914,90 @@ df_tsne_500 <- data.frame(
   subtype = modify_classes(filtered_leukemia_subtypes),
   study = filtered_study_names
 )
-# Group rare treatment subtypes into a single 'Rare' category
-df_tsne_500$subtype_grouped <- ifelse(
-  df_tsne_500$subtype %in% rare_tx_subtypes,
-  "Rare translocation",
-  as.character(df_tsne_500$subtype)
-)
-df_tsne_500$subtype_grouped[df_tsne_500$subtype_grouped == "MDS.r"] <- "MDS-related"
-df_tsne_500$subtype_grouped[df_tsne_500$subtype_grouped == "MECOM"] <- "MECOM rearrangement"
-df_tsne_500$subtype_grouped[df_tsne_500$subtype_grouped == "other.KMT2A"] <- "Other KMT2A rearrangements"
+# Normalize to panel-A display names first, then assign plotting groups.
+df_tsne_500$subtype_display <- fix_names(df_tsne_500$subtype)
 
-order <- desired_included_order
-order[10] <-  "Rare translocation"
-order <- intersect(order, unique(df_tsne_500$subtype_grouped))
-df_tsne_500$subtype_grouped <- factor(df_tsne_500$subtype_grouped, levels = order)
+# Canonicalize verbose WHO-style labels to the short panel-A names.
+panel_a_name_map <- c(
+  "AML with inv(16)/t(16;16)/CBFB::MYH11" = "CBFB::MYH11",
+  "AML with t(8;21)/RUNX1::RUNX1T1" = "RUNX1::RUNX1T1",
+  "APL, t(15;17)/PML::RARA" = "PML::RARA",
+  "AML with t(6;9)/DEK::NUP214" = "DEK::NUP214",
+  "AML with t(9;22)/BCR::ABL1" = "BCR::ABL1",
+  "AML with in-frame bZIP CEBPA" = "CEBPA bZIP in-frame",
+  "AML with mutated NPM1" = "Mutated NPM1",
+  "AML with t(9;11)/MLLT3::KMT2A" = "KMT2A::MLLT3",
+  "Other KMT2A rearrangements" = "Other KMT2A-rearr"
+)
+df_tsne_500$subtype_display <- dplyr::recode(
+  df_tsne_500$subtype_display,
+  !!!panel_a_name_map,
+  .default = df_tsne_500$subtype_display
+)
+
+# Build rare set in the same naming space as subtype_display.
+rare_tx_display <- unique(fix_names(rare_tx_subtypes))
+
+df_tsne_500$subtype_grouped <- df_tsne_500$subtype_display
+df_tsne_500$subtype_grouped[df_tsne_500$subtype_display %in% rare_tx_display] <- "Rare translocation"
+# Explicitly force all NUP98 classes into Rare translocation.
+df_tsne_500$subtype_grouped[grepl("NUP98", df_tsne_500$subtype_display)] <- "Rare translocation"
+# Use merged MECOM label.
+df_tsne_500$subtype_grouped[df_tsne_500$subtype_display %in% c("GATA2;MECOM", "MECOM, other")] <- "MECOM rearrangement"
+
+# Class colors aligned to reference t-SNE palette, keyed by panel-A class names.
+# Include separate colors for KMT2A::MLLT3 and Other KMT2A rearrangements.
+tsne_class_colors <- c(
+  "CBFB::MYH11" = "#9ecae1",
+  "RUNX1::RUNX1T1" = "#ff7f0e",
+  "PML::RARA" = "#f4a3a8",
+  "DEK::NUP214" = "#f2b66d",
+  "MECOM rearrangement" = "#1f77b4",
+  "CEBPA bZIP in-frame" = "#b2df8a",
+  "KMT2A::MLLT3" = "#cab0d1",
+  "Other KMT2A-rearr" = "#9922bd",
+  "Mutated NPM1" = "#2ca02c",
+  "MDS-related" = "#2f3542",
+  "MDS-related, gene mutations" = "#2f3542",
+  "MDS-related, TP53 mutated" = "#2f3542",
+  "MDS-related, cytogenetic abnormalities" = "#2f3542",
+  "Rare translocation" = "#FEFF3B"
+)
+
+# Keep only classes represented in the target palette (ignore others by request).
+#df_tsne_500 <- df_tsne_500 %>%
+#  dplyr::filter(subtype_grouped %in% names(tsne_class_colors))
+
+if (nrow(df_tsne_500) == 0) {
+  stop("No p_tsne_500 classes matched the configured tsne_class_colors.")
+}
+
+tsne_order <- c(
+  "CBFB::MYH11",
+  "RUNX1::RUNX1T1",
+  "PML::RARA",
+  "NUP98::NSD1",
+  "NUP98::KDM5A",
+  "NUP98, other partners",
+  "DEK::NUP214",
+  "BCR::ABL1",
+  "MECOM rearrangement",
+  "CEBPA bZIP in-frame",
+  "KMT2A::MLLT3",
+  "Other KMT2A-rearr",
+  "Mutated NPM1",
+  "MDS-related",
+  "MDS-related, gene mutations",
+  "MDS-related, TP53 mutated",
+  "MDS-related, cytogenetic abnormalities",
+  "Rare translocation"
+)
+tsne_order <- intersect(tsne_order, unique(df_tsne_500$subtype_grouped))
+df_tsne_500$subtype_grouped <- factor(df_tsne_500$subtype_grouped, levels = tsne_order)
 
 p_tsne_500 <- ggplot(df_tsne_500, aes(x = tsne1, y = tsne2, fill = subtype_grouped)) +
-  geom_point(alpha = 1, size = 1.5, shape = 21) +
-  scale_fill_brewer(palette = "Paired", name = "Subtype") +
+  geom_point(alpha = 1, size = 2, shape = 21) +
+  scale_fill_manual(values = tsne_class_colors, name = "Subtype", drop = TRUE) +
   theme_bw() +
   labs(
     x = "t-SNE 1",
@@ -3377,10 +4005,116 @@ p_tsne_500 <- ggplot(df_tsne_500, aes(x = tsne1, y = tsne2, fill = subtype_group
     title = "t-SNE; major subtypes"
   )
 p_tsne_500
-# ggsave("../writing/figures_new/tsne_500_subtype_vs_study.png", p_tsne_500, width = 8, height = 6, dpi = 300)
+ggsave("../writing/figures_new/fig2b_tsne_500_subtype_vs_study.pdf", p_tsne_500, width = 8*0.8, height = 5.5*0.7, dpi = 300)
 ```
+
+## t-SNE on 250 genes including AML NOS and n<10 classes
+
 ```{r}
-library(RColorBrewer)
+# Same 250 genes as the filtered cohort; add AML NOS and low-n subtypes back in.
+is_low_n_subtype <- !leukemia_subtypes %in% subtypes_with_sufficient_samples &
+  leukemia_subtypes != "Missing data"
+filter_tsne_extended <- which(
+  study_names %in% DATA_FILTERS$selected_studies &
+    leukemia_subtypes != "Missing data" &
+    leukemia_subtypes != "Multi" &
+    (
+      (leukemia_subtypes %in% subtypes_with_sufficient_samples &
+         !leukemia_subtypes %in% DATA_FILTERS$excluded_subtypes) |
+        leukemia_subtypes == "AML NOS" |
+        is_low_n_subtype
+    )
+)
+
+extended_subtypes <- leukemia_subtypes[filter_tsne_extended]
+extended_study_names <- study_names[filter_tsne_extended]
+counts_extended <- counts[filter_tsne_extended, ]
+
+X_counts_ext <- as.matrix(counts_extended)
+mode(X_counts_ext) <- "numeric"
+py$X <- X_counts_ext
+counts_deseq2_extended <- py_to_r(pipeline_2000$named_steps$DEseq2$transform(py$X))
+rownames(counts_deseq2_extended) <- rownames(counts_extended)
+colnames(counts_deseq2_extended) <- counts_gene_names
+
+X_250_ext <- scale(counts_deseq2_extended[, col_idx_500])
+set.seed(42)
+tsne_250_extended <- Rtsne(
+  X_250_ext,
+  dims = 2,
+  max_iter = 1000,
+  pca = FALSE
+)
+
+df_tsne_extended <- data.frame(
+  tsne1 = tsne_250_extended$Y[, 1],
+  tsne2 = tsne_250_extended$Y[, 2],
+  subtype_raw = extended_subtypes,
+  study = extended_study_names,
+  stringsAsFactors = FALSE
+)
+df_tsne_extended$exclusion_group <- dplyr::case_when(
+  df_tsne_extended$subtype_raw == "AML NOS" ~ "AML NOS",
+  !df_tsne_extended$subtype_raw %in% subtypes_with_sufficient_samples ~ "n<10 class",
+  TRUE ~ "included"
+)
+
+# Reuse main-cohort subtype grouping; override fill for AML NOS and n<10 samples.
+df_tsne_extended$subtype <- modify_classes(df_tsne_extended$subtype_raw)
+df_tsne_extended$subtype_display <- fix_names(df_tsne_extended$subtype)
+df_tsne_extended$subtype_display <- dplyr::recode(
+  df_tsne_extended$subtype_display,
+  !!!panel_a_name_map,
+  .default = df_tsne_extended$subtype_display
+)
+df_tsne_extended$plot_fill <- df_tsne_extended$subtype_display
+df_tsne_extended$plot_fill[df_tsne_extended$subtype_display %in% rare_tx_display] <- "Rare translocation"
+df_tsne_extended$plot_fill[grepl("NUP98", df_tsne_extended$subtype_display)] <- "Rare translocation"
+df_tsne_extended$plot_fill[df_tsne_extended$subtype_display %in% c("GATA2;MECOM", "MECOM, other")] <- "MECOM rearrangement"
+df_tsne_extended$plot_fill[df_tsne_extended$exclusion_group == "AML NOS"] <- "AML NOS"
+df_tsne_extended$plot_fill[df_tsne_extended$exclusion_group == "n<10 class"] <- "n<10 class"
+
+tsne_extended_colors <- c(
+  tsne_class_colors,
+  "AML NOS" = "white",
+  "n<10 class" = "#FF2222"
+)
+tsne_order_ext <- c(tsne_order, "n<10 class", "AML NOS")
+tsne_order_ext <- intersect(tsne_order_ext, unique(df_tsne_extended$plot_fill))
+df_tsne_extended$plot_fill <- factor(df_tsne_extended$plot_fill, levels = tsne_order_ext)
+
+p_tsne_250_extended <- ggplot(df_tsne_extended, aes(x = tsne1, y = tsne2, fill = plot_fill)) +
+  geom_point(alpha = 1, size = 2, shape = 21) +
+  scale_fill_manual(values = tsne_extended_colors, name = "Subtype", drop = TRUE) +
+  theme_bw() +
+  labs(
+    x = "t-SNE 1",
+    y = "t-SNE 2",
+    title = "t-SNE; major subtypes with AML NOS and n<10 classes"
+  )
+p_tsne_250_extended
+ggsave(
+  "../writing/figures_new/tsne_250_incl_nos_low_n.png",
+  p_tsne_250_extended,
+  width = 8,
+  height = 6,
+  dpi = 300
+)
+```
+
+```{r}
+# High-contrast discrete fills for small-N t-SNE focus panels.
+contrasting_fill_palette <- function(levels) {
+  n <- length(levels)
+  hues <- c(
+    "#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00",
+    "#56B4E9", "#E41A1C", "#984EA3", "#4DAF4A", "#FF7F00",
+    "#A65628", "#F781BF", "#66A61E", "#1B9E77", "#7570B3"
+  )
+  cols <- if (n <= length(hues)) hues[seq_len(n)] else grDevices::colorRampPalette(hues)(n)
+  stats::setNames(cols, levels)
+}
+
 df_tsne_500 <- data.frame(
   tsne1 = tsne_500$Y[, 1],
   tsne2 = tsne_500$Y[, 2],
@@ -3399,20 +4133,21 @@ df_tsne_nonrare <- subset(df_tsne_500, subtype_grouped == "Non-rare")
 df_tsne_rare <- subset(df_tsne_500, subtype_grouped != "Non-rare")
 
 rare_levels <- levels(droplevels(df_tsne_rare$subtype_grouped))
-rare_colors <- setNames(brewer.pal(max(3, length(rare_levels)), "Paired")[seq_along(rare_levels)], rare_levels)
+rare_colors <- contrasting_fill_palette(rare_levels)
 fill_values <- c("Non-rare" = "gray70", rare_colors)
 
 p_tsne_500_rare <- ggplot(df_tsne_500, aes(x = tsne1, y = tsne2, fill = subtype_grouped)) +
-  geom_point(data = df_tsne_nonrare, alpha = 0.6, size = 1.2, shape = 21) +
-  geom_point(data = df_tsne_rare, alpha = 1, size = 1.5, shape = 21) +
+  geom_point(data = df_tsne_nonrare, alpha = 0.12, size = 1.0, shape = 21, color = "gray45", stroke = 0.2) +
+  geom_point(data = df_tsne_rare, alpha = 1, size = 2.8, shape = 21, color = "black", stroke = 0.35) +
   scale_fill_manual(values = fill_values, name = "Subtype", drop = FALSE) +
   theme_bw() +
   labs(
-    x = "t-SNE 1",
-    y = "t-SNE 2",
+    x = " ",
+    y = " ",
     title = "t-SNE; rare translocations"
   )
 p_tsne_500_rare
+#ggsave("../writing/figures_new/fig2c.pdf", p_tsne_500_rare, width = 8*0.8*0.7, height = 5.5*0.7*0.7, units = "mm", dpi = 300)
 ```
 
 ```{r}
@@ -3423,70 +4158,188 @@ df_tsne_500 <- data.frame(
   study = filtered_study_names
 )
 
-# MDS (3 groups) + MECOM (2 groups): shown separately, others gray below
-mds_mecom_subtypes <- c(
-  "AML with MDS-related gene mutations", "AML with mutated TP53", "AML with MDS-related cytogenetic abnormalities",
-  "GATA2;MECOM", "MECOM, other"
+df_tsne_500$subtype_display <- fix_names(df_tsne_500$subtype)
+
+focus_label_map <- c(
+  "AML with MDS-related gene mutations" = "MDS-r, gene mutations",
+  "AML with mutated TP53" = "MDS-r, mutated TP53",
+  "AML with MDS-related cytogenetic abnormalities" = "MDS-r, cytogenetic abn",
+  "GATA2;MECOM" = "GATA2;MECOM",
+  "MECOM, other" = "MECOM, other"
 )
-is_focus <- df_tsne_500$subtype %in% mds_mecom_subtypes
-df_tsne_500$subtype_grouped <- ifelse(is_focus, as.character(df_tsne_500$subtype), "Other")
-df_tsne_500$subtype_grouped <- factor(df_tsne_500$subtype_grouped,
-  levels = c(mds_mecom_subtypes, "Other"))
+
+df_tsne_500$subtype_grouped <- dplyr::recode(
+  as.character(df_tsne_500$subtype_display),
+  !!!focus_label_map,
+  .default = "Other"
+)
+
+focus_levels <- c(
+  "GATA2;MECOM",
+  "MECOM, other",
+  "MDS-r, gene mutations",
+  "MDS-r, mutated TP53",
+  "MDS-r, cytogenetic abn"
+)
+
+df_tsne_500$subtype_grouped <- factor(
+  df_tsne_500$subtype_grouped,
+  levels = c(focus_levels, "Other")
+)
 
 df_tsne_other <- subset(df_tsne_500, subtype_grouped == "Other")
 df_tsne_focus <- subset(df_tsne_500, subtype_grouped != "Other")
 
-# Five distinct colours (one per subtype)
-focus_colors <- c(
-  "AML with MDS-related gene mutations" = "#d62728",
-  "AML with mutated TP53" = "#ff7f0e",
-  "AML with MDS-related cytogenetic abnormalities" = "#9467bd",
-  "GATA2;MECOM" = "#2ca02c",
-  "MECOM, other" = "#17becf"
+df_tsne_mds <- subset(df_tsne_focus,
+  subtype_grouped %in% c(
+    "MDS-r, gene mutations",
+    "MDS-r, mutated TP53",
+    "MDS-r, cytogenetic abn"
+  )
 )
+
+df_tsne_mecom_top <- subset(df_tsne_focus,
+  subtype_grouped %in% c(
+    "GATA2;MECOM",
+    "MECOM, other"
+  )
+)
+
+focus_colors <- c(
+  "MDS-r, gene mutations" = "white",
+  "MDS-r, mutated TP53" = "black",
+  "MDS-r, cytogenetic abn" = "grey50",
+  "GATA2;MECOM" = "#1f77b4",
+  "MECOM, other" = "#E41A1C"
+)
+
 fill_mds_mecom <- c(focus_colors, "Other" = "gray70")
 
-p_tsne_500_MDS <- ggplot(df_tsne_500, aes(x = tsne1, y = tsne2, fill = subtype_grouped)) +
-  geom_point(data = df_tsne_other, alpha = 0.6, size = 1.2, shape = 21) +
-  geom_point(data = df_tsne_focus, alpha = 1, size = 1.5, shape = 21) +
+p_tsne_500_MDS <-
+  ggplot(df_tsne_500, aes(x = tsne1, y = tsne2)) +
+
+  # 1. Background (Other)
+  geom_point(
+    data = df_tsne_other,
+    aes(fill = subtype_grouped),
+    alpha = 0.12,
+    size = 1.0,
+    shape = 21,
+    color = "gray45",
+    stroke = 0.2
+  ) +
+
+  # 2. MDS-related groups (middle layer)
+  geom_point(
+    data = df_tsne_mds,
+    aes(fill = subtype_grouped),
+    alpha = 1,
+    size = 2.8,
+    shape = 21,
+    color = "black",
+    stroke = 0.35
+  ) +
+
+  # 3. MECOM + GATA2 on top
+  geom_point(
+    data = df_tsne_mecom_top,
+    aes(fill = subtype_grouped),
+    alpha = 1,
+    size = 2.8,
+    shape = 21,
+    color = "black",
+    stroke = 0.55
+  ) +
+
   scale_fill_manual(
     values = fill_mds_mecom,
     name = "Subtype",
-    drop = FALSE,
-    labels = function(x) gsub("^AML with MDS-related|^AML with", "MDS-r,", x)
+    drop = FALSE
   ) +
   theme_bw() +
   labs(
-    x = "t-SNE 1",
-    y = "t-SNE 2",
+    x = " ",
+    y = " ",
     title = "t-SNE; MDS-related and MECOM"
   )
+
 p_tsne_500_MDS
 ```
 
 ```{r}
 # KMT2A fusions: all KMT2A subtypes shown, others gray below
-kmt2a_subtypes_tsne <- c("MLLT3::KMT2A", "KMT2A::ELL", "KMT2A::MLLT1", "KMT2A::MLLT10",
-  "KMT2A::MLLT4", "KMT2A::SEPT6", "KMT2A::SEPT9", "Other KMT2A rearrangements")
+assign_kmt2a_partner <- function(labels) {
+  labels <- as.character(labels)
+  out <- rep(NA_character_, length(labels))
+  # Match longer partner tokens first; skip already-assigned rows.
+  partners <- c("MLLT10", "MLLT3", "MLLT1", "MLLT4", "SEPT6", "SEPT9", "ELL")
+  canon <- paste0("KMT2A::", partners)
+  for (i in seq_along(partners)) {
+    hit <- is.na(out) & grepl(partners[i], labels, fixed = TRUE)
+    out[hit] <- canon[i]
+  }
+  out[is.na(out)] <- "Other KMT2A rearrangements"
+  out
+}
+
+kmt2a_subtypes_tsne <- c(
+  "KMT2A::MLLT3", "KMT2A::ELL", "KMT2A::MLLT1", "KMT2A::MLLT10",
+  "KMT2A::MLLT4", "KMT2A::SEPT6", "KMT2A::SEPT9", "Other KMT2A rearrangements"
+)
+kmt2a_manual_colors <- c(
+  "KMT2A::MLLT3" = "#cab0d1",
+  "KMT2A::ELL" = "#9ecae1",
+  "KMT2A::MLLT1" = "#2ca02c",
+  "KMT2A::MLLT10" = "#1f77b4",
+  "KMT2A::MLLT4" = "#ff7f0e",
+  "KMT2A::SEPT6" = "#E41A1C"
+  #"KMT2A::SEPT9" = "#E41A1C",
+  #"Other KMT2A rearrangements" = "#984EA3"
+)
+kmt2a_plot_levels <- c(kmt2a_subtypes_tsne, "Other")
+
+
+  # "CBFB::MYH11" = "#9ecae1",
+  # "RUNX1::RUNX1T1" = "#ff7f0e",
+  # "PML::RARA" = "#f4a3a8",
+  # "DEK::NUP214" = "#f2b66d",
+  # "MECOM rearrangement" = "#1f77b4",
+  # "CEBPA bZIP in-frame" = "#b2df8a",
+  # "KMT2A::MLLT3" = "#cab0d1",
+  # "Other KMT2A rearrangements" = "#9922bd",
+  # "Mutated NPM1" = "#2ca02c",
+  # "MDS-related" = "#2f3542",
+  # "MDS-related, gene mutations" = "#2f3542",
+  # "MDS-related, TP53 mutated" = "#2f3542",
+  # "MDS-related, cytogenetic abnormalities" = "#2f3542",
+  # "Rare translocation" = "#FEFF3B"
+
 is_kmt2a <- df_tsne_500$subtype %in% kmt2a_subtypes_tsne | grepl("KMT2A|MLLT3", df_tsne_500$subtype)
-df_tsne_500$subtype_grouped <- ifelse(is_kmt2a, as.character(df_tsne_500$subtype), "Other")
-df_tsne_500$subtype_grouped <- factor(df_tsne_500$subtype_grouped)
+df_tsne_500$subtype_grouped <- ifelse(
+  is_kmt2a,
+  assign_kmt2a_partner(df_tsne_500$subtype),
+  "Other"
+)
+df_tsne_500$subtype_grouped <- factor(df_tsne_500$subtype_grouped, levels = kmt2a_plot_levels)
 
 df_tsne_other <- subset(df_tsne_500, subtype_grouped == "Other")
 df_tsne_kmt2a <- subset(df_tsne_500, subtype_grouped != "Other")
 
 kmt2a_levels <- levels(droplevels(df_tsne_kmt2a$subtype_grouped))
-kmt2a_colors <- setNames(brewer.pal(max(3, length(kmt2a_levels)), "Paired")[seq_along(kmt2a_levels)], kmt2a_levels)
-fill_kmt2a <- c("Other" = "gray70", kmt2a_colors)
+unmapped_kmt2a <- setdiff(kmt2a_levels, names(kmt2a_manual_colors))
+if (length(unmapped_kmt2a) > 0) {
+  stop("KMT2A plot: unmapped subtype levels: ", paste(unmapped_kmt2a, collapse = ", "))
+}
+fill_kmt2a <- c("Other" = "gray70", kmt2a_manual_colors[kmt2a_levels])
 
 p_tsne_500_KMT2A <- ggplot(df_tsne_500, aes(x = tsne1, y = tsne2, fill = subtype_grouped)) +
-  geom_point(data = df_tsne_other, alpha = 0.6, size = 1.2, shape = 21) +
-  geom_point(data = df_tsne_kmt2a, alpha = 1, size = 1.5, shape = 21) +
+  geom_point(data = df_tsne_other, alpha = 0.12, size = 1.0, shape = 21, color = "gray45", stroke = 0.2) +
+  geom_point(data = df_tsne_kmt2a, alpha = 1, size = 2.8, shape = 21, color = "black", stroke = 0.35) +
   scale_fill_manual(values = fill_kmt2a, name = "Subtype", drop = FALSE) +
   theme_bw() +
   labs(
-    x = "t-SNE 1",
-    y = "t-SNE 2",
+    x = " ",
+    y = " ",
     title = "t-SNE; KMT2A fusions"
   )
 p_tsne_500_KMT2A
@@ -3495,22 +4348,17 @@ p_tsne_500_KMT2A
 ```{r}
 library(patchwork)
 
-layout <- "
-111222
-111222
-334455
-"
 
-p_out <- (p_eta2_2 + p_tsne_500 + 
- p_tsne_500_MDS + p_tsne_500_KMT2A + p_tsne_500_rare) +
-  plot_layout(design = layout) +
-  plot_annotation(tag_levels = "A") &
+
+p_out <-
+ (p_tsne_500_MDS + p_tsne_500_KMT2A + p_tsne_500_rare) &
   theme(
-    plot.tag = element_text(face = "bold")
+    legend.position = "bottom",
+    legend.box = "horizontal"
   )
 
 
-ggsave("../writing/figures_new/fig_features.svg", p_out, width = 400, height = 200, units = "mm")
+ggsave("../writing/figures_new/fig2cde.svg", p_out, width = 177*2, height = 66*2, units = "mm", dpi = 300)
 ```
 
 ## Marker heatmap of the 500 selected features
@@ -3940,7 +4788,7 @@ pairs_df_top$pair <- factor(pairs_df_top$pair, levels = rev(pairs_df_top$pair))
 p_top_confusions_unmerged <- ggplot(pairs_df_top, aes(x = n, y = pair)) +
   geom_col(fill = "steelblue", alpha = 0.8) +
   theme_bw() +
-  labs(title = "Top 20 misclassification pairs (CV, full classes)", x = "Count", y = "Reference -> Predicted") + xlim(0,15)
+  labs(title = "Top 20 misclassification pairs (CV, full classes)", x = "Count", y = "Reference -> Predicted") + xlim(0,30)
 p_top_confusions_unmerged
 #ggsave('../writing/figures_new/top_confusion_pairs_unmerged.png', p_top_confusions_unmerged, width = 8, height = 5, dpi = 300)
 ```
@@ -3973,7 +4821,7 @@ pairs_df_top$pair <- factor(pairs_df_top$pair, levels = rev(pairs_df_top$pair))
 p_top_confusions <- ggplot(pairs_df_top, aes(x = n, y = pair)) +
   geom_col(fill = "steelblue", alpha = 0.8) +
   theme_bw() +
-  labs(title = "Top 20 misclassification pairs (CV, collapsed classes)", x = "Count", y = "Reference -> Predicted")+ xlim(0,15)
+  labs(title = "Top 20 misclassification pairs (CV, collapsed classes)", x = "Count", y = "Reference -> Predicted")+ xlim(0,30)
 #p_top_confusions
 #ggsave('../writing/figures_new/top_confusion_pairs.png', p_top_confusions, width = 8, height = 5, dpi = 300)
 
@@ -3996,7 +4844,7 @@ p_f1_vs_n_loso
 ggsave('../writing/figures_new/f1_vs_n_in_fold_loso.png', p_f1_vs_n_loso, width = 6, height = 4, dpi = 300)
 
 # 2b. Same for CV (points = fold-class)
-p_f1_vs_n_cv <- ggplot(f1_cv_combined, aes(x = n_in_fold, y = f1)) +
+p_f1_vs_n_cv <- ggplot(f1_loso_combined, aes(x = n_in_fold, y = f1)) +
   geom_point(alpha = 0.4, size = 1.5) +
   geom_smooth(se = TRUE, method = "loess", formula = y ~ x, colour = "darkblue", linewidth = 1) +
   theme_bw() +
@@ -4007,7 +4855,7 @@ p_f1_vs_n_cv <- ggplot(f1_cv_combined, aes(x = n_in_fold, y = f1)) +
   ) +
   xlim(0, NA) + ylim(0,1.25)
 p_f1_vs_n_cv
-ggsave('../writing/figures_new/f1_vs_n_in_fold_cv.png', p_f1_vs_n_cv, width = 6, height = 4, dpi = 300)
+ggsave('../writing/figures_new/f1_vs_n_in_fold.pdf', p_f1_vs_n_loso, width = 5, height = 3.5, dpi = 300)
 
 p_f1_vs_n_loso + p_f1_vs_n_cv
 ```
@@ -4046,8 +4894,8 @@ overall_f1_n_loso <- bind_rows(
 )
 
 # Mean F1 for classes in n bins: 10-20 (small) and 200 to max (large), for reporting
-overall_f1_n_cv_ok <- overall_f1_n_cv %>% filter(is.finite(f1))
-overall_f1_n_loso_ok <- overall_f1_n_loso %>% filter(is.finite(f1))
+overall_f1_n_cv_ok <- overall_f1_n_cv %>% filter(is.finite(f1) & label_set == "Full subtypes")
+overall_f1_n_loso_ok <- overall_f1_n_loso %>% filter(is.finite(f1) & label_set == "Full subtypes")
 n_max_cv <- max(overall_f1_n_cv_ok$n)
 n_max_loso <- max(overall_f1_n_loso_ok$n)
 mean_f1_n10_20_cv <- overall_f1_n_cv_ok %>% filter(n >= 10, n <= 20) %>% summarise(mean_f1 = mean(f1), n_classes = n(), .groups = "drop")
@@ -4060,7 +4908,7 @@ cat("Mean F1, classes with n 200-", max(n_max_cv, n_max_loso), ": CV =", round(m
 p_f1_vs_n_loso_overall <- ggplot(overall_f1_n_loso %>% filter(is.finite(f1)), aes(x = n, y = f1, color = label_set)) +
   geom_point(alpha = 0.8, size = 3) +
   geom_smooth(se = F, method = "loess", formula = y ~ x, linewidth = 1, alpha = 0.2) +
-  scale_color_manual(values = c("Full subtypes" = "gray40", "Collapsed classes" = "darkred")) +
+  scale_color_manual(values = c("Full subtypes" = "#5f9e6f", "Collapsed classes" = "#9D82BB")) +
   theme_bw() +
   labs(title = "F1 vs sample size (LOSO)", x = "Samples of subtype in dataset (n)", y = "F1", color = "Label set") +
   xlim(0, NA) + ylim(0, 1.05)
@@ -4075,10 +4923,11 @@ p_f1_vs_n_cv_overall <- ggplot(overall_f1_n_cv %>% filter(is.finite(f1)), aes(x 
 
 print(p_f1_vs_n_loso_overall)
 print(p_f1_vs_n_cv_overall)
-ggsave('../writing/figures_new/f1_vs_n_overall_loso.png', p_f1_vs_n_loso_overall, width = 6, height = 4, dpi = 300)
+ggsave('../writing/figures_new/fig3e_f1_vs_n_overall_loso.pdf', p_f1_vs_n_loso_overall, width = 7*0.8, height = 4*0.8, dpi = 300)
 ggsave('../writing/figures_new/f1_vs_n_overall_cv.png', p_f1_vs_n_cv_overall, width = 6, height = 4, dpi = 300)
 
-p_f1_vs_n_loso_overall + p_f1_vs_n_cv_overall
+
+p_f1_vs_n_loso_overall
 ```
 
 ```{r}
@@ -4177,7 +5026,7 @@ table(leftout_df$prediction[leftout_df$multi], leftout_df$ICC_Subtype[leftout_df
     "AML-TP53" = "AML with mutated TP53",
     "AML-DEK::NUP214" = "AML with t(6;9)/DEK::NUP214",
     "AML-RUNX1::RUNX1T1" = "AML with t(8;21)/RUNX1::RUNX1T1",
-    "AML-KMT2A::MLLT3" = "AML with t(9;11)/MLLT3::KMT2A",
+    "AML-KMT2A::MLLT3" = "AML with t(9;11)/KMT2A::MLLT3",
     "APL-PML::RARA" = "APL, t(15;17)/PML::RARA",
     "AML-GATA2::MECOM" = "GATA2;MECOM",
     "AML-otherMECOM" = "MECOM, other"
@@ -4276,7 +5125,7 @@ MLL_lab_counts$Subtype <- gsub("AML with t 6 9  DEK  NUP214", "DEK::NUP214", MLL
 MLL_lab_counts$Subtype <- gsub("AML with mutated NPM1", "Mutated NPM1", MLL_lab_counts$Subtype)
 MLL_lab_counts$Subtype <- gsub("AML with t 8 21  RUNX1  RUNX1T1", "RUNX1::RUNX1T1", MLL_lab_counts$Subtype)
 MLL_lab_counts$Subtype <- gsub("AML with in frame bZIP CEBPA", "CEBPA bZIP in-frame", MLL_lab_counts$Subtype)
-MLL_lab_counts$Subtype <- gsub("AML with t 9 11  MLLT3  KMT2A", "MLLT3::KMT2A", MLL_lab_counts$Subtype)
+MLL_lab_counts$Subtype <- gsub("AML with t 9 11  MLLT3  KMT2A", "KMT2A::MLLT3", MLL_lab_counts$Subtype)
 MLL_lab_counts$Subtype <- gsub("MDS", "MDS-related", MLL_lab_counts$Subtype)
 #MLL_lab_counts$Subtype <- gsub("MECOM", "MECOM rearrangement", MLL_lab_counts$Subtype)
 

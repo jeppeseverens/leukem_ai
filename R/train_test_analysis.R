@@ -13,13 +13,82 @@ add_optional_knn_columns <- function(probability_matrix, source_row, num_samples
   probability_matrix
 }
 
+# Attach cohort KNN from bash/run_all_final.sh export (final_selection CSVs omit KNN).
+cohort_knn_features_path <- function(fs_method = "eta2") {
+  file.path("../data/out/final_train_test", paste0("cohort_knn_features_", fs_method, ".csv"))
+}
+
+attach_cohort_knn_to_probability_matrices <- function(probability_matrices, fs_method = "eta2") {
+  knn_path <- cohort_knn_features_path(fs_method)
+  if (!file.exists(knn_path)) {
+    stop(sprintf(
+      paste0(
+        "Missing cohort KNN file: %s. ",
+        "Run bash/run_all_final.sh first (exports cohort KNN before final model training)."
+      ),
+      knn_path
+    ))
+  }
+  knn_df <- read.csv(knn_path, stringsAsFactors = FALSE)
+  required_cols <- c("indices", KNN_DISTANCE_COLUMNS)
+  if (!all(required_cols %in% colnames(knn_df))) {
+    stop(sprintf("Invalid cohort KNN export (missing columns): %s", knn_path))
+  }
+  knn_lookup <- knn_df[, required_cols, drop = FALSE]
+  rownames(knn_lookup) <- as.character(knn_lookup$indices)
+
+  attach_to_matrix <- function(m) {
+    if (is.null(m) || !"indices" %in% colnames(m)) return(m)
+    idx_chr <- as.character(m$indices)
+    missing_idx <- idx_chr[!idx_chr %in% rownames(knn_lookup)]
+    if (length(missing_idx) > 0) {
+      stop(sprintf(
+        "Cohort KNN lookup missing %d sample indices. Example: %s",
+        length(missing_idx), paste(head(unique(missing_idx), 10), collapse = ", ")
+      ))
+    }
+    for (kcol in KNN_DISTANCE_COLUMNS) {
+      vals <- as.numeric(knn_lookup[idx_chr, kcol])
+      if (kcol %in% colnames(m) && any(is.finite(m[[kcol]]))) {
+        replace <- !is.finite(m[[kcol]])
+        m[[kcol]][replace] <- vals[replace]
+      } else {
+        m[[kcol]] <- vals
+      }
+    }
+    m
+  }
+
+  for (model_name in names(probability_matrices)) {
+    for (fold_type in names(probability_matrices[[model_name]])) {
+      folds <- probability_matrices[[model_name]][[fold_type]]
+      if (is.list(folds)) {
+        probability_matrices[[model_name]][[fold_type]] <- lapply(folds, attach_to_matrix)
+      }
+    }
+  }
+  probability_matrices
+}
+
+assert_finite_knn_columns <- function(df, context) {
+  for (kcol in KNN_DISTANCE_COLUMNS) {
+    if (!kcol %in% colnames(df)) {
+      stop(sprintf("%s: missing KNN column '%s'.", context, kcol))
+    }
+    kv <- suppressWarnings(as.numeric(df[[kcol]]))
+    if (!all(is.finite(kv))) {
+      stop(sprintf(
+        "%s: KNN column '%s' has %d non-finite of %d rows.",
+        context, kcol, sum(!is.finite(kv)), length(kv)
+      ))
+    }
+  }
+  invisible(TRUE)
+}
+
 add_roi_reject_features <- function(df, alpha = 0.10, eps = 1e-8) {
   if (is.null(df) || nrow(df) == 0) return(df)
-  meta_cols <- c(
-    "y", "inner_fold", "outer_fold", "indices", "sample_indices", "study", "is_leftout",
-    "n_models_agree", "top1_prob_variance_across_models",
-    KNN_DISTANCE_COLUMNS, REJECT_OPTION_EXTRA_FEATURE_COLUMNS
-  )
+  meta_cols <- PROB_MATRIX_META_COLUMNS
   prob_cols <- colnames(df)[!colnames(df) %in% meta_cols]
   if (length(prob_cols) == 0) {
     df$trust_ratio_knn10 <- NA_real_
@@ -57,7 +126,8 @@ add_roi_reject_features <- function(df, alpha = 0.10, eps = 1e-8) {
   df
 }
 
-main_train_test_analysis <- function(merge_classes = FALSE){
+main_train_test_analysis <- function(merge_classes = FALSE, merge_prob_method = c("sum", "max")){
+  merge_prob_method <- match.arg(merge_prob_method)
 
   #' Map filtered-dataset 0-based indices to full-dataset 1-based indices.
   #' Train/test CV files store sample_indices in filtered-index space.
@@ -82,7 +152,7 @@ main_train_test_analysis <- function(merge_classes = FALSE){
   #' @param label_mapping Label mapping data frame
   #' @return List of probability data frames organized by outer fold
   #'
-  generate_ovr_probability_matrices <- function(cv_results_df, best_params_df, label_mapping, study_names, merge_classes = FALSE) {
+  generate_ovr_probability_matrices <- function(cv_results_df, best_params_df, label_mapping, study_names, merge_classes = FALSE, merge_prob_method = "sum") {
     best_params_with_labels <- add_class_labels(best_params_df, label_mapping)
     outer_fold_ids <- unique(cv_results_df$outer_fold)
 
@@ -158,7 +228,7 @@ main_train_test_analysis <- function(merge_classes = FALSE){
 
         # Apply class merging if requested (summed method, consistent with inner CV)
         if (merge_classes) {
-          probability_matrix <- merge_classes_in_matrix(probability_matrix, merge_prob_method = "sum")
+          probability_matrix <- merge_classes_in_matrix(probability_matrix, merge_prob_method = merge_prob_method)
         }
 
         fold_matrices[[as.character(inner_fold_id)]] <- probability_matrix
@@ -229,7 +299,7 @@ main_train_test_analysis <- function(merge_classes = FALSE){
   #' @param filtered_subtypes Filtered leukemia subtypes
   #' @return List of probability data frames organized by outer fold
 
-  generate_standard_probability_matrices <- function(cv_results_df, best_params_df, label_mapping, filtered_subtypes, study_names, merge_classes = FALSE) {
+  generate_standard_probability_matrices <- function(cv_results_df, best_params_df, label_mapping, filtered_subtypes, study_names, merge_classes = FALSE, merge_prob_method = "sum") {
     outer_fold_ids <- unique(cv_results_df$outer_fold)
     probability_matrices <- list()
 
@@ -280,7 +350,7 @@ main_train_test_analysis <- function(merge_classes = FALSE){
 
         # Apply class merging if requested (summed method, consistent with inner CV)
         if (merge_classes) {
-          probability_matrix <- merge_classes_in_matrix(probability_matrix, merge_prob_method = "sum")
+          probability_matrix <- merge_classes_in_matrix(probability_matrix, merge_prob_method = merge_prob_method)
         }
 
         fold_matrices[[as.character(inner_fold_id)]] <- probability_matrix
@@ -311,11 +381,18 @@ main_train_test_analysis <- function(merge_classes = FALSE){
     if (length(sample_indices) == 0) return(NULL)
 
     if (model_type %in% c("svm", "xgboost")) {
-      classes <- unique(lo$class)
+      # OvR left-out CSVs use integer class + class_label (see run_final_train.py restore_labels).
+      if (!"class_label" %in% colnames(lo)) {
+        if (!"class" %in% colnames(lo)) {
+          stop("OvR left-out CSV missing class_label and class columns.")
+        }
+        lo$class_label <- label_mapping$Label[as.integer(lo$class) + 1L]
+      }
+      classes <- unique(lo$class_label)
       prob_mat <- matrix(NA_real_, nrow = length(sample_indices), ncol = length(classes))
-      colnames(prob_mat) <- make.names(classes)
+      colnames(prob_mat) <- classes
       for (j in seq_along(classes)) {
-        row_j <- lo[lo$class == classes[j], , drop = FALSE]
+        row_j <- lo[lo$class_label == classes[j], , drop = FALSE]
         if (nrow(row_j) == 0) next
         probs <- parse_numeric_string(row_j$preds_prob[1])
         if (length(probs) == length(sample_indices)) prob_mat[, j] <- probs
@@ -428,8 +505,13 @@ main_train_test_analysis <- function(merge_classes = FALSE){
       }
 
       common_cols <- union(colnames(known), colnames(lo))
-      for (cc in setdiff(common_cols, colnames(known))) known[[cc]] <- NA
-      for (cc in setdiff(common_cols, colnames(lo))) lo[[cc]] <- NA
+      prob_cols_union <- setdiff(common_cols, PROB_MATRIX_META_COLUMNS)
+      for (cc in setdiff(common_cols, colnames(known))) {
+        known[[cc]] <- if (cc %in% prob_cols_union) 0 else NA
+      }
+      for (cc in setdiff(common_cols, colnames(lo))) {
+        lo[[cc]] <- if (cc %in% prob_cols_union) 0 else NA
+      }
       if (nrow(lo) == 0) {
         out[[fold_name]] <- known[, common_cols, drop = FALSE]
       } else {
@@ -446,258 +528,19 @@ main_train_test_analysis <- function(merge_classes = FALSE){
     align_probability_matrices(prob_matrices, outer_fold_name, inner_fold_name = NULL, type)
   }
 
-  #' Perform global ensemble optimization using product-of-experts for train/test
-  #' (final model path: evaluate PoE with different expert exponents).
-  perform_global_ensemble_analysis_train_test <- function(results, weights, type = "cv") {
-    cat("Performing global ensemble analysis for train/test (product-of-experts)...\n")
-    outer_folds <- names(results$probability_matrices$svm[[type]])
-    all_results <- list()
-
-    for (outer_fold in outer_folds) {
-      aligned_matrices <- align_probability_matrices_cached(
-        results$probability_matrices, outer_fold, NULL, type, new.env(hash = TRUE)
-      )
-      if (is.null(aligned_matrices)) next
-
-      prob_mat_SVM <- as.matrix(aligned_matrices$svm)
-      prob_mat_XGB <- as.matrix(aligned_matrices$xgboost)
-      prob_mat_NN <- as.matrix(aligned_matrices$neural_net)
-      class_names <- colnames(prob_mat_SVM)
-      truth <- make.names(gsub("Class. ", "", aligned_matrices$non_prob_cols$y))
-
-      fold_weight_results <- lapply(names(weights), function(weight_name) {
-        w <- weights[[weight_name]]
-        eps <- 1e-12
-        poe_matrix <- (pmax(prob_mat_SVM, eps) ^ w$SVM) *
-          (pmax(prob_mat_XGB, eps) ^ w$XGB) *
-          (pmax(prob_mat_NN, eps) ^ w$NN)
-        row_sums <- rowSums(poe_matrix)
-        row_sums[row_sums == 0] <- 1
-        poe_matrix <- poe_matrix / row_sums
-
-        preds <- class_names[max.col(poe_matrix, ties.method = "first")]
-        preds <- make.names(gsub("Class. ", "", preds))
-        all_classes <- unique(c(truth, preds))
-        truth_factor <- factor(truth, levels = all_classes)
-        preds_factor <- factor(preds, levels = all_classes)
-
-        data.frame(
-          outer_fold = outer_fold,
-          weights = weight_name,
-          type = type,
-          kappa = fast_kappa(preds_factor, truth_factor),
-          accuracy = fast_accuracy(preds_factor, truth_factor),
-          stringsAsFactors = FALSE
-        )
-      })
-
-      all_results[[outer_fold]] <- do.call(rbind, fold_weight_results)
-    }
-
-    all_results
-  }
-
-  #' Generate One-vs-Rest optimized ensemble probability matrices for train/test
-  #' @param results Analysis results containing probability matrices
-  #' @param weights Weight configurations for ensemble
-  #' @param type Type of analysis ("loso" for final deployment)
-  #' @param ensemble_performance Performance results from perform_ovr_ensemble_analysis_train_test
-  #' @return List containing optimized probability matrices and weights used for each outer fold
-  generate_ovr_optimized_ensemble_matrices_train_test <- function(results, weights, type = "loso", ensemble_performance) {
-    cat("Generating One-vs-Rest optimized ensemble probability matrices for train/test...\n")
-
-    outer_folds <- names(results$probability_matrices$svm[[type]])
-    optimized_matrices <- list()
-    weights_used <- list()
-
-    # Aggregate performance across all folds to find globally best weights for each class
-    cat("  Aggregating performance across all folds to find globally best weights for each class...\n")
-    all_performance <- list()
-    for (outer_fold in outer_folds) {
-      fold_performance <- ensemble_performance[[outer_fold]]
-      if (!is.null(fold_performance) && nrow(fold_performance) > 0) {
-        all_performance[[outer_fold]] <- fold_performance
-      }
-    }
-
-    if (length(all_performance) == 0) {
-      cat("    No performance data available across all folds\n")
-      return(list(matrices = optimized_matrices, weights_used = weights_used))
-    }
-
-    # Combine all performance data
-    combined_performance <- do.call(rbind, all_performance)
-
-    # Get all classes that have performance data
-    all_available_classes <- unique(combined_performance$class)
-
-    # For each class, find globally best weights based on mean F1 score across all folds
-    global_class_weights <- list()
-    for (class_name in all_available_classes) {
-      class_performance <- combined_performance[combined_performance$class == class_name, ]
-
-      if (nrow(class_performance) > 0) {
-        # Check if we have valid F1 scores to aggregate
-        valid_f1_scores <- class_performance[!is.na(class_performance$f1_score) & !is.null(class_performance$f1_score), ]
-
-        if (nrow(valid_f1_scores) == 0) {
-          cat(sprintf("    Warning: No valid F1 scores for class %s, using default weights\n", class_name))
-          global_class_weights[[class_name]] <- list(
-            weight_name = "ALL",
-            weights = weights[["ALL"]],
-            f1_score = 0
-          )
-          next
-        }
-
-        # Calculate mean F1 score for each weight configuration for this class
-        mean_performance <- aggregate(f1_score ~ weights, data = valid_f1_scores, FUN = mean, na.rm = TRUE)
-
-        # Check if aggregation produced any results
-        if (nrow(mean_performance) == 0) {
-          cat(sprintf("    Warning: No aggregated performance data for class %s, using default weights\n", class_name))
-          global_class_weights[[class_name]] <- list(
-            weight_name = "ALL",
-            weights = weights[["ALL"]],
-            f1_score = 0
-          )
-          next
-        }
-
-        # Find best weight configuration for this class
-        best_weight_indices <- which.max(mean_performance$f1_score)
-        best_weight_name <- mean_performance$weights[best_weight_indices]
-
-        # Ensure we have a single weight name
-        if (length(best_weight_name) > 1) {
-          best_weight_name <- best_weight_name[1]
-          cat(sprintf("    Warning: Multiple best weights found for class %s, using first one\n", class_name))
-        }
-
-        # Validate weight name
-        if (is.null(best_weight_name) || is.na(best_weight_name) || length(best_weight_name) == 0 || best_weight_name == "") {
-          cat(sprintf("    Warning: Invalid weight name for class %s, using default weights\n", class_name))
-          best_weights <- weights[["ALL"]]
-          best_weight_name <- "ALL"
-        } else if (!best_weight_name %in% names(weights)) {
-          cat(sprintf("    Warning: Weight '%s' not found in weights list for class %s, using default weights\n", best_weight_name, class_name))
-          best_weights <- weights[["ALL"]]
-          best_weight_name <- "ALL"
-        } else {
-          best_weights <- weights[[best_weight_name]]
-        }
-
-        # Store globally best weight configuration for this class
-        global_class_weights[[class_name]] <- list(
-          weight_name = best_weight_name,
-          weights = best_weights,
-          f1_score = max(mean_performance$f1_score, na.rm = TRUE)
-        )
-
-        cat(sprintf("  Globally best weights for class %s: %s (mean F1=%.4f)\n",
-                    class_name, best_weight_name, max(mean_performance$f1_score, na.rm = TRUE)))
-      } else {
-        cat(sprintf("    Warning: No performance data for class %s, using default weights\n", class_name))
-        global_class_weights[[class_name]] <- list(
-          weight_name = "ALL",
-          weights = weights[["ALL"]],
-          f1_score = 0
-        )
-      }
-    }
-
-    for (outer_fold in outer_folds) {
-      cat(sprintf("  Creating OvR optimized matrices for outer fold %s...\n", outer_fold))
-
-      # Store the globally best weight configurations used for this outer fold
-      outer_fold_weights_used <- global_class_weights
-
-      # Generate optimized matrices using the selected weights (with caching)
-      alignment_cache <- new.env(hash = TRUE)
-      aligned_matrices <- align_probability_matrices_cached(
-        results$probability_matrices, outer_fold, NULL, type, alignment_cache
-      )
-      if (is.null(aligned_matrices)) {
-        cat(sprintf("      Skipping outer fold %s - unable to align matrices\n", outer_fold))
-        next
-      }
-
-      # Convert to matrices once for efficiency
-      prob_mat_SVM <- as.matrix(aligned_matrices$svm)
-      prob_mat_XGB <- as.matrix(aligned_matrices$xgboost)
-      prob_mat_NN <- as.matrix(aligned_matrices$neural_net)
-      non_prob_cols <- aligned_matrices$non_prob_cols
-
-      # Get all class names
-      all_classes <- colnames(aligned_matrices$svm)
-
-      # Initialize optimized probability matrix
-      optimized_matrix <- matrix(0, nrow = nrow(prob_mat_SVM), ncol = length(all_classes))
-      colnames(optimized_matrix) <- all_classes
-
-      # For each class, use the selected best weights for this outer fold
-      for (class_name in all_classes) {
-        # Clean class name for matching
-        clean_class_name <- gsub("Class.", "", class_name)
-        clean_class_name_no_dots <- gsub("\\.", "", clean_class_name)
-
-        # Find the globally best weights to use for this class
-        best_weights <- NULL
-        if (clean_class_name %in% names(global_class_weights)) {
-          best_weights <- global_class_weights[[clean_class_name]]$weights
-        } else if (clean_class_name_no_dots %in% names(global_class_weights)) {
-          best_weights <- global_class_weights[[clean_class_name_no_dots]]$weights
-        } else {
-          # Try partial matching
-          matching_classes <- names(global_class_weights)[
-            grepl(clean_class_name, names(global_class_weights), ignore.case = TRUE) |
-              grepl(clean_class_name_no_dots, names(global_class_weights), ignore.case = TRUE)
-          ]
-          if (length(matching_classes) > 0) {
-            best_weights <- global_class_weights[[matching_classes[1]]]$weights
-          }
-        }
-
-        # Use default weights if no specific weights found for this class
-        if (is.null(best_weights)) {
-          cat(sprintf("      Using default weights for class %s (not present in global performance)\n", clean_class_name))
-          best_weights <- weights[["ALL"]]
-        }
-
-        # Calculate weighted ensemble probabilities for this class using matrix operations
-        class_col_idx <- which(all_classes == class_name)
-        optimized_matrix[, class_col_idx] <- prob_mat_SVM[, class_col_idx] * best_weights$SVM +
-          prob_mat_XGB[, class_col_idx] * best_weights$XGB +
-          prob_mat_NN[, class_col_idx] * best_weights$NN
-      }
-
-      # Normalize probabilities to sum to 1 for each sample
-      row_sums <- rowSums(optimized_matrix)
-      optimized_matrix <- optimized_matrix / row_sums
-
-      # Convert to data frame and add true labels
-      optimized_matrix <- data.frame(optimized_matrix)
-      optimized_matrix <- cbind(optimized_matrix, non_prob_cols)
-
-      optimized_matrices[[outer_fold]] <- optimized_matrix
-      weights_used[[outer_fold]] <- outer_fold_weights_used
-    }
-
-    # Return both matrices and weights used
-    list(
-      matrices = optimized_matrices,
-      weights_used = weights_used
-    )
-  }
-
   #' Generate globally optimized ensemble probability matrices for train/test
   #' @param results Analysis results containing probability matrices
   #' @param weights Weight configurations for ensemble
   #' @param type Type of analysis ("loso" for final deployment)
-  #' @param ensemble_performance Performance results from perform_global_ensemble_analysis_train_test
+  #' @param ensemble_performance Performance results from perform_global_ensemble_analysis_unified
+  #' @param ensemble_rule "poe" (product-of-experts) or "simple" (linear weighted average)
   #' @return List containing optimized probability matrices and weights used for each outer fold
-  generate_global_optimized_ensemble_matrices_train_test <- function(results, weights, type = "loso", ensemble_performance) {
-    cat("Generating globally optimized ensemble probability matrices for train/test...\n")
+  generate_global_optimized_ensemble_matrices_train_test <- function(
+      results, weights, type = "loso", ensemble_performance, ensemble_rule = c("poe", "simple")) {
+    ensemble_rule <- match.arg(ensemble_rule)
+    combine_probs <- global_ensemble_combine_fn(ensemble_rule)
+    rule_label <- if (ensemble_rule == "simple") "simple weighted average" else "product-of-experts"
+    cat(sprintf("Generating globally optimized ensemble probability matrices for train/test (%s)...\n", rule_label))
 
     outer_folds <- names(results$probability_matrices$svm[[type]])
     optimized_matrices <- list()
@@ -760,16 +603,9 @@ main_train_test_analysis <- function(merge_classes = FALSE){
       prob_mat_NN <- as.matrix(aligned_matrices$neural_net)
       non_prob_cols <- aligned_matrices$non_prob_cols
 
-      # Product-of-experts in probability space: p ∝ Π_m p_m^{w_m}
-      eps <- 1e-12
-      optimized_matrix <- (pmax(prob_mat_SVM, eps) ^ global_best_weights$SVM) *
-        (pmax(prob_mat_XGB, eps) ^ global_best_weights$XGB) *
-        (pmax(prob_mat_NN, eps) ^ global_best_weights$NN)
-
-      # Normalize probabilities to sum to 1 for each sample
-      row_sums <- rowSums(optimized_matrix)
-      row_sums[row_sums == 0] <- 1
-      optimized_matrix <- optimized_matrix / row_sums
+      optimized_matrix <- combine_probs(
+        prob_mat_SVM, prob_mat_XGB, prob_mat_NN, global_best_weights
+      )
 
       # Convert to data frame and add true labels
       optimized_matrix <- data.frame(optimized_matrix)
@@ -879,6 +715,9 @@ main_train_test_analysis <- function(merge_classes = FALSE){
 
   dir.create("../data/out/final_train_test/best_params")
 
+  # Must match bash/run_all_final.sh and predict_new_samples.py KNN reject features.
+  FINAL_FS_METHOD <- "eta2"
+
   # LOSO only (hyperparameters for final deployment model are selected under LOSO)
   # Paths must match bash/final_selection_array_*_loso.sh --run_name and
   # python/run_final_selection_array.py output directory.
@@ -921,9 +760,9 @@ main_train_test_analysis <- function(merge_classes = FALSE){
 
       if (!is.null(results) && !is.null(best_params)) {
         if (config$classification_type == "OvR") {
-          probs <- generate_ovr_probability_matrices(results, best_params, label_mapping, study_names, merge_classes = merge_classes)
+          probs <- generate_ovr_probability_matrices(results, best_params, label_mapping, study_names, merge_classes = merge_classes, merge_prob_method = merge_prob_method)
         } else {
-          probs <- generate_standard_probability_matrices(results, best_params, label_mapping, filtered_leukemia_subtypes, study_names, merge_classes = merge_classes)
+          probs <- generate_standard_probability_matrices(results, best_params, label_mapping, filtered_leukemia_subtypes, study_names, merge_classes = merge_classes, merge_prob_method = merge_prob_method)
         }
 
         # No class grouping - keep original classes
@@ -968,39 +807,56 @@ main_train_test_analysis <- function(merge_classes = FALSE){
       next
     }
 
-    # Perform global ensemble analysis
-    global_ensemble_results <- perform_global_ensemble_analysis_train_test(
-      list(probability_matrices = probability_matrices),
-      generate_weights(),
-      analysis_type
-    )
+    weight_grid <- generate_weights()
+    results_for_ensemble <- list(probability_matrices = probability_matrices)
 
-    # Generate globally optimized ensemble matrices
+    # Product-of-experts (deployment default for calibration matrices)
+    global_ensemble_results <- perform_global_ensemble_analysis_unified(
+      results_for_ensemble, weight_grid, analysis_type,
+      has_inner_folds = FALSE, ensemble_rule = "poe"
+    )
     global_optimized_ensemble_matrices <- generate_global_optimized_ensemble_matrices_train_test(
-      list(probability_matrices = probability_matrices),
-      generate_weights(),
-      analysis_type,
-      global_ensemble_results
+      results_for_ensemble, weight_grid, analysis_type,
+      global_ensemble_results, ensemble_rule = "poe"
+    )
+    global_optimized_ensemble_performance <- analyze_optimized_ensemble_performance_train_test(
+      global_optimized_ensemble_matrices, analysis_type
     )
 
-    # Analyze globally optimized ensemble performance
-    global_optimized_ensemble_performance <- analyze_optimized_ensemble_performance_train_test(global_optimized_ensemble_matrices, analysis_type)
+    # Simple weighted average (separate inner-CV-selected weights for MLL / comparisons)
+    global_simple_ensemble_results <- perform_global_ensemble_analysis_unified(
+      results_for_ensemble, weight_grid, analysis_type,
+      has_inner_folds = FALSE, ensemble_rule = "simple"
+    )
+    global_simple_optimized_ensemble_matrices <- generate_global_optimized_ensemble_matrices_train_test(
+      results_for_ensemble, weight_grid, analysis_type,
+      global_simple_ensemble_results, ensemble_rule = "simple"
+    )
+    global_simple_optimized_ensemble_performance <- analyze_optimized_ensemble_performance_train_test(
+      global_simple_optimized_ensemble_matrices, analysis_type
+    )
 
     # Store results for this analysis type (Global ensemble only; OvR removed)
     ensemble_results[[analysis_type]] <- list(
       global_ensemble_results = global_ensemble_results,
       global_optimized_ensemble_matrices = global_optimized_ensemble_matrices,
       global_optimized_ensemble_performance = global_optimized_ensemble_performance,
-      global_ensemble_weights_used = global_optimized_ensemble_matrices$weights_used
+      global_ensemble_weights_used = global_optimized_ensemble_matrices$weights_used,
+      global_simple_ensemble_results = global_simple_ensemble_results,
+      global_simple_optimized_ensemble_matrices = global_simple_optimized_ensemble_matrices,
+      global_simple_optimized_ensemble_performance = global_simple_optimized_ensemble_performance,
+      global_simple_ensemble_weights_used = global_simple_optimized_ensemble_matrices$weights_used
     )
   }
 
   # NOTE: Rejection / calibration feature selection moved to calibration_reject_models_final.R
   # (mirrors outer_cv_analysis.r + calibration_reject_models.R).
 
-  # Determine suffix for file paths (maxprob method - uses max probability instead of summing)
+  # Determine suffix for file paths (collapsed vocabulary differs by sum vs max combine rule)
   if (!merge_classes) {
     merge_suffix <- "_unmerged_maxprob"
+  } else if (merge_prob_method == "max") {
+    merge_suffix <- "_merged_maxprob"
   } else {
     merge_suffix <- "_merged_summed"
   }
@@ -1028,6 +884,12 @@ main_train_test_analysis <- function(merge_classes = FALSE){
   has_all_leftout <- all(sapply(leftout_file_configs, function(p) !is.null(p) && file.exists(p)))
   if (has_all_leftout && "loso" %in% names(ensemble_results)) {
     cat("  Found final-model left-out prediction files. Building augmented matrices...\n")
+
+    # Known cohort rows need KNN from run_all_final.sh; left-out rows carry KNN from leftout CSVs.
+    cat(sprintf("  Attaching cohort KNN features (fs_method=%s)...\n", FINAL_FS_METHOD))
+    probability_matrices <- attach_cohort_knn_to_probability_matrices(
+      probability_matrices, fs_method = FINAL_FS_METHOD
+    )
 
     lo_svm <- build_leftout_probability_matrix(leftout_file_configs$svm, "svm", label_mapping, leukemia_subtypes, merge_classes = merge_classes)
     lo_xgb <- build_leftout_probability_matrix(leftout_file_configs$xgboost, "xgboost", label_mapping, leukemia_subtypes, merge_classes = merge_classes)
@@ -1086,28 +948,44 @@ main_train_test_analysis <- function(merge_classes = FALSE){
       # Attach model-disagreement features expected by multivariate/two-head
       # confidence models so calibration has the full predictor set.
       add_disagreement_features_to_ensemble <- function(ensemble_df, aligned_probs) {
-        svm_p <- as.matrix(aligned_probs$svm)
-        xgb_p <- as.matrix(aligned_probs$xgboost)
-        nn_p <- as.matrix(aligned_probs$neural_net)
         n <- nrow(ensemble_df)
         if (n == 0) return(ensemble_df)
 
-        # Fail fast if any model has rows with no finite probabilities. This is
-        # data corruption for disagreement/two-head features, not something to
-        # silently skip.
-        find_all_nonfinite_rows <- function(m) {
-          which(rowSums(is.finite(m)) == 0)
+        # Build numeric class-probability matrices only. Non-probability columns
+        # (e.g. confidence_* filled with NA on left-out rows) must not enter
+        # max.col(); otherwise left-out rows fail with NA top-1 indices.
+        svm_prob_cols <- colnames(aligned_probs$svm)[!colnames(aligned_probs$svm) %in% PROB_MATRIX_META_COLUMNS]
+        xgb_prob_cols <- colnames(aligned_probs$xgboost)[!colnames(aligned_probs$xgboost) %in% PROB_MATRIX_META_COLUMNS]
+        nn_prob_cols <- colnames(aligned_probs$neural_net)[!colnames(aligned_probs$neural_net) %in% PROB_MATRIX_META_COLUMNS]
+        all_prob_cols <- unique(c(svm_prob_cols, xgb_prob_cols, nn_prob_cols))
+        if (length(all_prob_cols) == 0) {
+          stop("Disagreement feature computation failed: no class-probability columns found after alignment.")
         }
+
+        make_aligned <- function(mat, prob_cols) {
+          m <- matrix(0, nrow = nrow(mat), ncol = length(all_prob_cols))
+          colnames(m) <- all_prob_cols
+          for (col in intersect(prob_cols, all_prob_cols)) {
+            vals <- suppressWarnings(as.numeric(mat[[col]]))
+            vals[!is.finite(vals)] <- 0
+            m[, col] <- vals
+          }
+          rs <- rowSums(m)
+          rs[rs == 0] <- 1
+          m / rs
+        }
+
+        svm_p <- make_aligned(aligned_probs$svm, svm_prob_cols)
+        xgb_p <- make_aligned(aligned_probs$xgboost, xgb_prob_cols)
+        nn_p <- make_aligned(aligned_probs$neural_net, nn_prob_cols)
+
+        find_all_nonfinite_rows <- function(m) which(rowSums(is.finite(m)) == 0)
         bad_svm <- find_all_nonfinite_rows(svm_p)
         bad_xgb <- find_all_nonfinite_rows(xgb_p)
         bad_nn <- find_all_nonfinite_rows(nn_p)
         if (length(bad_svm) > 0 || length(bad_xgb) > 0 || length(bad_nn) > 0) {
           idx_vals <- if ("indices" %in% colnames(ensemble_df)) ensemble_df$indices else seq_len(n)
-          bad_idx <- unique(c(
-            idx_vals[bad_svm],
-            idx_vals[bad_xgb],
-            idx_vals[bad_nn]
-          ))
+          bad_idx <- unique(c(idx_vals[bad_svm], idx_vals[bad_xgb], idx_vals[bad_nn]))
           stop(sprintf(
             paste0(
               "Disagreement feature computation failed: rows with no finite class probabilities ",
@@ -1119,13 +997,12 @@ main_train_test_analysis <- function(merge_classes = FALSE){
           ))
         }
 
-        # Top-1 class per expert and agreement count across experts.
         svm_top_idx <- max.col(svm_p, ties.method = "first")
         xgb_top_idx <- max.col(xgb_p, ties.method = "first")
         nn_top_idx <- max.col(nn_p, ties.method = "first")
-        svm_pred <- colnames(svm_p)[svm_top_idx]
-        xgb_pred <- colnames(xgb_p)[xgb_top_idx]
-        nn_pred <- colnames(nn_p)[nn_top_idx]
+        svm_pred <- all_prob_cols[svm_top_idx]
+        xgb_pred <- all_prob_cols[xgb_top_idx]
+        nn_pred <- all_prob_cols[nn_top_idx]
 
         preds_mat <- cbind(svm_pred, xgb_pred, nn_pred)
         n_models_agree <- apply(preds_mat, 1, function(x) {
@@ -1142,7 +1019,6 @@ main_train_test_analysis <- function(merge_classes = FALSE){
           ))
         }
 
-        # Variance of each expert's own top-1 probability.
         top1_prob_mat <- cbind(
           svm_p[cbind(seq_len(n), svm_top_idx)],
           xgb_p[cbind(seq_len(n), xgb_top_idx)],
@@ -1174,6 +1050,10 @@ main_train_test_analysis <- function(merge_classes = FALSE){
         ens_with_meta <- cbind(poe, aligned$non_prob_cols)
         ens_with_meta <- add_disagreement_features_to_ensemble(ens_with_meta, aligned)
         ens_with_meta <- add_roi_reject_features(ens_with_meta)
+        assert_finite_knn_columns(
+          ens_with_meta,
+          sprintf("augmented ensemble fold %s (Global_Optimized)", outer_fold)
+        )
         aug_global[[outer_fold]] <- ens_with_meta
       }
 
@@ -1191,6 +1071,32 @@ main_train_test_analysis <- function(merge_classes = FALSE){
         ))
       } else {
         warning("Augmented ensemble has fewer than 2 folds; skipping multivariate_results bundle.")
+      }
+
+      # SVM augmented folds for deployment calibration (in-model / KNN10 rejector features).
+      aug_svm <- list()
+      for (outer_fold in names(prob_aug$svm$loso)) {
+        svm_df <- prob_aug$svm$loso[[outer_fold]]
+        svm_df <- add_roi_reject_features(svm_df)
+        assert_finite_knn_columns(
+          svm_df,
+          sprintf("augmented SVM fold %s", outer_fold)
+        )
+        aug_svm[[outer_fold]] <- svm_df
+      }
+      if (length(aug_svm) >= 2L) {
+        multivariate_results$with_leftout_ood_aware[["svm"]] <- list(
+          loso = list(
+            fold_matrices = copy_fold_matrix_list(aug_svm),
+            model_label = "svm_augmented_disagreement_folds"
+          )
+        )
+        cat(sprintf(
+          "  Saved %d augmented SVM folds for svm (R/calibration_reject_models_final.R).\n",
+          length(aug_svm)
+        ))
+      } else {
+        warning("Augmented SVM has fewer than 2 folds; skipping svm multivariate_results bundle.")
       }
     } else {
       warning("Could not parse one or more left-out prediction files; skipping augmented calibration folds.")
@@ -1301,7 +1207,7 @@ main_train_test_analysis <- function(merge_classes = FALSE){
     print(performance_comparisons$loso)
   }
   cat(sprintf(
-    "  multivariate_results: with_leftout_ood_aware$%s (calibration via R/calibration_reject_models_final.R)\n",
+    "  multivariate_results: with_leftout_ood_aware$%s + svm (calibration via R/calibration_reject_models_final.R)\n",
     CALIBRATION_MV_BASE_MODEL
   ))
 
@@ -1313,5 +1219,8 @@ main_train_test_analysis <- function(merge_classes = FALSE){
 cat("=== Running Train/Test Analysis (Unmerged - MaxProb Method) ===\n")
 train_test_results_unmerged <- main_train_test_analysis(merge_classes = FALSE)
 
-cat("=== Running Train/Test Analysis (Merged MDS/KMT2A/MECOM - MaxProb Method) ===\n")
-train_test_results_merged <- main_train_test_analysis(merge_classes = TRUE)
+cat("=== Running Train/Test Analysis (Merged MDS/KMT2A/MECOM - Sum Method) ===\n")
+train_test_results_merged <- main_train_test_analysis(merge_classes = TRUE, merge_prob_method = "sum")
+
+cat("=== Running Train/Test Analysis (Merged MDS/KMT2A/MECOM - Max Method) ===\n")
+train_test_results_merged_maxprob <- main_train_test_analysis(merge_classes = TRUE, merge_prob_method = "max")

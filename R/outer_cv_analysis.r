@@ -172,17 +172,20 @@ load_outer_cv_results <- function(file_path, classification_type) {
     return(NULL)
   }
 
-  results <- safe_read_file(file_path, function(f) data.frame(data.table::fread(f, sep = ","), row.names = 1))
+  results <- safe_read_file(file_path, read_cv_results_csv)
 
   if (is.null(results)) {
     warning(sprintf("Failed to load file: %s", file_path))
     return(NULL)
   }
 
+  if (nrow(results) == 0) {
+    warning(sprintf("Outer CV file has no data rows: %s", file_path))
+  }
+
   # For One-vs-Rest, add class labels if not present
   if (classification_type == "OvR" && !"class_label" %in% colnames(results)) {
-    # Load label mapping to add class labels
-    label_mapping <- safe_read_file("label_mapping_df_n10.csv", read.csv)
+    label_mapping <- safe_read_file("../data/label_mapping_all.csv", read.csv)
     if (!is.null(label_mapping)) {
       results$class_label <- label_mapping$Label[results$class + 1]
     }
@@ -197,7 +200,7 @@ load_outer_cv_results <- function(file_path, classification_type) {
 #' @param label_mapping Label mapping data frame
 #' @param filter_unseen_classes Whether to filter samples with classes not in training (default: TRUE)
 #' @return List of probability matrices organized by outer fold (and filtering statistics if filtered)
-generate_outer_ovr_probability_matrices <- function(outer_cv_results, label_mapping, filtered_index_map_zero_based, filter_unseen_classes = TRUE, merge_classes = FALSE) {
+generate_outer_ovr_probability_matrices <- function(outer_cv_results, label_mapping, filtered_index_map_zero_based, filter_unseen_classes = TRUE, merge_classes = FALSE, merge_prob_method = "sum") {
   cat("Generating outer One-vs-Rest probability matrices...\n")
 
   if (filter_unseen_classes) {
@@ -286,7 +289,7 @@ generate_outer_ovr_probability_matrices <- function(outer_cv_results, label_mapp
 
     # Apply class merging if requested (before filtering)
     if (merge_classes) {
-      probability_matrix <- merge_classes_in_matrix(probability_matrix, merge_prob_method = "sum")
+      probability_matrix <- merge_classes_in_matrix(probability_matrix, merge_prob_method = merge_prob_method)
       # Update class_labels after merging for filtering
       class_labels <- colnames(probability_matrix)[!colnames(probability_matrix) %in%
                                                     c("y", "outer_fold", "sample_indices", KNN_DISTANCE_COLUMNS, REJECT_OPTION_EXTRA_FEATURE_COLUMNS)]
@@ -324,7 +327,7 @@ generate_outer_ovr_probability_matrices <- function(outer_cv_results, label_mapp
 #' @param filtered_subtypes Filtered leukemia subtypes
 #' @param filter_unseen_classes Whether to filter samples with classes not in training (default: TRUE)
 #' @return List of probability matrices organized by outer fold (and filtering statistics if filtered)
-generate_outer_standard_probability_matrices <- function(outer_cv_results, label_mapping, filtered_subtypes, filtered_index_map_zero_based, filter_unseen_classes = TRUE, merge_classes = FALSE) {
+generate_outer_standard_probability_matrices <- function(outer_cv_results, label_mapping, filtered_subtypes, filtered_index_map_zero_based, filter_unseen_classes = TRUE, merge_classes = FALSE, merge_prob_method = "sum") {
   cat("Generating outer CV standard probability matrices...\n")
 
   if (filter_unseen_classes) {
@@ -387,7 +390,7 @@ generate_outer_standard_probability_matrices <- function(outer_cv_results, label
 
     # Apply class merging if requested (before filtering)
     if (merge_classes) {
-      probability_matrix <- merge_classes_in_matrix(probability_matrix, merge_prob_method = "sum")
+      probability_matrix <- merge_classes_in_matrix(probability_matrix, merge_prob_method = merge_prob_method)
       # Update class_labels after merging for filtering
       class_labels <- colnames(probability_matrix)[!colnames(probability_matrix) %in%
                                                     c("y", "outer_fold", "sample_indices", KNN_DISTANCE_COLUMNS, REJECT_OPTION_EXTRA_FEATURE_COLUMNS)]
@@ -419,18 +422,23 @@ generate_outer_standard_probability_matrices <- function(outer_cv_results, label
   return(result)
 }
 
-#' Apply global product-of-experts ensemble weights from inner CV to outer CV probability matrices.
-#' Inner CV selects weights with the same PoE rule (inner_cv_analysis.R + evaluate_batch_weights_global).
+#' Apply globally optimized ensemble weights from inner CV to outer CV probability matrices.
+#' Inner CV selects weights with the same combine rule (PoE or simple average).
 #' @param outer_prob_matrices Outer CV probability matrices for all models
 #' @param ensemble_weights_data Ensemble weights from inner CV analysis
 #' @param type Type of analysis ("cv" or "loso")
+#' @param ensemble_rule "poe" (product-of-experts) or "simple" (linear weighted average)
 #' @return List of ensemble probability matrices
-apply_ensemble_weights_to_outer_cv <- function(outer_prob_matrices, ensemble_weights_data, type = "cv") {
-  cat("Applying global product-of-experts ensemble weights to outer CV results...\n")
+apply_ensemble_weights_to_outer_cv <- function(
+    outer_prob_matrices, ensemble_weights_data, type = "cv", ensemble_rule = c("poe", "simple")) {
+  ensemble_rule <- match.arg(ensemble_rule)
+  weights_key <- if (ensemble_rule == "simple") "global_simple_weights" else "global_weights"
+  rule_label <- if (ensemble_rule == "simple") "simple weighted average" else "product-of-experts"
+  cat(sprintf("Applying global %s ensemble weights to outer CV results...\n", rule_label))
 
-  weights_to_use <- ensemble_weights_data$global_weights
+  weights_to_use <- ensemble_weights_data[[weights_key]]
   if (is.null(weights_to_use)) {
-    warning(sprintf("No global weights available for %s analysis", type))
+    warning(sprintf("No %s weights available for %s analysis", weights_key, type))
     return(NULL)
   }
 
@@ -522,7 +530,6 @@ apply_ensemble_weights_to_outer_cv <- function(outer_prob_matrices, ensemble_wei
     xgb_probs <- xgb_probs[, all_classes, drop = FALSE]
     nn_probs <- nn_probs[, all_classes, drop = FALSE]
 
-    # Global weights: product-of-experts in probability space, p ∝ Π_m p_m^{w_m}
     fold_weights <- weights_to_use[[fold_name]]
     if (is.null(fold_weights)) {
       warning(sprintf("No global weights for fold %s, using DNN-only fallback", fold_name))
@@ -530,28 +537,16 @@ apply_ensemble_weights_to_outer_cv <- function(outer_prob_matrices, ensemble_wei
     }
 
     weights <- fold_weights$weights
-
     svm_weight <- ifelse(is.null(weights$SVM) || is.na(weights$SVM), 1, as.numeric(weights$SVM))
     xgb_weight <- ifelse(is.null(weights$XGB) || is.na(weights$XGB), 1, as.numeric(weights$XGB))
     nn_weight <- ifelse(is.null(weights$NN) || is.na(weights$NN), 1, as.numeric(weights$NN))
+    w_list <- list(SVM = svm_weight, XGB = xgb_weight, NN = nn_weight)
 
-    eps <- 1e-12
-    ensemble_matrix <- (pmax(svm_probs, eps) ^ svm_weight) *
-      (pmax(xgb_probs, eps) ^ xgb_weight) *
-      (pmax(nn_probs, eps) ^ nn_weight)
-
-    # Normalize probabilities
-    ensemble_matrix <- t(apply(ensemble_matrix, 1, function(row) {
-      # Replace any NA or infinite values with 0
-      row[is.na(row) | is.infinite(row)] <- 0
-
-      if (sum(row, na.rm = TRUE) > 0) {
-        row / sum(row, na.rm = TRUE)
-      } else {
-        # If all values are 0, set equal probabilities
-        rep(1/length(row), length(row))
-      }
-    }))
+    prob_mat_svm <- as.matrix(svm_probs)
+    prob_mat_xgb <- as.matrix(xgb_probs)
+    prob_mat_nn <- as.matrix(nn_probs)
+    combine_probs <- global_ensemble_combine_fn(ensemble_rule)
+    ensemble_matrix <- combine_probs(prob_mat_svm, prob_mat_xgb, prob_mat_nn, w_list)
 
     # Convert to data frame and add metadata
     ensemble_matrix <- data.frame(ensemble_matrix)
@@ -733,6 +728,16 @@ summarize_outer_cv_performance <- function(performance_results) {
     )
 
     summary_data <- rbind(summary_data, summary_row)
+  }
+
+  if (nrow(summary_data) == 0) {
+    warning("No performance results to summarize")
+    return(summary_data)
+  }
+
+  if (nrow(summary_data) == 0) {
+    warning("No performance results to summarize")
+    return(summary_data)
   }
 
   # Sort by mean kappa (descending)
@@ -1073,6 +1078,12 @@ generate_leftout_ovr_probability_matrices <- function(leftout_results, label_map
 
   for (outer_fold_id in outer_fold_ids) {
     fold_data <- leftout_results[leftout_results$outer_fold == outer_fold_id, ]
+    if (!"class_label" %in% colnames(fold_data)) {
+      if (!"class" %in% colnames(fold_data)) {
+        stop("Left-out OvR CSV missing class_label and class columns.")
+      }
+      fold_data$class_label <- label_mapping$Label[as.integer(fold_data$class) + 1L]
+    }
     class_labels <- unique(fold_data$class_label)
     if (nrow(fold_data) == 0 || length(class_labels) == 0) next
 
@@ -1232,14 +1243,21 @@ augment_fold_matrices_with_leftout <- function(known_fold_matrices, leftout_fold
 
 
 #' Build augmented ensemble matrices by combining per-model left-out predictions.
-#' Product-of-experts in probability space using the same global inner-CV weights.
+#' Uses the same global inner-CV weights and combine rule (PoE or simple average).
 #' @param known_ensemble_matrices List of fold -> ensemble prob matrix (known only)
 #' @param leftout_per_model List of model -> fold -> leftout prob matrix
 #' @param ensemble_weights Weights from inner CV for this analysis type
 #' @param type "cv" or "loso"
+#' @param ensemble_rule "poe" or "simple"
 #' @return List of fold -> augmented ensemble data.frame
-build_augmented_ensemble <- function(known_ensemble_matrices, leftout_per_model, ensemble_weights, type) {
-  cat("Building augmented ensemble matrices with left-out samples...\n")
+build_augmented_ensemble <- function(
+    known_ensemble_matrices, leftout_per_model, ensemble_weights, type,
+    ensemble_rule = c("poe", "simple")) {
+  ensemble_rule <- match.arg(ensemble_rule)
+  weights_key <- if (ensemble_rule == "simple") "global_simple_weights" else "global_weights"
+  rule_label <- if (ensemble_rule == "simple") "simple weighted average" else "product-of-experts"
+  combine_probs <- global_ensemble_combine_fn(ensemble_rule)
+  cat(sprintf("Building augmented %s ensemble matrices with left-out samples...\n", rule_label))
 
   fold_names <- unique(unlist(lapply(leftout_per_model, function(x) names(x))))
   augmented <- known_ensemble_matrices
@@ -1283,10 +1301,10 @@ build_augmented_ensemble <- function(known_ensemble_matrices, leftout_per_model,
       if (!col %in% prob_cols_nn)  nn_lo[[col]] <- 0
     }
 
-    # Get global weights for this fold
-    fold_weights <- ensemble_weights$global_weights[[fold_name]]
+    # Global inner-CV weights for this fold (PoE vs simple use different weight blocks)
+    fold_weights <- ensemble_weights[[weights_key]][[fold_name]]
     if (is.null(fold_weights)) {
-      cat(sprintf("  No global weights for fold %s, using equal weights\n", fold_name))
+      cat(sprintf("  No %s for fold %s, using equal weights\n", weights_key, fold_name))
       w_svm <- 1/3; w_xgb <- 1/3; w_nn <- 1/3
     } else {
       w <- fold_weights$weights
@@ -1294,16 +1312,12 @@ build_augmented_ensemble <- function(known_ensemble_matrices, leftout_per_model,
       w_xgb <- as.numeric(w$XGB)
       w_nn  <- as.numeric(w$NN)
     }
+    w_list <- list(SVM = w_svm, XGB = w_xgb, NN = w_nn)
 
-    eps <- 1e-12
-    ens_probs <- (pmax(as.matrix(svm_lo[, all_prob_cols]), eps) ^ w_svm) *
-      (pmax(as.matrix(xgb_lo[, all_prob_cols]), eps) ^ w_xgb) *
-      (pmax(as.matrix(nn_lo[, all_prob_cols]), eps) ^ w_nn)
-
-    # Normalise rows
-    row_sums <- rowSums(ens_probs, na.rm = TRUE)
-    row_sums[row_sums == 0] <- 1
-    ens_probs <- ens_probs / row_sums
+    svm_mat <- as.matrix(svm_lo[, all_prob_cols, drop = FALSE])
+    xgb_mat <- as.matrix(xgb_lo[, all_prob_cols, drop = FALSE])
+    nn_mat  <- as.matrix(nn_lo[, all_prob_cols, drop = FALSE])
+    ens_probs <- combine_probs(svm_mat, xgb_mat, nn_mat, w_list)
 
     ens_df <- data.frame(ens_probs)
     ens_df$y <- svm_lo$y
@@ -1400,7 +1414,8 @@ build_augmented_ensemble <- function(known_ensemble_matrices, leftout_per_model,
 
 #' Main function to run outer CV analysis
 #' @param merge_classes Whether to merge classes (MDS/TP53 -> MDS.r, other KMT2A -> other.KMT2A, MECOM -> MECOM)
-main_outer_cv <- function(merge_classes = FALSE) {
+main_outer_cv <- function(merge_classes = FALSE, merge_prob_method = c("sum", "max")) {
+  merge_prob_method <- match.arg(merge_prob_method)
   # Load required libraries
   load_library_quietly("plyr")
   load_library_quietly("dplyr")
@@ -1486,7 +1501,8 @@ main_outer_cv <- function(merge_classes = FALSE) {
             label_mapping,
             filtered_index_map_zero_based,
             filter_unseen_classes = TRUE,
-            merge_classes = merge_classes
+            merge_classes = merge_classes,
+            merge_prob_method = merge_prob_method
           )
         } else {
           result <- generate_outer_standard_probability_matrices(
@@ -1495,7 +1511,8 @@ main_outer_cv <- function(merge_classes = FALSE) {
             filtered_leukemia_subtypes,
             filtered_index_map_zero_based,
             filter_unseen_classes = TRUE,
-            merge_classes = merge_classes
+            merge_classes = merge_classes,
+            merge_prob_method = merge_prob_method
           )
         }
 
@@ -1551,14 +1568,21 @@ main_outer_cv <- function(merge_classes = FALSE) {
       next
     }
 
-    cat(sprintf("Processing %s ensemble (global product-of-experts)...\n", toupper(type)))
+    cat(sprintf("Processing %s ensemble models (PoE + simple weighted)...\n", toupper(type)))
     ensemble_matrices[[type]] <- list()
 
     global_product_ensemble <- apply_ensemble_weights_to_outer_cv(
-      outer_probability_matrices, ensemble_weights[[type]], type
+      outer_probability_matrices, ensemble_weights[[type]], type, ensemble_rule = "poe"
     )
     if (!is.null(global_product_ensemble)) {
       ensemble_matrices[[type]][["global_product_ensemble"]] <- global_product_ensemble
+    }
+
+    global_simple_ensemble <- apply_ensemble_weights_to_outer_cv(
+      outer_probability_matrices, ensemble_weights[[type]], type, ensemble_rule = "simple"
+    )
+    if (!is.null(global_simple_ensemble)) {
+      ensemble_matrices[[type]][["global_simple_ensemble"]] <- global_simple_ensemble
     }
 
   }
@@ -1574,6 +1598,12 @@ main_outer_cv <- function(merge_classes = FALSE) {
           all_probability_matrices[["Global_Product_Optimized"]] <- list()
         }
         all_probability_matrices[["Global_Product_Optimized"]][[type]] <- ensemble_matrices[[type]][["global_product_ensemble"]]
+      }
+      if ("global_simple_ensemble" %in% names(ensemble_matrices[[type]])) {
+        if (!"Global_Simple_Optimized" %in% names(all_probability_matrices)) {
+          all_probability_matrices[["Global_Simple_Optimized"]] <- list()
+        }
+        all_probability_matrices[["Global_Simple_Optimized"]][[type]] <- ensemble_matrices[[type]][["global_simple_ensemble"]]
       }
     }
   }
@@ -1664,22 +1694,27 @@ main_outer_cv <- function(merge_classes = FALSE) {
         }
       }
 
-      # Augmented product ensemble only
+      # Augmented PoE and simple ensembles (left-out rows combined per inner-CV weights)
       if (type %in% names(ensemble_weights)) {
         lo_per_model <- list()
         for (mn in c("svm", "xgboost", "neural_net")) {
           lo_per_model[[mn]] <- leftout_probability_matrices[[mn]][[type]]
         }
         has_all_lo <- all(sapply(lo_per_model, function(x) !is.null(x) && length(x) > 0))
-        ens_model <- "Global_Product_Optimized"
-        known_ens <- all_probability_matrices_raw[[ens_model]][[type]]
-        if (!is.null(known_ens)) {
+        for (ens_spec in list(
+          list(model = "Global_Product_Optimized", rule = "poe"),
+          list(model = "Global_Simple_Optimized", rule = "simple")
+        )) {
+          ens_model <- ens_spec$model
+          known_ens <- all_probability_matrices_raw[[ens_model]][[type]]
+          if (is.null(known_ens)) next
           if (is.null(all_augmented_matrices[[ens_model]])) {
             all_augmented_matrices[[ens_model]] <- list()
           }
           if (has_all_lo) {
             all_augmented_matrices[[ens_model]][[type]] <- build_augmented_ensemble(
-              known_ens, lo_per_model, ensemble_weights[[type]], type
+              known_ens, lo_per_model, ensemble_weights[[type]], type,
+              ensemble_rule = ens_spec$rule
             )
           } else {
             all_augmented_matrices[[ens_model]][[type]] <- known_ens
@@ -1695,38 +1730,48 @@ main_outer_cv <- function(merge_classes = FALSE) {
 
   # -------------------------------------------------------------------------
   # Fold bundles for R/calibration_reject_models.R (SCENARIO_KEY with_leftout_ood_aware):
-  # augmented Global_Product_Optimized folds + disagreement / ROI-style columns.
+  # augmented PoE + simple ensemble folds + disagreement / ROI-style columns.
   # No confidence_multivariate: nested script uses get_rejection_features_from_matrix() only.
   # -------------------------------------------------------------------------
-  CALIBRATION_MV_BASE_MODEL <- "Global_Product_Optimized"
-  CALIBRATION_MV_MODEL_LABEL <- "Global_Product_Optimized_augmented_disagreement_folds"
+  CALIBRATION_MV_BASE_MODELS <- c(
+    "Global_Product_Optimized", "Global_Simple_Optimized", "svm", "neural_net"
+  )
 
   multivariate_results <- list(with_leftout_ood_aware = list())
   if (!has_leftout_data || !exists("all_augmented_matrices")) {
     cat("\nSkipping with_leftout_ood_aware fold bundles (no left-out matrices).\n")
-  } else if (!CALIBRATION_MV_BASE_MODEL %in% names(all_augmented_matrices)) {
-    cat("\nSkipping with_leftout_ood_aware fold bundles (", CALIBRATION_MV_BASE_MODEL, " missing).\n", sep = "")
   } else {
-    cat(
-      "\n=== Augmented ensemble fold bundles (",
-      CALIBRATION_MV_BASE_MODEL,
-      "; for R/calibration_reject_models.R) ===\n",
-      sep = ""
-    )
-    multivariate_results$with_leftout_ood_aware[[CALIBRATION_MV_BASE_MODEL]] <- list()
-    for (type in c("cv", "loso")) {
-      if (!type %in% names(all_augmented_matrices[[CALIBRATION_MV_BASE_MODEL]])) next
-      ens_folds <- copy_fold_matrix_list(all_augmented_matrices[[CALIBRATION_MV_BASE_MODEL]][[type]])
-      if (!is.list(ens_folds) || length(ens_folds) < 2L) {
-        multivariate_results$with_leftout_ood_aware[[CALIBRATION_MV_BASE_MODEL]][[type]] <- NULL
-        next
-      }
-      cat(sprintf("  %s (%s): disagreement features on augmented folds...\n", toupper(type), CALIBRATION_MV_BASE_MODEL))
-      ens_folds <- compute_disagreement_features(ens_folds, all_augmented_matrices, type)
-      multivariate_results$with_leftout_ood_aware[[CALIBRATION_MV_BASE_MODEL]][[type]] <- list(
-        fold_matrices = ens_folds,
-        model_label = CALIBRATION_MV_MODEL_LABEL
+    available_mv_models <- intersect(CALIBRATION_MV_BASE_MODELS, names(all_augmented_matrices))
+    if (length(available_mv_models) == 0L) {
+      cat("\nSkipping with_leftout_ood_aware fold bundles (no augmented ensemble matrices).\n")
+    } else {
+      cat(
+        "\n=== Augmented ensemble fold bundles (",
+        paste(available_mv_models, collapse = ", "),
+        "; for R/calibration_reject_models.R) ===\n",
+        sep = ""
       )
+      for (calibration_mv_base_model in available_mv_models) {
+        calibration_mv_model_label <- paste0(calibration_mv_base_model, "_augmented_disagreement_folds")
+        multivariate_results$with_leftout_ood_aware[[calibration_mv_base_model]] <- list()
+        for (type in c("cv", "loso")) {
+          if (!type %in% names(all_augmented_matrices[[calibration_mv_base_model]])) next
+          ens_folds <- copy_fold_matrix_list(all_augmented_matrices[[calibration_mv_base_model]][[type]])
+          if (!is.list(ens_folds) || length(ens_folds) < 2L) {
+            multivariate_results$with_leftout_ood_aware[[calibration_mv_base_model]][[type]] <- NULL
+            next
+          }
+          cat(sprintf(
+            "  %s (%s): disagreement features on augmented folds...\n",
+            toupper(type), calibration_mv_base_model
+          ))
+          ens_folds <- compute_disagreement_features(ens_folds, all_augmented_matrices, type)
+          multivariate_results$with_leftout_ood_aware[[calibration_mv_base_model]][[type]] <- list(
+            fold_matrices = ens_folds,
+            model_label = calibration_mv_model_label
+          )
+        }
+      }
     }
   }
 
@@ -1769,9 +1814,11 @@ main_outer_cv <- function(merge_classes = FALSE) {
     multivariate_results = multivariate_results
   )
 
-  # Determine suffix for file paths (maxprob method - uses max probability instead of summing)
+  # Determine suffix for file paths (collapsed vocabulary differs by sum vs max combine rule)
   if (!merge_classes) {
     merge_suffix <- "_unmerged_maxprob"
+  } else if (merge_prob_method == "max") {
+    merge_suffix <- "_merged_maxprob"
   } else {
     merge_suffix <- "_merged_summed"
   }
@@ -1790,10 +1837,18 @@ main_outer_cv <- function(merge_classes = FALSE) {
     data.frame(key = "merge_suffix", value = merge_suffix, stringsAsFactors = FALSE),
     data.frame(key = "merge_classes", value = as.character(merge_classes), stringsAsFactors = FALSE),
     data.frame(key = "has_leftout_data", value = as.character(has_leftout_data), stringsAsFactors = FALSE),
-    data.frame(key = "global_ensemble_model", value = "Global_Product_Optimized (product-of-experts)", stringsAsFactors = FALSE),
+    data.frame(
+      key = "global_ensemble_models",
+      value = "Global_Product_Optimized (PoE), Global_Simple_Optimized (linear average)",
+      stringsAsFactors = FALSE
+    ),
     data.frame(
       key = "multivariate_results",
-      value = "with_leftout_ood_aware$Global_Product_Optimized: augmented folds + disagreement (R/calibration_reject_models.R)",
+      value = paste0(
+        "with_leftout_ood_aware$",
+        paste(CALIBRATION_MV_BASE_MODELS, collapse = "|"),
+        ": augmented folds + disagreement (R/calibration_reject_models.R)"
+      ),
       stringsAsFactors = FALSE
     ),
     data.frame(
@@ -1814,4 +1869,8 @@ main_outer_cv <- function(merge_classes = FALSE) {
 }
 
 outer_cv_results_unmerged <- main_outer_cv(merge_classes = FALSE)
-outer_cv_results_merged <- main_outer_cv(merge_classes = TRUE)
+outer_cv_results_merged <- main_outer_cv(merge_classes = TRUE, merge_prob_method = "sum")
+# merged_maxprob: collapsed vocabulary combined by max prob (SVM rejector analysis).
+# Reuses _merged_summed ensemble weights since ensemble/disagreement outputs are not
+# consumed by the deployed SVM rejectors (SVM-local + KNN features only).
+outer_cv_results_merged_maxprob <- main_outer_cv(merge_classes = TRUE, merge_prob_method = "max")

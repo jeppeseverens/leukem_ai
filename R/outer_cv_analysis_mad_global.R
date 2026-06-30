@@ -172,17 +172,20 @@ load_outer_cv_results <- function(file_path, classification_type) {
     return(NULL)
   }
 
-  results <- safe_read_file(file_path, function(f) data.frame(data.table::fread(f, sep = ","), row.names = 1))
+  results <- safe_read_file(file_path, read_cv_results_csv)
 
   if (is.null(results)) {
     warning(sprintf("Failed to load file: %s", file_path))
     return(NULL)
   }
 
+  if (nrow(results) == 0) {
+    warning(sprintf("Outer CV file has no data rows: %s", file_path))
+  }
+
   # For One-vs-Rest, add class labels if not present
   if (classification_type == "OvR" && !"class_label" %in% colnames(results)) {
-    # Load label mapping to add class labels
-    label_mapping <- safe_read_file("label_mapping_df_n10.csv", read.csv)
+    label_mapping <- safe_read_file("../data/label_mapping_all.csv", read.csv)
     if (!is.null(label_mapping)) {
       results$class_label <- label_mapping$Label[results$class + 1]
     }
@@ -533,26 +536,12 @@ apply_ensemble_weights_to_outer_cv <- function(outer_prob_matrices, ensemble_wei
     svm_weight <- ifelse(is.null(weights$SVM) || is.na(weights$SVM), 1, as.numeric(weights$SVM))
     xgb_weight <- ifelse(is.null(weights$XGB) || is.na(weights$XGB), 1, as.numeric(weights$XGB))
     nn_weight <- ifelse(is.null(weights$NN) || is.na(weights$NN), 1, as.numeric(weights$NN))
+    w_list <- list(SVM = svm_weight, XGB = xgb_weight, NN = nn_weight)
 
-    eps <- 1e-12
-    ensemble_matrix <- (pmax(svm_probs, eps) ^ svm_weight) *
-      (pmax(xgb_probs, eps) ^ xgb_weight) *
-      (pmax(nn_probs, eps) ^ nn_weight)
-
-    # Normalize probabilities
-    ensemble_matrix <- t(apply(ensemble_matrix, 1, function(row) {
-      # Replace any NA or infinite values with 0
-      row[is.na(row) | is.infinite(row)] <- 0
-
-      if (sum(row, na.rm = TRUE) > 0) {
-        row / sum(row, na.rm = TRUE)
-      } else {
-        # If all values are 0, set equal probabilities
-        rep(1/length(row), length(row))
-      }
-    }))
-
-    # Convert to data frame and add metadata
+    # Use shared PoE helper (rowSums); t(apply()) drops dimnames on large LOSO folds → X1..Xn preds.
+    ensemble_matrix <- product_of_experts_probs(
+      as.matrix(svm_probs), as.matrix(xgb_probs), as.matrix(nn_probs), w_list
+    )
     ensemble_matrix <- data.frame(ensemble_matrix)
 
     # Ensure all probability columns are numeric and replace any remaining NA values
@@ -732,6 +721,11 @@ summarize_outer_cv_performance <- function(performance_results) {
     )
 
     summary_data <- rbind(summary_data, summary_row)
+  }
+
+  if (nrow(summary_data) == 0) {
+    warning("No performance results to summarize")
+    return(summary_data)
   }
 
   # Sort by mean kappa (descending)
@@ -1072,6 +1066,12 @@ generate_leftout_ovr_probability_matrices <- function(leftout_results, label_map
 
   for (outer_fold_id in outer_fold_ids) {
     fold_data <- leftout_results[leftout_results$outer_fold == outer_fold_id, ]
+    if (!"class_label" %in% colnames(fold_data)) {
+      if (!"class" %in% colnames(fold_data)) {
+        stop("Left-out OvR CSV missing class_label and class columns.")
+      }
+      fold_data$class_label <- label_mapping$Label[as.integer(fold_data$class) + 1L]
+    }
     class_labels <- unique(fold_data$class_label)
     if (nrow(fold_data) == 0 || length(class_labels) == 0) next
 

@@ -53,6 +53,10 @@ def main():
              'Saves a separate CSV for use in left-out-aware rejection analysis.'
     )
     parser.add_argument(
+        '--skip_knn', action='store_true',
+        help='Do not compute KNN reject-feature columns (e.g. MAD-global ablation).'
+    )
+    parser.add_argument(
         '--knn_cache_dir',
         type=str,
         default=None,
@@ -71,8 +75,11 @@ def main():
     print(f"Best parameters from: {args.best_params_path}", flush=True)
     print(f"Feature selection method: {args.fs_method}", flush=True)
     print(f"Include left-out predictions: {args.include_leftout}", flush=True)
-    print(f"KNN cache dir: {args.knn_cache_dir or '(default)'}", flush=True)
-    print(f"KNN feature n_genes: {args.knn_n_genes}", flush=True)
+    print(f"Skip KNN reject features: {args.skip_knn}", flush=True)
+    knn_n_genes = None if args.skip_knn else args.knn_n_genes
+    if knn_n_genes is not None:
+        print(f"KNN cache dir: {args.knn_cache_dir or '(default)'}", flush=True)
+        print(f"KNN feature n_genes: {knn_n_genes}", flush=True)
     
     time = datetime.datetime.now().strftime("%Y%m%d_%H%M")
 
@@ -166,7 +173,7 @@ def main():
             model_type=args.model_type,
             fs_method=fs_method_lower,
             cache_dir=args.knn_cache_dir,
-            knn_n_genes=args.knn_n_genes,
+            knn_n_genes=knn_n_genes,
         )
     elif args.fold_type == "loso":
         print("Calling run_outer_cv_loso (loso fold type)...", flush=True)
@@ -176,7 +183,7 @@ def main():
             model_type=args.model_type,
             fs_method=fs_method_lower,
             cache_dir=args.knn_cache_dir,
-            knn_n_genes=args.knn_n_genes,
+            knn_n_genes=knn_n_genes,
         )
     else:
         raise ValueError(f"Fold type {args.fold_type} not supported.")
@@ -213,6 +220,25 @@ def main():
             )
 
         leftout_df = train_test.restore_labels(leftout_df, label_mapping)
+
+        # Known-fold CSVs already carry KNN reject features; leftout prediction
+        # paths do not, so backfill before R augments known + leftout matrices.
+        leftout_df = train_test.backfill_knn_columns_in_outer_leftout_results(
+            leftout_df,
+            X,
+            y,
+            study_labels,
+            X_leftout,
+            y_leftout,
+            study_leftout,
+            leftout_global_idx,
+            pipe,
+            fold_type=args.fold_type,
+            fs_method=fs_method_lower,
+            knn_n_genes=knn_n_genes,
+            cache_dir=args.knn_cache_dir,
+            strict=True,
+        )
 
         leftout_filename = f"{args.model_type}_outer_cv_{args.fold_type}_{args.multi_type}_leftout{fs_suffix}_{time}.csv"
         leftout_path = output_dir / leftout_filename

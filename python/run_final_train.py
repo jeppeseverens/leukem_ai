@@ -305,12 +305,7 @@ def main():
         )
 
         print("Predicting on left-out samples (final full-data model)...", flush=True)
-        # KNN reject features: reference = all included training samples.
-        knn_pipe = Pipeline([
-            ('DEseq2', transformers.DESeq2RatioNormalizer()),
-            ('feature_selection', feature_selector),
-            ('scaler', StandardScaler())
-        ])
+        knn_pipe = train_test.build_knn_rejection_pipe(fs_method=fs_method)
         leftout_knn_features = train_test.compute_knn_features_full_reference(
             X,
             y,

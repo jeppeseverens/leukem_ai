@@ -293,261 +293,12 @@ main_inner_cv <- function(merge_classes = FALSE, merge_prob_method = c("max", "s
     return(result)
   }
 
-  #' Perform One-vs-Rest ensemble analysis for each class separately (parallelized)
-  #' Uses the unified function from utility_functions.R
-  perform_ovr_ensemble_analysis <- function(results, weights, type = "cv") {
-    perform_ovr_ensemble_analysis_unified(results, weights, type, has_inner_folds = TRUE)
-  }
-
-  #' Generate One-vs-Rest optimized ensemble probability matrices
-  #' @param results Analysis results containing probability matrices
-  #' @param weights Weight configurations for ensemble
-  #' @param type Type of analysis ("cv" or "loso")
-  #' @param ensemble_performance Aggregated performance results from perform_ovr_ensemble_analysis
-  #' @return List containing optimized probability matrices and weights used for each outer fold
-  generate_ovr_optimized_ensemble_matrices <- function(results, weights, type = "cv", ensemble_performance) {
-    cat("Generating One-vs-Rest optimized ensemble probability matrices...\n")
-
-    outer_folds <- names(results$probability_matrices$svm[[type]])
-    optimized_matrices <- list()
-    weights_used <- list()  # Store weights used for each outer fold
-
-    # Create cache for aligned matrices
-    alignment_cache <- new.env(hash = TRUE)
-
-    for (outer_fold in outer_folds) {
-      cat(sprintf("  Creating OvR optimized matrices for outer fold %s...\n", outer_fold))
-
-      # Get best weight configuration for each class in this outer fold based on aggregated performance
-      fold_performance <- ensemble_performance[[outer_fold]]
-      if (is.null(fold_performance) || nrow(fold_performance) == 0) {
-        cat(sprintf("    Skipping outer fold %s - no performance data available\n", outer_fold))
-        next
-      }
-
-      # Get classes that actually have performance data (i.e., were present in this outer fold)
-      available_classes <- unique(fold_performance$class)
-
-      # Store weights used for each class in this outer fold
-      outer_fold_weights_used <- list()
-
-      # For each class, find the best ensemble weights based on mean F1 score
-      for (class_name in available_classes) {
-        class_performance <- fold_performance[fold_performance$class == class_name, ]
-
-        if (nrow(class_performance) > 0) {
-          # Use the weights with the highest mean F1 score for this class
-          best_weight_indices <- which.max(class_performance$mean_f1_score)
-          best_weight_name <- class_performance$weights[best_weight_indices]
-
-          # Ensure we have a single weight name (take first if multiple)
-          if (length(best_weight_name) > 1) {
-            best_weight_name <- best_weight_name[1]
-            cat(sprintf("    Warning: Multiple best weights found for class %s, using first one\n", class_name))
-          }
-
-          # Validate weight name
-          if (is.null(best_weight_name) || is.na(best_weight_name) || length(best_weight_name) == 0 || best_weight_name == "") {
-            cat(sprintf("    Warning: Invalid weight name for class %s, using default weights\n", class_name))
-            best_weights <- weights[["ALL"]]
-            best_weight_name <- "ALL"
-          } else if (!best_weight_name %in% names(weights)) {
-            cat(sprintf("    Warning: Weight '%s' not found in weights list for class %s, using default weights\n", best_weight_name, class_name))
-            best_weights <- weights[["ALL"]]
-            best_weight_name <- "ALL"
-          } else {
-            best_weights <- weights[[best_weight_name]]
-          }
-
-          # Store the weight configuration used for this class
-          outer_fold_weights_used[[class_name]] <- list(
-            weight_name = best_weight_name,
-            weights = best_weights,
-            mean_f1_score = max(class_performance$mean_f1_score, na.rm = TRUE)
-          )
-
-          cat(sprintf("    Best weights for class %s: %s (F1=%.4f)\n",
-                      class_name, best_weight_name, max(class_performance$mean_f1_score, na.rm = TRUE)))
-        }
-      }
-
-      # Now generate optimized matrices for each inner fold using the selected weights
-      inner_folds <- names(results$probability_matrices$svm[[type]][[outer_fold]])
-      inner_fold_matrices <- list()
-
-      for (inner_fold in inner_folds) {
-        cat(sprintf("    Creating optimized matrix for inner fold %s...\n", inner_fold))
-
-        # Use cached alignment
-        aligned_matrices <- align_probability_matrices_cached(
-          results$probability_matrices, outer_fold, inner_fold, type, alignment_cache
-        )
-        if (is.null(aligned_matrices)) {
-          cat(sprintf("      Skipping outer fold %s, inner fold %s - unable to align matrices\n", outer_fold, inner_fold))
-          next
-        }
-
-        # Convert to matrices once for efficiency
-        prob_mat_SVM <- as.matrix(aligned_matrices$svm)
-        prob_mat_XGB <- as.matrix(aligned_matrices$xgboost)
-        prob_mat_NN <- as.matrix(aligned_matrices$neural_net)
-        non_prob_cols <- aligned_matrices$non_prob_cols
-
-        # Get all class names
-        all_classes <- colnames(aligned_matrices$svm)
-
-        # Initialize optimized probability matrix
-        optimized_matrix <- matrix(0, nrow = nrow(prob_mat_SVM), ncol = length(all_classes))
-        colnames(optimized_matrix) <- all_classes
-
-        # For each class, use the selected best weights for this outer fold
-        for (class_name in all_classes) {
-          # Clean class name for matching
-          clean_class_name <- gsub("Class.", "", class_name)
-          clean_class_name_no_dots <- gsub("\\.", "", clean_class_name)
-
-          # Find the weights to use for this class
-          best_weights <- NULL
-          if (clean_class_name %in% names(outer_fold_weights_used)) {
-            best_weights <- outer_fold_weights_used[[clean_class_name]]$weights
-          } else if (clean_class_name_no_dots %in% names(outer_fold_weights_used)) {
-            best_weights <- outer_fold_weights_used[[clean_class_name_no_dots]]$weights
-          } else {
-            # Try partial matching
-            matching_classes <- names(outer_fold_weights_used)[
-              grepl(clean_class_name, names(outer_fold_weights_used), ignore.case = TRUE) |
-                grepl(clean_class_name_no_dots, names(outer_fold_weights_used), ignore.case = TRUE)
-            ]
-            if (length(matching_classes) > 0) {
-              best_weights <- outer_fold_weights_used[[matching_classes[1]]]$weights
-            }
-          }
-
-          # Use default weights if no specific weights found for this class
-          if (is.null(best_weights)) {
-            cat(sprintf("      Using default weights for class %s (not present in outer fold performance)\n", clean_class_name))
-            best_weights <- weights[["ALL"]]
-          }
-
-          # Calculate weighted ensemble probabilities for this class using matrix operations
-          class_col_idx <- which(all_classes == class_name)
-          optimized_matrix[, class_col_idx] <- prob_mat_SVM[, class_col_idx] * best_weights$SVM +
-            prob_mat_XGB[, class_col_idx] * best_weights$XGB +
-            prob_mat_NN[, class_col_idx] * best_weights$NN
-        }
-
-        # Normalize probabilities to sum to 1 for each sample
-        row_sums <- rowSums(optimized_matrix)
-        optimized_matrix <- optimized_matrix / row_sums
-
-        # Convert to data frame and add true labels
-        optimized_matrix <- data.frame(optimized_matrix)
-        optimized_matrix <- cbind(optimized_matrix, non_prob_cols)
-
-        inner_fold_matrices[[inner_fold]] <- optimized_matrix
-      }
-
-      optimized_matrices[[outer_fold]] <- inner_fold_matrices
-      weights_used[[outer_fold]] <- outer_fold_weights_used
-    }
-
-    # Return both matrices and weights used
-    list(
-      matrices = optimized_matrices,
-      weights_used = weights_used
+  #' Perform global ensemble optimization using overall kappa.
+  #' @param ensemble_rule "poe" (product-of-experts) or "simple" (linear weighted average)
+  perform_global_ensemble_analysis <- function(results, weights, type = "cv", ensemble_rule = c("poe", "simple")) {
+    perform_global_ensemble_analysis_unified(
+      results, weights, type, has_inner_folds = TRUE, ensemble_rule = ensemble_rule
     )
-  }
-
-  #' Calculate multiclass performance from One-vs-Rest ensemble matrices
-  #' @param ovr_ensemble_result Result from generate_ovr_optimized_ensemble_matrices containing matrices and weights
-  #' @param type Type of analysis ("cv" or "loso")
-  #' @return Data frame with multiclass performance metrics for each outer fold and inner fold
-  analyze_ovr_ensemble_multiclass_performance <- function(ovr_ensemble_result, type = "cv") {
-    cat("Analyzing One-vs-Rest ensemble multiclass performance...\n")
-
-    # Extract optimized matrices from the result structure
-    optimized_matrices <- ovr_ensemble_result$matrices
-
-    performance_results <- list()
-
-    for (outer_fold_name in names(optimized_matrices)) {
-      cat(sprintf("  Analyzing outer fold %s...\n", outer_fold_name))
-
-      # Check if this is the nested structure [outer_fold][inner_fold]
-      outer_fold_data <- optimized_matrices[[outer_fold_name]]
-
-      if (is.list(outer_fold_data) && !is.data.frame(outer_fold_data)) {
-        # This is the new nested structure - iterate through inner folds
-        inner_fold_results <- list()
-
-        for (inner_fold_name in names(outer_fold_data)) {
-          cat(sprintf("    Analyzing inner fold %s...\n", inner_fold_name))
-
-          # Get the optimized matrix for this inner fold
-          optimized_matrix <- outer_fold_data[[inner_fold_name]]
-
-          # Extract true labels and remove from probability matrix
-          truth <- optimized_matrix$y
-          prob_matrix <- optimized_matrix[, !colnames(optimized_matrix) %in% c("y", "inner_fold", "outer_fold", "indices", "study"), drop = FALSE]
-
-          # Get predictions (class with highest probability)
-          preds <- colnames(prob_matrix)[apply(prob_matrix, 1, which.max)]
-
-          # Clean class labels
-          truth <- gsub("Class.", "", truth)
-          preds <- gsub("Class.", "", preds)
-
-          # Ensure all classes are represented
-          all_classes <- unique(c(truth, preds))
-          truth <- factor(truth, levels = all_classes)
-          preds <- factor(preds, levels = all_classes)
-
-          # Calculate confusion matrix and metrics
-          cm <- caret::confusionMatrix(preds, truth)
-
-          inner_fold_results[[inner_fold_name]] <- cm
-        }
-
-        performance_results[[outer_fold_name]] <- inner_fold_results
-
-      } else {
-        # This is the old flat structure - handle as before
-        cat(sprintf("  Analyzing fold %s (old structure)...\n", outer_fold_name))
-
-        # Get the optimized matrix for this fold
-        optimized_matrix <- outer_fold_data
-
-        # Extract true labels and remove from probability matrix
-        truth <- optimized_matrix$y
-        prob_matrix <- optimized_matrix[, !colnames(optimized_matrix) %in% c("y", "inner_fold", "outer_fold", "indices", "study"), drop = FALSE]
-
-        # Get predictions (class with highest probability)
-        preds <- colnames(prob_matrix)[apply(prob_matrix, 1, which.max)]
-
-        # Clean class labels
-        truth <- gsub("Class.", "", truth)
-        preds <- gsub("Class.", "", preds)
-
-        # Ensure all classes are represented
-        all_classes <- unique(c(truth, preds))
-        truth <- factor(truth, levels = all_classes)
-        preds <- factor(preds, levels = all_classes)
-
-        # Calculate confusion matrix and metrics
-        cm <- caret::confusionMatrix(preds, truth)
-
-        performance_results[[outer_fold_name]] <- cm
-      }
-    }
-
-    # Return all fold results
-    performance_results
-  }
-
-  #' Perform global ensemble optimization (product-of-experts) using overall kappa.
-  #' Weight grid search matches outer CV application: p ∝ Π_m p_m^{w_m}.
-  perform_global_ensemble_analysis <- function(results, weights, type = "cv") {
-    perform_global_ensemble_analysis_unified(results, weights, type, has_inner_folds = TRUE)
   }
 
   #' Generate globally optimized ensemble probability matrices
@@ -555,9 +306,14 @@ main_inner_cv <- function(merge_classes = FALSE, merge_prob_method = c("max", "s
   #' @param weights Weight configurations for ensemble
   #' @param type Type of analysis ("cv" or "loso")
   #' @param ensemble_performance Aggregated performance results from perform_global_ensemble_analysis
+  #' @param ensemble_rule "poe" or "simple"
   #' @return List containing optimized probability matrices and weights used for each outer fold
-  generate_global_optimized_ensemble_matrices <- function(results, weights, type = "cv", ensemble_performance) {
-    cat("Generating globally optimized ensemble probability matrices...\n")
+  generate_global_optimized_ensemble_matrices <- function(
+      results, weights, type = "cv", ensemble_performance, ensemble_rule = c("poe", "simple")) {
+    ensemble_rule <- match.arg(ensemble_rule)
+    combine_probs <- global_ensemble_combine_fn(ensemble_rule)
+    rule_label <- if (ensemble_rule == "simple") "simple weighted" else "product-of-experts"
+    cat(sprintf("Generating globally optimized ensemble probability matrices (%s)...\n", rule_label))
 
     outer_folds <- names(results$probability_matrices$svm[[type]])
     optimized_matrices <- list()
@@ -612,8 +368,7 @@ main_inner_cv <- function(merge_classes = FALSE, merge_prob_method = c("max", "s
         prob_mat_NN <- as.matrix(aligned_matrices$neural_net)
         non_prob_cols <- aligned_matrices$non_prob_cols
 
-        # Product-of-experts (same rule as outer_cv_analysis.r)
-        optimized_matrix <- product_of_experts_probs(
+        optimized_matrix <- combine_probs(
           prob_mat_SVM, prob_mat_XGB, prob_mat_NN, best_weights
         )
 
@@ -746,30 +501,51 @@ main_inner_cv <- function(merge_classes = FALSE, merge_prob_method = c("max", "s
         next
       }
 
-      # Perform global ensemble analysis
+      # Product-of-experts global ensemble
       global_ensemble_results <- perform_global_ensemble_analysis(
         list(probability_matrices = probability_matrices),
         weights,
-        analysis_type
+        analysis_type,
+        ensemble_rule = "poe"
       )
-
-      # Generate globally optimized ensemble matrices
       global_optimized_ensemble_matrices <- generate_global_optimized_ensemble_matrices(
         list(probability_matrices = probability_matrices),
         weights,
         analysis_type,
-        global_ensemble_results
+        global_ensemble_results,
+        ensemble_rule = "poe"
+      )
+      global_optimized_ensemble_performance <- analyze_optimized_ensemble_performance(
+        global_optimized_ensemble_matrices, analysis_type
       )
 
-      # Analyze globally optimized ensemble performance
-      global_optimized_ensemble_performance <- analyze_optimized_ensemble_performance(global_optimized_ensemble_matrices, analysis_type)
+      # Simple weighted-average global ensemble (same weight grid, different combine rule)
+      global_simple_ensemble_results <- perform_global_ensemble_analysis(
+        list(probability_matrices = probability_matrices),
+        weights,
+        analysis_type,
+        ensemble_rule = "simple"
+      )
+      global_simple_optimized_ensemble_matrices <- generate_global_optimized_ensemble_matrices(
+        list(probability_matrices = probability_matrices),
+        weights,
+        analysis_type,
+        global_simple_ensemble_results,
+        ensemble_rule = "simple"
+      )
+      global_simple_optimized_ensemble_performance <- analyze_optimized_ensemble_performance(
+        global_simple_optimized_ensemble_matrices, analysis_type
+      )
 
-      # Store results for this analysis type (OvR ensemble removed; Global only)
       results[[analysis_type]] <- list(
         global_ensemble_results = global_ensemble_results,
         global_optimized_ensemble_matrices = global_optimized_ensemble_matrices,
         global_optimized_ensemble_performance = global_optimized_ensemble_performance,
-        global_ensemble_weights_used = global_optimized_ensemble_matrices$weights_used
+        global_ensemble_weights_used = global_optimized_ensemble_matrices$weights_used,
+        global_simple_ensemble_results = global_simple_ensemble_results,
+        global_simple_optimized_ensemble_matrices = global_simple_optimized_ensemble_matrices,
+        global_simple_optimized_ensemble_performance = global_simple_optimized_ensemble_performance,
+        global_simple_ensemble_weights_used = global_simple_optimized_ensemble_matrices$weights_used
       )
     }
 
@@ -828,13 +604,15 @@ main_inner_cv <- function(merge_classes = FALSE, merge_prob_method = c("max", "s
     )
   }
 
-  # Ensemble method performance (Global only; OvR removed)
+  # Global ensemble methods (PoE and simple weighted average)
   ensemble_methods <- list(
-    "Global_Optimized" = results$global_optimized_ensemble_performance
+    "Global_Product_Optimized" = results$global_optimized_ensemble_performance,
+    "Global_Simple_Optimized" = results$global_simple_optimized_ensemble_performance
   )
 
     for (method_name in names(ensemble_methods)) {
       method_performance <- ensemble_methods[[method_name]]
+      if (is.null(method_performance)) next
       all_kappas <- c()
 
       for (outer_fold in outer_folds) {
@@ -899,10 +677,10 @@ main_inner_cv <- function(merge_classes = FALSE, merge_prob_method = c("max", "s
         next
       }
 
-      # Create results list for performance comparison (Global only)
       comparison_results <- list(
         probability_matrices = results$probability_matrices,
-        global_optimized_ensemble_performance = results[[analysis_type]]$global_optimized_ensemble_performance
+        global_optimized_ensemble_performance = results[[analysis_type]]$global_optimized_ensemble_performance,
+        global_simple_optimized_ensemble_performance = results[[analysis_type]]$global_simple_optimized_ensemble_performance
       )
 
       # Compare all ensemble methods and display mean kappa across folds

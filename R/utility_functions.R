@@ -63,7 +63,12 @@ combine_csv_files <- function(directory_path) {
   }
 
   combined_results <- lapply(csv_files, function(file) {
-   data.frame(data.table::fread(file, sep = ",", drop = 1))
+    dt <- data.table::fread(file, sep = ",")
+    # Drop only R write.csv row-index column (unnamed); keep named Python export columns.
+    if (ncol(dt) > 0 && names(dt)[1] == "") {
+      dt <- dt[, -1]
+    }
+    as.data.frame(dt)
   })
 
   # Remove NULL results from failed reads
@@ -120,11 +125,32 @@ REJECT_OPTION_EXTRA_FEATURE_COLUMNS <- c(
   "conformal_set_size_90"
 )
 
+# Metadata + calibration scores that must never be treated as class probabilities.
+PROB_MATRIX_META_COLUMNS <- c(
+  "y", "inner_fold", "outer_fold", "indices", "study", "sample_indices",
+  "confidence_multivariate",
+  "confidence_id", "confidence_correct", "confidence_two_head",
+  "confidence_seen_new_cohort", "confidence_unseen", "confidence_three_head",
+  "confidence_two_head_postcal", "confidence_two_head_min_gate", "confidence_two_head_id_veto",
+  "is_leftout", "n_models_agree", "top1_prob_variance_across_models",
+  KNN_DISTANCE_COLUMNS, REJECT_OPTION_EXTRA_FEATURE_COLUMNS
+)
+
+#' Read inner/outer CV result CSV exported by pandas (embedded array/JSON fields).
+#' fread splits on commas inside preds_prob; base read.csv respects quoting.
+read_cv_results_csv <- function(file_path) {
+  df <- read.csv(file_path, stringsAsFactors = FALSE)
+  if ("X" %in% names(df)) {
+    df$X <- NULL
+  }
+  df
+}
+
 #' Read CSV files and optionally process for One-vs-One classification
 #' @param file_path Path to the CSV file
 #' @return Data frame with processed data
 read_and_process_csv <- function(file_path) {
-  data_frame <- safe_read_file(file_path, function(f) data.frame(data.table::fread(f)))
+  data_frame <- safe_read_file(file_path, read_cv_results_csv)
 
   if (is.null(data_frame)) {
     stop(sprintf("Failed to read file: %s", file_path))
@@ -174,24 +200,28 @@ ensure_all_class_columns <- function(prob_matrix, label_mapping) {
 #' @param group_by_outer_fold Whether to group by outer_fold in addition to params (TRUE for inner_cv, FALSE for train_test)
 #' @return Processed data frame
 process_neural_net_results <- function(nn_results, group_by_outer_fold = TRUE) {
-  # Extract best_epoch as numeric
-  nn_results$epochs <- str_match(nn_results$params, "best_epoch': np\\.int64\\((\\d+)\\)")[,2] |> as.integer()
+  # Extract best_epoch as numeric (Python CSV may use int or np.int64)
+  nn_results$epochs <- stringr::str_match(
+    nn_results$params,
+    "['\"]?best_epoch['\"]?\\s*:\\s*(?:np\\.int64\\()?([0-9]+)"
+  )[, 2] |> as.integer()
 
   # Remove best_epoch from param string
   nn_results$params <- gsub(", 'best_epoch'.+", "", nn_results$params)
 
   # Add mean best_epoch per group back into param string
   if (group_by_outer_fold && "outer_fold" %in% colnames(nn_results)) {
-    nn_results %>%
+    nn_results <- nn_results %>%
       group_by(outer_fold, params) %>%
       mutate(params = paste0(params, ", 'best_epoch': ", round(mean(epochs)), "}")) %>%
       ungroup()
   } else {
-    nn_results %>%
+    nn_results <- nn_results %>%
       group_by(params) %>%
       mutate(params = paste0(params, ", 'best_epoch': ", round(mean(epochs)), "}")) %>%
       ungroup()
   }
+  nn_results
 }
 
 # =============================================================================
@@ -461,10 +491,27 @@ product_of_experts_probs <- function(prob_mat_SVM, prob_mat_XGB, prob_mat_NN, we
   poe / row_sums
 }
 
+#' Simple linear ensemble: p(class) = Σ_m w_m * p_m(class), row-normalised.
+#' @param weights Named list with SVM, XGB, NN convex weights (same grid as PoE)
+simple_weighted_probs <- function(prob_mat_SVM, prob_mat_XGB, prob_mat_NN, weights) {
+  weighted <- pmax(prob_mat_SVM, 0) * weights$SVM +
+    pmax(prob_mat_XGB, 0) * weights$XGB +
+    pmax(prob_mat_NN, 0) * weights$NN
+  row_sums <- rowSums(weighted)
+  row_sums[row_sums == 0] <- 1
+  weighted / row_sums
+}
+
+#' Resolve global ensemble combination rule to the corresponding function.
+global_ensemble_combine_fn <- function(ensemble_rule = c("poe", "simple")) {
+  ensemble_rule <- match.arg(ensemble_rule)
+  if (ensemble_rule == "simple") simple_weighted_probs else product_of_experts_probs
+}
+
 #' Load ensemble weights used for outer fold analysis
 #' @param weights_base_dir Base directory containing saved weights
 #' @param analysis_type Type of analysis ("cv" or "loso")
-#' @return List containing OvR and global ensemble weights
+#' @return List containing global ensemble weights (PoE and simple)
 load_ensemble_weights <- function(weights_base_dir, analysis_type = "cv") {
   cat(sprintf("Loading ensemble weights for %s analysis...\n", toupper(analysis_type)))
 
@@ -476,50 +523,17 @@ load_ensemble_weights <- function(weights_base_dir, analysis_type = "cv") {
 
   weights_data <- list()
 
-  # Load OvR ensemble weights
-  ovr_weights_file <- file.path(weights_dir, "ovr_ensemble_weights_used.csv")
-  if (file.exists(ovr_weights_file)) {
-    ovr_weights_df <- read.csv(ovr_weights_file, stringsAsFactors = FALSE)
-
-    # Convert back to nested list structure
-    ovr_weights <- list()
-    for (i in 1:nrow(ovr_weights_df)) {
-      row <- ovr_weights_df[i, ]
-      fold <- as.character(row$fold)
-      class <- row$class
-
-      if (!fold %in% names(ovr_weights)) {
-        ovr_weights[[fold]] <- list()
-      }
-
-      ovr_weights[[fold]][[class]] <- list(
-        weight_name = row$weight_name,
-        weights = list(
-          SVM = row$svm_weight,
-          XGB = row$xgb_weight,
-          NN = row$nn_weight
-        ),
-        f1_score = if ("f1_score" %in% names(row)) row$f1_score else row$mean_f1_score
-      )
+  parse_global_weights_csv <- function(filename) {
+    global_weights_file <- file.path(weights_dir, filename)
+    if (!file.exists(global_weights_file)) {
+      warning(sprintf("Global weights file not found: %s", global_weights_file))
+      return(NULL)
     }
-
-    weights_data$ovr_weights <- ovr_weights
-    cat(sprintf("  Loaded OvR weights from: %s\n", ovr_weights_file))
-  } else {
-    warning(sprintf("OvR weights file not found: %s", ovr_weights_file))
-  }
-
-  # Load global ensemble weights
-  global_weights_file <- file.path(weights_dir, "global_ensemble_weights_used.csv")
-  if (file.exists(global_weights_file)) {
     global_weights_df <- read.csv(global_weights_file, stringsAsFactors = FALSE)
-
-    # Convert to nested list structure
     global_weights <- list()
-    for (i in 1:nrow(global_weights_df)) {
+    for (i in seq_len(nrow(global_weights_df))) {
       row <- global_weights_df[i, ]
       fold <- as.character(row$fold)
-
       global_weights[[fold]] <- list(
         weight_name = row$weight_name,
         weights = list(
@@ -530,12 +544,12 @@ load_ensemble_weights <- function(weights_base_dir, analysis_type = "cv") {
         kappa = if ("kappa" %in% names(row)) row$kappa else row$mean_kappa
       )
     }
-
-    weights_data$global_weights <- global_weights
     cat(sprintf("  Loaded global weights from: %s\n", global_weights_file))
-  } else {
-    warning(sprintf("Global weights file not found: %s", global_weights_file))
+    global_weights
   }
+
+  weights_data$global_weights <- parse_global_weights_csv("global_ensemble_weights_used.csv")
+  weights_data$global_simple_weights <- parse_global_weights_csv("global_simple_ensemble_weights_used.csv")
 
   return(weights_data)
 }
@@ -566,71 +580,15 @@ save_ensemble_weights <- function(ensemble_results, output_base_dir, save_per_fo
     }
     create_directory_safely(weights_output_dir)
 
-    # Save OvR ensemble weights
-    if ("ovr_ensemble_weights_used" %in% names(ensemble_results[[analysis_type]])) {
-      ovr_weights <- ensemble_results[[analysis_type]]$ovr_ensemble_weights_used
+    save_global_weights_block <- function(weights_key, output_filename) {
+      if (!weights_key %in% names(ensemble_results[[analysis_type]])) return(invisible(NULL))
 
-      ovr_weights_df <- data.frame()
-
-      if (save_per_fold) {
-        # Save weights for each fold (inner_cv style)
-        for (fold_name in names(ovr_weights)) {
-          fold_weights <- ovr_weights[[fold_name]]
-
-          for (class_name in names(fold_weights)) {
-            class_weight_info <- fold_weights[[class_name]]
-
-            ovr_weights_df <- rbind(ovr_weights_df, data.frame(
-              fold = fold_name,
-              class = class_name,
-              weight_name = class_weight_info$weight_name,
-              svm_weight = class_weight_info$weights$SVM,
-              xgb_weight = class_weight_info$weights$XGB,
-              nn_weight = class_weight_info$weights$NN,
-              f1_score = if (!is.null(class_weight_info$mean_f1_score)) class_weight_info$mean_f1_score else class_weight_info$f1_score,
-              stringsAsFactors = FALSE
-            ))
-          }
-        }
-      } else {
-        # Save global weights per class (train_test style - use first fold as representative)
-        first_fold_name <- names(ovr_weights)[1]
-        if (!is.null(first_fold_name)) {
-          fold_weights <- ovr_weights[[first_fold_name]]
-
-          for (class_name in names(fold_weights)) {
-            class_weight_info <- fold_weights[[class_name]]
-
-            ovr_weights_df <- rbind(ovr_weights_df, data.frame(
-              class = class_name,
-              weight_name = class_weight_info$weight_name,
-              svm_weight = class_weight_info$weights$SVM,
-              xgb_weight = class_weight_info$weights$XGB,
-              nn_weight = class_weight_info$weights$NN,
-              mean_f1_score = if (!is.null(class_weight_info$f1_score)) class_weight_info$f1_score else class_weight_info$mean_f1_score,
-              stringsAsFactors = FALSE
-            ))
-          }
-        }
-      }
-
-      # Save OvR weights
-      ovr_weights_file <- file.path(weights_output_dir, "ovr_ensemble_weights_used.csv")
-      write.csv(ovr_weights_df, ovr_weights_file, row.names = FALSE)
-      cat(sprintf("  Saved OvR weights: %s\n", ovr_weights_file))
-    }
-
-    # Save global ensemble weights
-    if ("global_ensemble_weights_used" %in% names(ensemble_results[[analysis_type]])) {
-      global_weights <- ensemble_results[[analysis_type]]$global_ensemble_weights_used
-
+      global_weights <- ensemble_results[[analysis_type]][[weights_key]]
       global_weights_df <- data.frame()
 
       if (save_per_fold) {
-        # Save weights for each fold (inner_cv style)
         for (fold_name in names(global_weights)) {
           fold_weight_info <- global_weights[[fold_name]]
-
           global_weights_df <- rbind(global_weights_df, data.frame(
             fold = fold_name,
             weight_name = fold_weight_info$weight_name,
@@ -642,11 +600,9 @@ save_ensemble_weights <- function(ensemble_results, output_base_dir, save_per_fo
           ))
         }
       } else {
-        # Save single global weight (train_test style - use first fold as representative)
         first_fold_name <- names(global_weights)[1]
         if (!is.null(first_fold_name)) {
           fold_weight_info <- global_weights[[first_fold_name]]
-
           global_weights_df <- data.frame(
             weight_name = fold_weight_info$weight_name,
             svm_weight = fold_weight_info$weights$SVM,
@@ -658,11 +614,13 @@ save_ensemble_weights <- function(ensemble_results, output_base_dir, save_per_fo
         }
       }
 
-      # Save global weights
-      global_weights_file <- file.path(weights_output_dir, "global_ensemble_weights_used.csv")
+      global_weights_file <- file.path(weights_output_dir, output_filename)
       write.csv(global_weights_df, global_weights_file, row.names = FALSE)
       cat(sprintf("  Saved global weights: %s\n", global_weights_file))
     }
+
+    save_global_weights_block("global_ensemble_weights_used", "global_ensemble_weights_used.csv")
+    save_global_weights_block("global_simple_ensemble_weights_used", "global_simple_ensemble_weights_used.csv")
   }
 }
 
@@ -792,11 +750,7 @@ align_probability_matrices <- function(prob_matrices, outer_fold_name, inner_fol
   # Keep all sample-level metadata out of probability columns.
   # `sample_indices` is critical in left-out-aware paths and must never be
   # interpreted as a class probability feature.
-  meta_col_names <- c(
-    "y", "inner_fold", "outer_fold", "indices", "sample_indices", "study", "is_leftout",
-    "n_models_agree", "top1_prob_variance_across_models",
-    KNN_DISTANCE_COLUMNS, REJECT_OPTION_EXTRA_FEATURE_COLUMNS
-  )
+  meta_col_names <- PROB_MATRIX_META_COLUMNS
 
   non_prob_cols <- svm_matrix[, colnames(svm_matrix) %in% meta_col_names, drop = FALSE]
 
@@ -1201,92 +1155,6 @@ evaluate_single_weight_global <- function(weight_config, weight_name, prob_df_SV
   )
 }
 
-#' Evaluate a single weight configuration for OvR ensemble (matrix version)
-#' @param weight_config Named list with SVM, XGB, NN weights
-#' @param weight_name Name of this weight configuration
-#' @param class_name Name of the class being evaluated
-#' @param prob_mat_SVM SVM probability matrix
-#' @param prob_mat_XGB XGBoost probability matrix
-#' @param prob_mat_NN Neural net probability matrix
-#' @param class_col_idx Column index for the class in the matrices
-#' @param truth Factor of true labels
-#' @param outer_fold Outer fold identifier
-#' @param inner_fold Inner fold identifier
-#' @param type Type of analysis
-#' @return Data frame row with OvR ensemble performance for this weight/class combination
-evaluate_single_weight_ovr_matrix <- function(weight_config, weight_name, class_name, prob_mat_SVM, prob_mat_XGB, prob_mat_NN, class_col_idx, truth, outer_fold, inner_fold, type) {
-  # Calculate weighted ensemble probabilities for this class only using matrix operations
-  class_probs <- prob_mat_SVM[, class_col_idx] * weight_config$SVM +
-    prob_mat_XGB[, class_col_idx] * weight_config$XGB +
-    prob_mat_NN[, class_col_idx] * weight_config$NN
-
-  # Vectorized binary predictions: class vs not class
-  binary_preds <- ifelse(class_probs > 0.5, "Class", "Not_Class")
-
-  # Vectorized binary truth: class vs not class
-  binary_truth <- ifelse(truth == class_name, "Class", "Not_Class")
-
-  # Use fast binary metrics calculation
-  metrics <- fast_binary_metrics(binary_preds, binary_truth)
-
-  data.frame(
-    outer_fold = outer_fold,
-    inner_fold = inner_fold,
-    weights = weight_name,
-    type = type,
-    class = gsub("Class.", "", class_name),
-    sensitivity = metrics["sensitivity"],
-    specificity = metrics["specificity"],
-    balanced_accuracy = metrics["balanced_accuracy"],
-    f1_score = metrics["f1_score"],
-    prevalence = metrics["prevalence"],
-    stringsAsFactors = FALSE,
-    row.names = NULL
-  )
-}
-
-#' Evaluate a single weight configuration for OvR ensemble (backward compatibility)
-#' @param weight_config Named list with SVM, XGB, NN weights
-#' @param weight_name Name of this weight configuration
-#' @param class_name Name of the class being evaluated
-#' @param prob_df_SVM SVM probability data frame
-#' @param prob_df_XGB XGBoost probability data frame
-#' @param prob_df_NN Neural net probability data frame
-#' @param truth Factor of true labels
-#' @param outer_fold Outer fold identifier
-#' @param inner_fold Inner fold identifier
-#' @param type Type of analysis
-#' @return Data frame row with OvR ensemble performance for this weight/class combination
-evaluate_single_weight_ovr <- function(weight_config, weight_name, class_name, prob_df_SVM, prob_df_XGB, prob_df_NN, truth, outer_fold, inner_fold, type) {
-  # Convert to matrices and find class column index
-  prob_mat_SVM <- as.matrix(prob_df_SVM)
-  prob_mat_XGB <- as.matrix(prob_df_XGB)
-  prob_mat_NN <- as.matrix(prob_df_NN)
-  class_col_idx <- which(colnames(prob_df_SVM) == class_name)
-
-  if (length(class_col_idx) == 0) {
-    stop(sprintf("Class %s not found in probability matrices", class_name))
-  }
-
-  evaluate_single_weight_ovr_matrix(
-    weight_config, weight_name, class_name,
-    prob_mat_SVM, prob_mat_XGB, prob_mat_NN, class_col_idx, truth,
-    outer_fold, inner_fold, type
-  )
-}
-
-#' Create all weight-class combinations for OvR evaluation
-#' @param weights List of weight configurations
-#' @param all_classes Vector of class names
-#' @return Data frame with all combinations
-create_weight_class_combinations <- function(weights, all_classes) {
-  expand.grid(
-    weight_idx = seq_along(weights),
-    class_name = all_classes,
-    stringsAsFactors = FALSE
-  )
-}
-
 # =============================================================================
 # Batch Weight Evaluation Functions
 # =============================================================================
@@ -1303,10 +1171,15 @@ create_weight_class_combinations <- function(weights, all_classes) {
 #' @param inner_fold Inner fold identifier
 #' @param type Type of analysis
 #' @return Data frame with ensemble performance for all weight configs
-evaluate_batch_weights_global <- function(weights, prob_mat_SVM, prob_mat_XGB, prob_mat_NN, class_names, truth, outer_fold, inner_fold, type) {
-  # Pre-compute PoE ensemble matrices for every weight grid point
+evaluate_batch_weights_global <- function(
+    weights, prob_mat_SVM, prob_mat_XGB, prob_mat_NN, class_names, truth,
+    outer_fold, inner_fold, type, ensemble_rule = c("poe", "simple")) {
+  ensemble_rule <- match.arg(ensemble_rule)
+  combine_probs <- global_ensemble_combine_fn(ensemble_rule)
+
+  # Pre-compute ensemble matrices for every weight grid point
   weighted_matrices <- lapply(weights, function(w) {
-    product_of_experts_probs(prob_mat_SVM, prob_mat_XGB, prob_mat_NN, w)
+    combine_probs(prob_mat_SVM, prob_mat_XGB, prob_mat_NN, w)
   })
 
   # Pre-compute cleaned truth once (used for all weights)
@@ -1339,69 +1212,6 @@ evaluate_batch_weights_global <- function(weights, prob_mat_SVM, prob_mat_XGB, p
       stringsAsFactors = FALSE
     )
   }, weighted_matrices, names(weights), SIMPLIFY = FALSE)
-
-  # Combine all results
-  do.call(rbind, results_list)
-}
-
-#' Batch evaluate all weight-class combinations for OvR ensemble
-#' Pre-computes all weighted probability matrices, then evaluates metrics
-#' @param weights List of weight configurations
-#' @param prob_mat_SVM SVM probability matrix
-#' @param prob_mat_XGB XGBoost probability matrix
-#' @param prob_mat_NN Neural net probability matrix
-#' @param all_classes Vector of all class names
-#' @param truth Factor of true labels
-#' @param outer_fold Outer fold identifier
-#' @param inner_fold Inner fold identifier
-#' @param type Type of analysis
-#' @return Data frame with OvR ensemble performance for all weight/class combinations
-evaluate_batch_weights_ovr <- function(weights, prob_mat_SVM, prob_mat_XGB, prob_mat_NN, all_classes, truth, outer_fold, inner_fold, type) {
-  # Create all weight-class combinations
-  combinations <- create_weight_class_combinations(weights, all_classes)
-
-  # Pre-compute class column indices for faster access
-  class_col_indices <- match(combinations$class_name, all_classes)
-
-  # Pre-compute all weighted probability matrices (one per weight)
-  weighted_matrices <- lapply(weights, function(w) {
-    prob_mat_SVM * w$SVM + prob_mat_XGB * w$XGB + prob_mat_NN * w$NN
-  })
-
-  # Evaluate all weight-class combinations
-  results_list <- lapply(seq_len(nrow(combinations)), function(idx) {
-    weight_idx <- combinations$weight_idx[idx]
-    class_name <- combinations$class_name[idx]
-    class_col_idx <- class_col_indices[idx]
-    weight_name <- names(weights)[weight_idx]
-
-    # Get weighted probabilities for this class from pre-computed matrix
-    class_probs <- weighted_matrices[[weight_idx]][, class_col_idx]
-
-    # Vectorized binary predictions: class vs not class
-    binary_preds <- ifelse(class_probs > 0.5, "Class", "Not_Class")
-
-    # Vectorized binary truth: class vs not class
-    binary_truth <- ifelse(truth == class_name, "Class", "Not_Class")
-
-    # Use fast binary metrics calculation
-    metrics <- fast_binary_metrics(binary_preds, binary_truth)
-
-    data.frame(
-      outer_fold = outer_fold,
-      inner_fold = inner_fold,
-      weights = weight_name,
-      type = type,
-      class = gsub("Class.", "", class_name),
-      sensitivity = metrics["sensitivity"],
-      specificity = metrics["specificity"],
-      balanced_accuracy = metrics["balanced_accuracy"],
-      f1_score = metrics["f1_score"],
-      prevalence = metrics["prevalence"],
-      stringsAsFactors = FALSE,
-      row.names = NULL
-    )
-  })
 
   # Combine all results
   do.call(rbind, results_list)
@@ -1453,10 +1263,13 @@ align_probability_matrices_cached <- function(prob_matrices, outer_fold_name, in
 #' @param type Type of analysis ("cv" or "loso")
 #' @param has_inner_folds Whether data has inner fold nesting (TRUE for inner_cv, FALSE for train_test)
 #' @return List of performance metrics for each outer fold and weight configuration
-perform_global_ensemble_analysis_unified <- function(results, weights, type = "cv", has_inner_folds = TRUE) {
+perform_global_ensemble_analysis_unified <- function(
+    results, weights, type = "cv", has_inner_folds = TRUE, ensemble_rule = c("poe", "simple")) {
+  ensemble_rule <- match.arg(ensemble_rule)
+  rule_label <- if (ensemble_rule == "simple") "simple weighted average" else "product-of-experts"
   cat(sprintf(
-    "Performing global ensemble analysis (product-of-experts, %s)...\n",
-    ifelse(has_inner_folds, "with inner folds", "train/test")
+    "Performing global ensemble analysis (%s, %s)...\n",
+    rule_label, ifelse(has_inner_folds, "with inner folds", "train/test")
   ))
 
   outer_folds <- names(results$probability_matrices$svm[[type]])
@@ -1490,7 +1303,7 @@ perform_global_ensemble_analysis_unified <- function(results, weights, type = "c
         # Batch evaluate all weights at once
         fold_results <- evaluate_batch_weights_global(
           weights, prob_mat_SVM, prob_mat_XGB, prob_mat_NN, class_names, truth,
-          outer_fold, inner_fold, type
+          outer_fold, inner_fold, type, ensemble_rule = ensemble_rule
         )
         all_weight_results[[length(all_weight_results) + 1]] <- fold_results
       }
@@ -1529,118 +1342,12 @@ perform_global_ensemble_analysis_unified <- function(results, weights, type = "c
       # Batch evaluate all weights at once
       weight_results <- evaluate_batch_weights_global(
         weights, prob_mat_SVM, prob_mat_XGB, prob_mat_NN, class_names, truth,
-        outer_fold, NA, type
+        outer_fold, NA, type, ensemble_rule = ensemble_rule
       )
 
       if (nrow(weight_results) > 0) {
         weight_results$inner_fold <- NULL
         return(weight_results)
-      }
-    }
-    return(NULL)
-  }
-
-  # Process outer folds
-  df_list <- list()
-  for (outer_fold in outer_folds) {
-    cat(sprintf("  Processing outer fold %s...\n", outer_fold))
-    df_list[[outer_fold]] <- process_outer_fold(outer_fold)
-  }
-
-  df_list
-}
-
-#' Perform OvR ensemble analysis (unified for both inner_cv and train_test)
-#' @param results Analysis results containing probability matrices
-#' @param weights Weight configurations for ensemble
-#' @param type Type of analysis ("cv" or "loso")
-#' @param has_inner_folds Whether data has inner fold nesting (TRUE for inner_cv, FALSE for train_test)
-#' @return List of performance metrics for each outer fold, weight, and class
-perform_ovr_ensemble_analysis_unified <- function(results, weights, type = "cv", has_inner_folds = TRUE) {
-  cat(sprintf("Performing OvR ensemble analysis (%s)...\n", ifelse(has_inner_folds, "with inner folds", "train/test")))
-
-  outer_folds <- names(results$probability_matrices$svm[[type]])
-
-  # Create cache for aligned matrices
-  alignment_cache <- new.env(hash = TRUE)
-
-  # Helper function to process a single outer fold
-  process_outer_fold <- function(outer_fold) {
-    # Pre-allocate list to collect results (avoid rbind in loops)
-    all_combo_results <- list()
-
-    if (has_inner_folds) {
-      # Inner CV: iterate over inner folds
-      inner_folds <- names(results$probability_matrices$svm[[type]][[outer_fold]])
-
-      for (inner_fold in inner_folds) {
-        # Use cached alignment
-        aligned_matrices <- align_probability_matrices_cached(
-          results$probability_matrices, outer_fold, inner_fold, type, alignment_cache
-        )
-        if (is.null(aligned_matrices)) next
-
-        # Convert to matrices once for efficiency
-        prob_mat_SVM <- as.matrix(aligned_matrices$svm)
-        prob_mat_XGB <- as.matrix(aligned_matrices$xgboost)
-        prob_mat_NN <- as.matrix(aligned_matrices$neural_net)
-        truth <- make.names(aligned_matrices$non_prob_cols$y)
-        all_classes <- colnames(aligned_matrices$svm)
-
-        # Batch evaluate all weight-class combinations at once
-        fold_results <- evaluate_batch_weights_ovr(
-          weights, prob_mat_SVM, prob_mat_XGB, prob_mat_NN, all_classes, truth,
-          outer_fold, inner_fold, type
-        )
-        all_combo_results[[length(all_combo_results) + 1]] <- fold_results
-      }
-
-      # Combine all results at once
-      if (length(all_combo_results) > 0) {
-        all_results_df <- do.call(rbind, all_combo_results)
-
-        # Aggregate across inner folds
-        aggregated_results <- all_results_df %>%
-          dplyr::group_by(outer_fold, weights, type, class) %>%
-          dplyr::summarise(
-            mean_sensitivity = mean(sensitivity, na.rm = TRUE),
-            mean_specificity = mean(specificity, na.rm = TRUE),
-            mean_balanced_accuracy = mean(balanced_accuracy, na.rm = TRUE),
-            mean_f1_score = mean(f1_score, na.rm = TRUE),
-            mean_prevalence = mean(prevalence, na.rm = TRUE),
-            sd_sensitivity = sd(sensitivity, na.rm = TRUE),
-            sd_specificity = sd(specificity, na.rm = TRUE),
-            sd_balanced_accuracy = sd(balanced_accuracy, na.rm = TRUE),
-            sd_f1_score = sd(f1_score, na.rm = TRUE),
-            sd_prevalence = sd(prevalence, na.rm = TRUE),
-            n_inner_folds = dplyr::n(),
-            .groups = "drop"
-          )
-        return(aggregated_results)
-      }
-    } else {
-      # Train/test: no inner folds
-      aligned_matrices <- align_probability_matrices_cached(
-        results$probability_matrices, outer_fold, NULL, type, alignment_cache
-      )
-      if (is.null(aligned_matrices)) return(NULL)
-
-      # Convert to matrices once for efficiency
-      prob_mat_SVM <- as.matrix(aligned_matrices$svm)
-      prob_mat_XGB <- as.matrix(aligned_matrices$xgboost)
-      prob_mat_NN <- as.matrix(aligned_matrices$neural_net)
-      truth <- make.names(aligned_matrices$non_prob_cols$y)
-      all_classes <- colnames(aligned_matrices$svm)
-
-      # Batch evaluate all weight-class combinations at once
-      combo_results <- evaluate_batch_weights_ovr(
-        weights, prob_mat_SVM, prob_mat_XGB, prob_mat_NN, all_classes, truth,
-        outer_fold, NA, type
-      )
-
-      if (nrow(combo_results) > 0) {
-        combo_results$inner_fold <- NULL
-        return(combo_results)
       }
     }
     return(NULL)

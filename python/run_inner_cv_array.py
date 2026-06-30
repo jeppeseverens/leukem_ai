@@ -66,6 +66,10 @@ def main():
             'type': str,
             'default': 'mad',
             'help': 'Feature selection: "mad", "mad_global" (pooled MAD), or "eta2" (eta2_subtype - eta2_study)'
+        },
+        'include_nos': {
+            'action': 'store_true',
+            'help': 'Keep "AML NOS" as a trainable class (default: excluded).'
         }
     }
 
@@ -100,7 +104,9 @@ def main():
     base_path = Path(__file__).resolve().parent
     data_path = base_path.parent / "data"
     X, y, study_labels = train_test.load_data(data_path)
-    X, y, study_labels = train_test.filter_data(X, y, study_labels, min_n = 10)
+    X, y, study_labels = train_test.filter_data(X, y, study_labels, min_n = 10, include_nos = args.include_nos)
+    if args.include_nos:
+        print("Including 'AML NOS' as a trainable class (--include_nos).")
     y, label_mapping = train_test.encode_labels(y)
 
     # Define the model and parameter grid (same as original, then adapt n_genes if needed)
